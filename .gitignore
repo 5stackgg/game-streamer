@@ -1,0 +1,6 @@
+# local-only config + secrets
+.env
+src/.env
+
+# macOS
+.DS_Store

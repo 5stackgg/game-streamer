@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+# Flow 2 — launch CS2 via running Steam (so it auto-updates) and start the
+# match-capture stream.
+#
+# Prerequisite: Steam must already be logged in (run flow 1 first and watch
+# the debug stream until you see the friends list / main window).
+#
+# Required env:
+#   MATCH_ID
+#   PLAYCAST_URL                              *or*
+#   CONNECT_TV_ADDR + CONNECT_TV_PASSWORD     *or*
+#   CONNECT_ADDR + CONNECT_PASSWORD
+
+set -uo pipefail
+SCRIPT_TAG=run-live
+
+# shellcheck disable=SC1091
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/common.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/xorg.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/stream.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/audio.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/steam.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/openhud.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/status-reporter.sh"
+
+load_env
+require_env MATCH_ID
+
+# Idempotent — re-attaches to the daemon spawned by setup-steam if it's
+# already running, otherwise starts one (e.g. when run-live is invoked
+# standalone without a preceding setup-steam in the same pod).
+start_status_reporter
+
+# The api's GameStreamerService picks ONE of three connection modes
+# and emits the corresponding env vars (see buildConnectEnv there).
+# We match those three modes here, in the same priority order:
+#   1. PLAYCAST_URL                              — usePlaycast setting
+#   2. CONNECT_TV_ADDR + CONNECT_TV_PASSWORD     — server has a TV port
+#   3. CONNECT_ADDR + CONNECT_PASSWORD           — fallback (game port)
+# `CS2_CONNECT_*` are the values we hand to live_autoexec / launch args.
+if [ -n "${PLAYCAST_URL:-}" ]; then
+  CS2_CONNECT_MODE=playcast
+elif [ -n "${CONNECT_TV_ADDR:-}" ]; then
+  CS2_CONNECT_MODE=connect
+  CS2_CONNECT_ADDR="$CONNECT_TV_ADDR"
+  CS2_CONNECT_PASSWORD="${CONNECT_TV_PASSWORD:-}"
+elif [ -n "${CONNECT_ADDR:-}" ]; then
+  CS2_CONNECT_MODE=connect
+  CS2_CONNECT_ADDR="$CONNECT_ADDR"
+  CS2_CONNECT_PASSWORD="${CONNECT_PASSWORD:-}"
+else
+  die "no connect target — set PLAYCAST_URL, or CONNECT_TV_ADDR+CONNECT_TV_PASSWORD, or CONNECT_ADDR+CONNECT_PASSWORD"
+fi
+
+: "${FPS:=30}"
+: "${VIDEO_KBPS:=6000}"
+: "${CS2_LAUNCH_TIMEOUT:=300}"
+: "${CS2_WINDOW_TIMEOUT:=300}"
+
+: "${DEBUG_STREAM_ID:=debug}"
+
+if [ "${DEBUG_CAPTURE:-0}" = "1" ]; then
+  say "0. debug capture stream"
+  start_xorg
+  # debug stream is video-only — audio not useful for visual debugging
+  # and avoids contending for the cs2 sink.
+  start_capture "$DEBUG_STREAM_ID" 30 4000 true 0
+  log "watch debug: https://hls.5stack.gg/${DEBUG_STREAM_ID}/"
+fi
+
+# ---------------------------------------------------------------------------
+say "1. preflight"
+steam_pipe_up || die "Steam isn't running. Run flow 1 (setup-steam) first."
+log "  steam pipe up (pid $(cat "$HOME/.steam/steam.pid"))"
+xorg_running || die "Xorg isn't up. Run flow 1 (setup-steam) first."
+log "  xorg up on $DISPLAY"
+
+# Real Steam needs the genuine steamclient.so for IPC; restore if gbe_fork
+# is in the way from a prior session.
+restore_real_steamclient
+
+# ---------------------------------------------------------------------------
+say "2. clean up stale CS2 / capture for this match"
+pkill -9 -f '/linuxsteamrt64/cs2'   2>/dev/null || true
+stop_capture "$MATCH_ID"
+sleep 1
+rm -f /tmp/source_engine_*.lock
+rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
+      "$CS2_DIR/game/bin/linuxsteamrt64/steam_appid.txt" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+say "3. write CS2 autoexec"
+CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
+mkdir -p "$CS2_CFG_DIR"
+# Write to BOTH autoexec.cfg and live_autoexec.cfg.
+#   autoexec.cfg is auto-loaded by cs2 at engine init — no launch arg
+#                required. This is the path that actually gets honored
+#                in CS2 (Source 2); +exec from a launch arg is being
+#                silently dropped, observed by no `executed live_autoexec`
+#                line in cs2's log after multiple launches.
+#   live_autoexec.cfg is kept for compatibility with the original script.
+# Spectator-UI hide block. We *want* CS2's built-in player HUD + VGUI
+# off so only the OpenHud overlay is captured, but the obvious convars
+# for that — cl_drawhud, r_drawvgui, spec_show_xray,
+# cl_show_observer_crosshair, cl_obs_interp_enable — are all
+# sv_cheats-gated. Setting them here applies them at engine init, then
+# the moment cs2 connects to a real (sv_cheats 0) match server cs2
+# silently reverts them to defaults. The bottom Panorama spectator
+# timeline has no convar at all. Hiding the rest of the spectator UI
+# requires HLAE/mirv_pgl injection, which we don't run.
+#
+# Net effect: from cfg we can ONLY drive auto-director here. The HUD
+# bleed-through under the OpenHud overlay is a known limitation; OpenHud
+# elements that overlap CS2's HUD will hide it where they do, and the
+# rest is visible.
+read -r -d '' HIDE_UI_CMDS <<'EOF' || true
+// Keep audio + engine running when cs2 doesn't have keyboard focus.
+// We raise the OpenHud overlay above cs2 immediately after launch, so
+// cs2 is never the focused window — defaults of `snd_mute_losefocus 1`
+// and `engine_no_focus_sleep > 0` would otherwise mute cs2's audio
+// pipeline (silent cs2.monitor capture even though pulse is wired up
+// correctly) and throttle its tick rate. Neither is sv_cheats-gated.
+snd_mute_losefocus 0
+engine_no_focus_sleep 0
+volume 1.0
+EOF
+
+# Static spec keybinds (F1-F5). The spec-server sends these keys via
+# xdotool to drive observer actions without opening the dev console.
+# Per-player binds (F6-F12) are appended below from the match metadata
+# after seed_openhud_db runs.
+SPEC_BINDS_BLOCK="$(spec_static_binds_block)"
+
+# Drop a curated observer.cfg next to the autoexec when OpenHud is in
+# use. The cfg sets the spectator-side cosmetics (crosshair, HUD scale,
+# safezone, radar, viewmodel) the operator wants applied to every
+# game-streamer broadcast. Since OpenHud is our default workflow now,
+# we always copy + exec it when the binary exists; if OpenHud isn't
+# installed (image without the openhud build stage), we skip both the
+# copy and the `exec observer.cfg` line so cs2 doesn't log a "missing
+# cfg" warning each launch.
+OBSERVER_SRC="$SRC_DIR/../resources/observer.cfg"
+EXEC_OBSERVER=""
+if [ -x "${OPENHUD_BIN:-/opt/openhud/openhud}" ] && [ -f "$OBSERVER_SRC" ]; then
+  cp -f "$OBSERVER_SRC" "$CS2_CFG_DIR/observer.cfg"
+  log "  wrote $CS2_CFG_DIR/observer.cfg (from $OBSERVER_SRC)"
+  EXEC_OBSERVER="exec observer.cfg"
+fi
+
+if [ "$CS2_CONNECT_MODE" = "playcast" ]; then
+  cat > "$CS2_CFG_DIR/autoexec.cfg" <<EOF
+// auto-generated by src/flows/run-live.sh — playcast mode
+con_enable 1
+$HIDE_UI_CMDS
+$EXEC_OBSERVER
+$SPEC_BINDS_BLOCK
+playcast "$PLAYCAST_URL"
+EOF
+  log "  playcast: $PLAYCAST_URL"
+else
+  cat > "$CS2_CFG_DIR/autoexec.cfg" <<EOF
+// auto-generated by src/flows/run-live.sh — connect mode
+con_enable 1
+$HIDE_UI_CMDS
+$EXEC_OBSERVER
+$SPEC_BINDS_BLOCK
+password "$CS2_CONNECT_PASSWORD"
+connect $CS2_CONNECT_ADDR
+EOF
+  log "  connect: $CS2_CONNECT_ADDR"
+fi
+
+# Write the OpenHud GSI cfg so cs2 starts POSTing game state to the
+# already-running OpenHud server. Always written even if the server
+# isn't up — cs2 will just retry on the timeout interval and the HUD
+# will start updating once OpenHud catches up.
+say "3b. OpenHud GSI cfg + DB seed"
+write_openhud_gsi_cfg
+seed_openhud_db "$MATCH_ID"
+
+# Per-player spec binds. Appends `bind "F<n>" "spec_player_by_accountid <id>"`
+# lines to the autoexec from the just-cached seed JSON (written by
+# seed_openhud_db to $LOG_DIR/openhud-seed-match.json) and drops the
+# accountid -> keysym map at $LOG_DIR/spec-bindings.json for the
+# spec-server to read at request time. Falls through silently if the
+# seed file is missing — the static binds still drive cycling.
+say "3c. CS2 spec per-player binds"
+write_spec_player_binds \
+  "$LOG_DIR/openhud-seed-match.json" \
+  "$CS2_CFG_DIR/autoexec.cfg" \
+  "$LOG_DIR/spec-bindings.json"
+
+# Mirror the (now fully assembled) autoexec into live_autoexec.cfg so
+# +exec live_autoexec from the launch args picks up the same binds.
+cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
+log "  wrote $CS2_CFG_DIR/autoexec.cfg + live_autoexec.cfg"
+
+# CS2 dlopen()s libpangoft2-1.0.so without the .0 suffix; pre-link.
+for base in libpangoft2-1.0 libpango-1.0; do
+  if [ ! -e "$CS2_DIR/game/bin/linuxsteamrt64/${base}.so" ] \
+     && [ -e "$CS2_DIR/game/bin/linuxsteamrt64/${base}.so.0" ]; then
+    ln -sf "${base}.so.0" "$CS2_DIR/game/bin/linuxsteamrt64/${base}.so" || true
+  fi
+done
+
+# Match the original working invocation: cd into the cs2 binary dir
+# before launching. Original observed: cwd matters for some of cs2's
+# rpath-relative resolutions during Steam's launch handoff.
+CS2_BIN="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
+[ -x "$CS2_BIN" ] || die "CS2 binary missing at $CS2_BIN"
+cd "$(dirname "$CS2_BIN")"
+
+# ---------------------------------------------------------------------------
+say "4. launch CS2"
+report_status status=launching_cs2
+# Force cs2's audio to the null sink we capture from. Without this,
+# cs2 may pick a cached different sink (or no sink at all in headless)
+# and we'd capture silence from cs2.monitor. PULSE_SINK is honored by
+# the PulseAudio client lib at startup of the app.
+export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
+# Steam's -applaunch wrapper scrubs XDG_RUNTIME_DIR before exec'ing
+# cs2 — without this, cs2's libpulse can't find the unix socket and
+# logs `pa_context_connect() failed: Connection refused`, falls back
+# to ALSA (which has no devices in the container), and produces no
+# audio. PULSE_SERVER=tcp:host:port is an absolute coordinate the
+# wrapper can't drop. Set in audio.sh once the tcp listener loads.
+: "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
+export PULSE_SERVER
+log "  PULSE_SINK=$PULSE_SINK PULSE_SERVER=$PULSE_SERVER (cs2 audio routes here)"
+
+do_applaunch() {
+  # Three independent paths trigger the connect — whichever cs2 honors
+  # first wins:
+  #   1) autoexec.cfg in cfg/ — cs2 auto-loads this at engine init
+  #   2) +exec live_autoexec  — explicit cfg execution via launch arg
+  #   3) +connect / +password — direct launch args, run after engine init
+  #
+  # Windowed-borderless (`-windowed -noborder`) — required so the
+  # OpenHud Electron overlay (alwaysOnTop) actually composites on top.
+  # Exclusive `-fullscreen` grabs the X display in a way that prevents
+  # other X clients from stacking above cs2; OpenHud's instructions
+  # also explicitly call for "WindowedFullscreen mode".
+  local cs2_args=(
+    -windowed -noborder -width 1920 -height 1080 -novid -nojoy -console
+    +exec live_autoexec)
+  if [ "$CS2_CONNECT_MODE" = "playcast" ]; then
+    cs2_args+=(+playcast "$PLAYCAST_URL")
+  else
+    cs2_args+=(+password "$CS2_CONNECT_PASSWORD" +connect "$CS2_CONNECT_ADDR")
+  fi
+
+  if [ "${LAUNCH_CS2_DIRECT:-0}" = "1" ]; then
+    # Bypass Steam's -applaunch handoff. cs2 reads steamclient.so
+    # via $HOME/.steam/sdk64/ and talks to the running Steam
+    # directly; -applaunch was dropping our +connect args silently.
+    local cs2_bin="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
+    log "  exec (DIRECT): $cs2_bin ${cs2_args[*]}"
+    cd "$CS2_DIR/game/bin/linuxsteamrt64"
+    nohup "$cs2_bin" "${cs2_args[@]}" >>"$LOG_DIR/cs2_launch.log" 2>&1 &
+    log "  cs2 direct launch (pid=$!)"
+  else
+    local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
+    log "  exec: ${cmd[*]}"
+    nohup "${cmd[@]}" >>"$LOG_DIR/cs2_launch.log" 2>&1 &
+    log "  applaunch sent (launcher pid=$!)"
+  fi
+}
+do_applaunch
+RELAUNCH_DONE=0
+
+# Wait for cs2 process. Two side-effects on each iteration:
+#  - poke the Steam window with Return: dismisses the focused button on
+#    any modal CEF dialog (cloud-out-of-date, "Launching ... shaders", etc).
+#  - every 15s, dump the open X windows + cs2/launcher state so the
+#    operator can see what Steam is actually showing right now.
+CS2_PID=""
+for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
+  CS2_PID=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
+  [ -n "$CS2_PID" ] && break
+
+  # Auto-poke: Space dismisses Steam's CEF dialogs (cloud-out-of-date,
+  # shader pre-cache) by activating the default-focused button. Bounded
+  # to the first 90s of the wait — covers a late-appearing dialog while
+  # cs2 is downloading cloud files. cs2 spawn breaks the loop so this
+  # never fires once the game is up.
+  if [ "$i" -ge 3 ] && [ "$i" -le 90 ] && [ $(( i % 5 )) -eq 0 ]; then
+    poke_steam_dialog
+  fi
+
+  [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
+
+  # Fallback: if cs2 still hasn't spawned after 30s, re-issue applaunch
+  # once. Steam sometimes ignores the very first applaunch on a fresh
+  # login (logs "Steam is already running, command line was forwarded"
+  # but never spawns cs2). A second applaunch reliably kicks it.
+  if [ "$i" = 30 ] && [ "$RELAUNCH_DONE" = 0 ]; then
+    log "  30s without cs2 — re-issuing -applaunch (one-shot fallback)"
+    do_applaunch
+    RELAUNCH_DONE=1
+  fi
+  sleep 1
+done
+[ -n "$CS2_PID" ] || {
+  log "--- $LOG_DIR/cs2_launch.log ---"
+  tail -40 "$LOG_DIR/cs2_launch.log"
+  log "--- $STEAM_LIBRARY/steam/logs/console-linux.txt ---"
+  tail -20 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null || true
+  die "Steam never spawned cs2 in ${CS2_LAUNCH_TIMEOUT}s"
+}
+log "  cs2 pid=$CS2_PID"
+ln -sf "$STEAM_LIBRARY/steam/logs/console-linux.txt" "$LOG_DIR/cs2.log" 2>/dev/null || true
+
+# cs2 is up — hide Steam's main UI + Friends List so any missed
+# clicks (e.g. from the shader-skip auto-handler) don't fall through
+# to Steam buttons behind the dialog. Modal dialogs Steam pops on top
+# (shader pre-cache, etc.) remain visible since they're separate
+# X windows; only the persistent Steam UI gets hidden.
+minimize_steam_windows
+
+# ---------------------------------------------------------------------------
+say "5. wait for CS2 window"
+report_status status=connecting_to_game
+WIN=""
+for i in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
+  WIN=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
+    | awk '/"Counter-Strike 2"/{print $1; exit}')
+  [ -n "$WIN" ] && { log "  window after ${i}s: $WIN"; break; }
+  if ! kill -0 "$CS2_PID" 2>/dev/null; then
+    dump_log "$LOG_DIR/cs2.log"
+    die "cs2 EXITED early."
+  fi
+  [ $(( i % 15 )) -eq 0 ] && log "  still waiting for cs2 window (${i}s, pid=$CS2_PID alive)"
+  sleep 1
+done
+[ -n "$WIN" ] || {
+  log "cs2.log tail:"
+  tail -60 "$LOG_DIR/cs2.log" 2>/dev/null
+  die "no CS2 window after ${CS2_WINDOW_TIMEOUT}s"
+}
+
+# ---------------------------------------------------------------------------
+# Re-open + raise the OpenHud overlay AFTER cs2 has a window. Two
+# things happen here:
+#   1) `POST /api/overlay/start` (added by openhud/auto-overlay.patch)
+#      closes any existing HUD window and creates a fresh one. The
+#      auto-open at openhud-startup fired before any GSI data existed
+#      and before any match metadata had been seeded — that empty
+#      first-page-load is what the user used to "fix" by clicking the
+#      Overlay admin button. Doing it programmatically here, after
+#      cs2 is connected and GSI is starting to fire, gives the HUD a
+#      page load against populated state — same effect as the click.
+#   2) position_openhud_overlay moves+sizes+raises the new window so
+#      it sits on top of cs2 in the X stack and ximagesrc captures
+#      both composited.
+say "5b. (re-)open + raise OpenHud overlay above cs2"
+if openhud_running; then
+  log "  triggering /api/overlay/start so HUD reloads with fresh game state"
+  if curl -fsS -m 5 -X POST -o /dev/null \
+       "http://${OPENHUD_HOST:-127.0.0.1}:${OPENHUD_PORT:-1349}/api/overlay/start"; then
+    log "    overlay start ok"
+    # Brief pause: createHudWindow returns immediately but the
+    # BrowserWindow's first paint takes a moment to land in X.
+    sleep 1
+  else
+    warn "    overlay start request failed — falling back to repositioning existing window"
+  fi
+  position_openhud_overlay || warn "overlay positioning failed — HUD may not be visible in stream"
+else
+  log "OpenHud not running — skipping overlay positioning"
+fi
+
+# NOTE: do NOT windowactivate / windowfocus cs2 here.
+#
+# The patched OpenHud (see openhud/Dockerfile) builds the overlay
+# BrowserWindow with `focusable: false` and removes its 200ms refocus
+# call, so the overlay can never take keyboard focus — cs2 holds focus
+# naturally from the moment it launches. The spec-server's plain
+# `xdotool key` calls (XTest -> focused window) reach cs2 directly.
+#
+# Calling `xdotool windowactivate --sync` here is actively harmful: it
+# forces XRaiseWindow on cs2 which IGNORES Openbox's layer model,
+# pushing cs2 above the overlay's _NET_WM_STATE_ABOVE layer. Verified
+# live in pod — that one line was what made cs2 cover the HUD in the
+# captured frame, even though the HUD was alpha-correct and unfocused.
+
+say "6. start match capture stream"
+# 5th arg = 1 → include PulseAudio leg (cs2.monitor → AAC → mpegts mux)
+start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1
+
+# Stream is publishing to mediamtx — surface the SRT publish URL on the
+# match_streams row and flip is_live=true via the API. The viewer-facing
+# HLS URL is set by the API at row-insert time on `link`.
+report_status status=live \
+  "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
+
+say "done"
+log "watch:    https://hls.5stack.gg/${MATCH_ID}/"
+log "cs2 log:  $LOG_DIR/cs2.log"
+log "gst log:  $LOG_DIR/gst-${MATCH_ID}.log"
+log "stop:     src/game-streamer.sh stop-live"
+
+# Keep the K8s Job in a running state — the api decides when the stream
+# is over by deleting the Job (stopLive). If we exit 0 here the Job
+# would mark Succeeded and the pod would be torn down mid-match.
+# We don't `wait` on cs2 or gst-launch because both are run via nohup
+# from helper scripts and aren't direct children of this shell — and
+# even if cs2 crashes mid-match we'd rather stay up so the operator
+# can see the last frames / logs until they explicitly stopLive.
+say "holding job alive — waiting for external stop"
+while :; do
+  sleep 3600 &
+  wait $!
+done

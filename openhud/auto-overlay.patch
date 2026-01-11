@@ -1,0 +1,175 @@
+diff --git a/src/UI/api/api.ts b/src/UI/api/api.ts
+index 667120a..26dfbd6 100644
+--- a/src/UI/api/api.ts
++++ b/src/UI/api/api.ts
+@@ -1,6 +1,17 @@
+ // import { MapConfig } from "../HUD/Radar/LexoRadar/maps";
+ export const port = 1349;
+-export const apiUrl = `http://localhost:${port}/api`;
++
++// When the bundle is served over HTTP (e.g. via game-streamer's K8s
++// Service / port-forward) we route fetches at the page's own origin so
++// they go through the same proxy/forward the bundle came from. The
++// hardcoded localhost:1349 fallback is only hit when Electron loads
++// the bundle via `file://` (in-pod admin BrowserWindow), where there's
++// no HTTP origin to resolve relative URLs against.
++export const apiOrigin =
++  typeof window !== "undefined" && window.location.protocol.startsWith("http")
++    ? window.location.origin
++    : `http://localhost:${port}`;
++export const apiUrl = `${apiOrigin}/api`;
+ 
+ export async function apiV2(url: string, method = "GET", body?: unknown) {
+   const options: RequestInit = {
+diff --git a/src/UI/api/socket.ts b/src/UI/api/socket.ts
+index d813c36..ad74335 100644
+--- a/src/UI/api/socket.ts
++++ b/src/UI/api/socket.ts
+@@ -1,8 +1,10 @@
+ import { io } from "socket.io-client";
+ import { CSGOGSI } from "csgogsi";
+-import { port } from "./api";
++import { apiOrigin } from "./api";
+ 
+-export const socket = io(`http://localhost:${port}`);
++// See api.ts: apiOrigin is the page's HTTP origin when available, else
++// the absolute http://localhost:1349 fallback for file:// Electron.
++export const socket = io(apiOrigin);
+ export const GSI = new CSGOGSI();
+ 
+ socket.on("update", (data) => {
+diff --git a/src/UI/pages/Sidebar/RouteSelect.tsx b/src/UI/pages/Sidebar/RouteSelect.tsx
+index 624afae..7d2b3d0 100644
+--- a/src/UI/pages/Sidebar/RouteSelect.tsx
++++ b/src/UI/pages/Sidebar/RouteSelect.tsx
+@@ -11,6 +11,7 @@ import {
+ } from "react-icons/md";
+ import { useDrawer } from "../../hooks";
+ import { socket } from "../../api/socket";
++import { apiUrl } from "../../api/api";
+ 
+ interface RouteProps {
+   Icon: IconType;
+@@ -33,6 +34,22 @@ const refreshHud = () => {
+   socket.emit("refreshHUD");
+ };
+ 
++// Open the spectator HUD overlay. In Electron we use the IPC bridge
++// (window.electron.startOverlay) which fires `createHudWindow()` in
++// the main process. When the admin is loaded over plain HTTP (e.g.
++// via the game-streamer K8s Service / port-forward) there's no
++// preload bridge — fall back to the HTTP endpoint we expose for
++// exactly this case.
++const startOverlay = () => {
++  if (typeof window !== "undefined" && (window as any).electron?.startOverlay) {
++    (window as any).electron.startOverlay();
++    return;
++  }
++  fetch(`${apiUrl}/overlay/start`, { method: "POST" }).catch((err) =>
++    console.error("startOverlay HTTP fallback failed:", err),
++  );
++};
++
+ export const RouteSelect = () => {
+   const { isOpen } = useDrawer();
+   return (
+@@ -44,7 +61,7 @@ export const RouteSelect = () => {
+         <div className="flex size-full w-full border-t border-border pt-4 text-text">
+           <button
+             className="relative flex h-7 w-full items-center gap-1 rounded-lg bg-primary py-5 hover:bg-primary-dark"
+-            onClick={() => window.electron.startOverlay()}
++            onClick={startOverlay}
+           >
+             <MdPlayArrow className="absolute left-3.5 size-7" />
+             {isOpen && <p className="pl-14 font-semibold">Overlay</p>}
+diff --git a/src/electron/index.ts b/src/electron/index.ts
+index b04eed9..86872b4 100644
+--- a/src/electron/index.ts
++++ b/src/electron/index.ts
+@@ -1,10 +1,13 @@
+ import express from "express";
+ import cors from "cors";
+ import { createServer, Server } from "http";
++import path from "path";
+ import { APIRouter } from "./api/v2/api.router.js";
+ import { initializeWebSocket, io } from "./api/v2/sockets/sockets.js";
+ import { DevRouter } from "./configs/dev.js";
+ import { checkDirectories } from "./api/v2/helpers/utilities.js";
++import { getUIPath } from "./helpers/index.js";
++import { createHudWindow, closeAllWindows } from "./hudWindow.js";
+ 
+ export const PORT = process.env.PORT || "1349";
+ export const expressApp = express();
+@@ -26,6 +29,40 @@ export const startServer = () => {
+   expressApp.use("/api", APIRouter);
+   expressApp.use("/development", DevRouter);
+ 
++  // HTTP-driven overlay open. Mirrors the IPC `startOverlay` event
++  // from the admin renderer so external callers (curl, the React UI
++  // when loaded over plain HTTP without an Electron preload bridge,
++  // game-streamer's run-live flow) can trigger the spectator HUD
++  // without going through Electron IPC.
++  //
++  // Idempotent: any existing HUD window is closed first. This is what
++  // makes the call useful as a "refresh now that real data exists"
++  // hook — re-running it after cs2 connects (and GSI starts firing)
++  // gives the HUD a fresh page load against populated state, which
++  // is what the manual "Overlay" admin button effectively did.
++  expressApp.post("/api/overlay/start", (_req, res) => {
++    try {
++      closeAllWindows();
++      const w = createHudWindow();
++      w.show();
++      res.json({ ok: true });
++    } catch (e) {
++      res.status(500).json({ error: String(e) });
++    }
++  });
++
++  // Headless: serve the React admin UI over HTTP at /. Without this
++  // the UI is only reachable via Electron's BrowserWindow. With it,
++  // hitting :1349 in a browser renders the same admin panel — useful
++  // for the game-streamer container which exposes :1349 via a K8s
++  // Service. The regex excludes /api and /development from the SPA
++  // fallback so unknown API paths still 404 instead of returning HTML.
++  const uiDir = path.dirname(getUIPath());
++  expressApp.use(express.static(uiDir));
++  expressApp.get(/^\/(?!api(\/|$)|development(\/|$)).*/, (_req, res) => {
++    res.sendFile(getUIPath());
++  });
++
+   /* Print express server successfully started and listening on specified port */
+   server.listen(PORT, () => {
+     console.log(`Server listening on port: ${PORT}`);
+diff --git a/src/electron/main.ts b/src/electron/main.ts
+index ccd6a66..d944cf4 100644
+--- a/src/electron/main.ts
++++ b/src/electron/main.ts
+@@ -9,7 +9,7 @@ import { createTray } from "./tray.js";
+ import { createMenu } from "./menu.js";
+ import { ipcMainEvents } from "./ipcEvents/index.js";
+ import { closeServer, startServer } from "./index.js";
+-import { closeAllWindows } from "./hudWindow.js";
++import { closeAllWindows, createHudWindow } from "./hudWindow.js";
+ 
+ let mainWindow: BrowserWindow;
+ 
+@@ -21,6 +21,18 @@ app.on("ready", () => {
+   createTray();
+   ipcMainEvents(mainWindow);
+ 
++  // Headless auto-open: when OPENHUD_AUTO_OVERLAY=1 (set by the
++  // game-streamer container) we open the spectator HUD window
++  // immediately, instead of waiting for an admin to click "Start
++  // Overlay" in the UI. The 2s delay gives the Express server time
++  // to mount /api/hud routes before the BrowserWindow loads it.
++  if (process.env.OPENHUD_AUTO_OVERLAY === "1") {
++    setTimeout(() => {
++      const hudWindow = createHudWindow();
++      hudWindow.show();
++    }, 2000);
++  }
++
+   mainWindow.on("close", () => {
+     closeAllWindows();
+     closeServer();
