@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# End-to-end "bring CS2 live on HLS" script. Idempotent — safe to re-run.
+# Does everything from a fresh pod:
+#   1. installs gbe_fork stub if missing
+#   2. starts Xorg + openbox (if not running)
+#   3. opens X access control
+#   4. launches CS2 + GStreamer capture to MediaMTX
+#
+# Required env (export first):
+#   MATCH_ID          e.g. 8d3b87c5-cf7a-49b8-b49e-faca8ca0113a
+#   CONNECT_ADDR      e.g. 76.139.106.28:30037
+#   CONNECT_PASSWORD  e.g. tv:user:xxx
+#
+# Watch at: https://hls.5stack.gg/$MATCH_ID/
+
+set -uo pipefail
+
+: "${MATCH_ID:?set MATCH_ID}"
+# Either PLAYCAST_URL or (CONNECT_ADDR + CONNECT_PASSWORD) must be set.
+if [ -z "${PLAYCAST_URL:-}" ]; then
+  : "${CONNECT_ADDR:?set CONNECT_ADDR or PLAYCAST_URL}"
+  : "${CONNECT_PASSWORD:?set CONNECT_PASSWORD when using CONNECT_ADDR}"
+fi
+
+: "${CS2_DIR:=/mnt/game-streamer/steamapps/common/Counter-Strike Global Offensive}"
+: "${DISPLAY:=:0}"
+: "${XDG_RUNTIME_DIR:=/tmp/xdg-runtime-root}"
+: "${MEDIAMTX_SRT_BASE:=srt://mediamtx.5stack.svc.cluster.local:8890}"
+: "${FPS:=30}"
+: "${VIDEO_KBPS:=6000}"
+
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+export DISPLAY XDG_RUNTIME_DIR
+
+say() { printf '\n=== %s ===\n' "$*"; }
+
+# ----------------------------------------------------------------------
+say "1. checking real Steam is running"
+if [ -p "$HOME/.steam/steam.pipe" ] && [ -f "$HOME/.steam/steam.pid" ] \
+   && kill -0 "$(cat "$HOME/.steam/steam.pid" 2>/dev/null)" 2>/dev/null; then
+  echo "  real Steam pipe is up (pid $(cat "$HOME/.steam/steam.pid"))"
+else
+  echo "  ERROR: real Steam isn't running."
+  echo "         Start it first with: /opt/5stack/scripts/run-steam-debug.sh start"
+  echo "         Then wait for 'PIPE UP' before running this."
+  exit 1
+fi
+
+# If a leftover gbe_fork symlink exists from a prior session, restore the
+# real steamclient so CS2 talks to the running Steam.
+if [ -L /root/.steam/sdk64/steamclient.so ] \
+   && readlink -f /root/.steam/sdk64/steamclient.so | grep -q '/opt/gbe_fork'; then
+  echo "  restoring real steamclient.so over leftover gbe_fork symlink"
+  /opt/5stack/scripts/install-gbe-fork.sh uninstall >/dev/null 2>&1 || true
+fi
+
+# ----------------------------------------------------------------------
+say "2. Xorg + openbox"
+if ! pgrep -x Xorg >/dev/null 2>&1; then
+  echo "  starting Xorg on $DISPLAY"
+  rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
+  nohup Xorg "$DISPLAY" -config xorg-dummy.conf -noreset \
+    -nolisten tcp -listen unix vt7 >/tmp/xorg.log 2>&1 &
+  for _ in $(seq 1 20); do
+    xdpyinfo >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  xdpyinfo >/dev/null 2>&1 || { echo "  Xorg FAILED — see /tmp/xorg.log"; tail -30 /tmp/xorg.log; exit 1; }
+fi
+echo "  Xorg up"
+
+if ! pgrep -x openbox >/dev/null 2>&1; then
+  echo "  starting openbox"
+  nohup openbox >/tmp/openbox.log 2>&1 &
+  sleep 1
+fi
+echo "  openbox up"
+
+echo "  opening X access"
+xhost +local: >/dev/null 2>&1 || true
+xhost +SI:localuser:root >/dev/null 2>&1 || true
+xhost + >/dev/null 2>&1 || true
+
+# ----------------------------------------------------------------------
+say "3. cleanup any stale CS2 / GStreamer"
+pkill -9 -f '/linuxsteamrt64/cs2'     2>/dev/null || true
+pkill -9 -f "publish:${MATCH_ID}"     2>/dev/null || true
+sleep 1
+rm -f /tmp/source_engine_*.lock
+
+# Real Steam tells CS2 the appid via IPC — these stub files were only
+# needed when gbe_fork was the IPC peer.
+rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
+      "$CS2_DIR/game/bin/linuxsteamrt64/steam_appid.txt" 2>/dev/null || true
+
+# ----------------------------------------------------------------------
+say "4. launch CS2 (in background)"
+CS2_BIN="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
+if [ ! -x "$CS2_BIN" ]; then
+  echo "  CS2 binary missing at $CS2_BIN"; exit 1
+fi
+
+cd "$(dirname "$CS2_BIN")"
+
+# CS2 ships an older libfreetype.so.6 in its linuxsteamrt64/ dir. When
+# that gets loaded first (via rpath $ORIGIN), system libharfbuzz then
+# fails to resolve FT_Get_Color_Glyph_Layer against it. LD_PRELOAD the
+# system freetype so it wins.
+SYS_FREETYPE=/lib/x86_64-linux-gnu/libfreetype.so.6
+CS2_LD_PRELOAD=""
+[ -e "$SYS_FREETYPE" ] && CS2_LD_PRELOAD="$SYS_FREETYPE"
+
+# Also pre-create unversioned pango symlinks in CS2's own dir so CS2's
+# dlopen("libpangoft2-1.0.so") finds its OWN bundled version with the
+# custom fontconfig_ft2_new_face_substitute symbol.
+for base in libpangoft2-1.0 libpango-1.0; do
+  if [ ! -e "$CS2_DIR/game/bin/linuxsteamrt64/${base}.so" ] \
+     && [ -e "$CS2_DIR/game/bin/linuxsteamrt64/${base}.so.0" ]; then
+    ln -sf "${base}.so.0" "$CS2_DIR/game/bin/linuxsteamrt64/${base}.so" || true
+  fi
+done
+
+# Write an autoexec cfg with the appropriate join command. Playcast (HTTP
+# broadcast) bypasses Steam Datagram Relay so it works offline / with the
+# gbe_fork stub. Regular +connect needs Valve-signed certs which the stub
+# doesn't have.
+CFG_DIR="$CS2_DIR/game/csgo/cfg"
+mkdir -p "$CFG_DIR"
+if [ -n "${PLAYCAST_URL:-}" ]; then
+  cat > "$CFG_DIR/live_autoexec.cfg" <<EOF
+// auto-generated by run-live-debug.sh — playcast mode
+con_enable 1
+playcast "$PLAYCAST_URL"
+EOF
+else
+  cat > "$CFG_DIR/live_autoexec.cfg" <<EOF
+// auto-generated by run-live-debug.sh — connect mode
+con_enable 1
+password "$CONNECT_PASSWORD"
+connect $CONNECT_ADDR
+EOF
+fi
+
+# Launch CS2 via Steam IPC so it gets a real Steam session (otherwise CS2
+# reports "Not connected to Steam network" and refuses GC handshakes).
+#
+# steam.sh re-bootstraps a new instance instead of IPC'ing — call the
+# actual /ubuntu12_32/steam binary which detects the running Steam via
+# lockfile and forwards -applaunch to it.
+say "  IPC -applaunch 730 to running Steam"
+nohup /root/.local/share/Steam/ubuntu12_32/steam -applaunch 730 \
+  -fullscreen -width 1920 -height 1080 -novid -nojoy -console \
+  +exec live_autoexec \
+  >/tmp/cs2_launch.log 2>&1 &
+
+# Wait for Steam to spawn cs2. Auto-click "Skip" on Steam's
+# "Processing Vulkan shaders" dialog if it appears — we don't need
+# pre-compiled shaders for streaming.
+CS2_PID=""
+for i in $(seq 1 180); do
+  CS2_PID=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
+  [ -n "$CS2_PID" ] && break
+
+  # Skip the shader dialog if Steam pops it
+  SHADER_WIN=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
+    | awk '/"Launching Counter-Strike 2"/{print $1; exit}')
+  if [ -n "$SHADER_WIN" ]; then
+    echo "  found shader dialog ($SHADER_WIN) — clicking Skip"
+    xdotool windowactivate --sync "$SHADER_WIN" 2>/dev/null || true
+    xdotool key --clearmodifiers Return 2>/dev/null || true
+  fi
+
+  [ $(( i % 10 )) -eq 0 ] && echo "  waiting for Steam to spawn cs2 (${i}s)..."
+  sleep 1
+done
+if [ -z "$CS2_PID" ]; then
+  echo "  ERROR: Steam never spawned cs2 after 90s"
+  echo "  --- /tmp/cs2_launch.log ---"
+  tail -40 /tmp/cs2_launch.log
+  echo "  --- recent steam log ---"
+  tail -20 /mnt/game-streamer/steam/logs/console-linux.txt 2>/dev/null
+  exit 1
+fi
+echo "  CS2 pid=$CS2_PID"
+# CS2's stdout goes to Steam's logs when launched this way.
+ln -sf /mnt/game-streamer/steam/logs/console-linux.txt /tmp/cs2.log 2>/dev/null || true
+
+# ----------------------------------------------------------------------
+say "5. wait for CS2 window"
+# Same detection console-connect.sh uses (works reliably).
+find_cs2_window() {
+  xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
+    | awk '/"Counter-Strike 2"/{print $1; exit}'
+}
+
+WIN=""
+for i in $(seq 1 240); do
+  WIN=$(find_cs2_window)
+  if [ -n "$WIN" ]; then
+    echo "  window detected after ${i}s: $WIN"
+    break
+  fi
+  if ! kill -0 "$CS2_PID" 2>/dev/null; then
+    echo "  CS2 EXITED early. Last 40 lines of /tmp/cs2.log:"
+    tail -40 /tmp/cs2.log
+    exit 1
+  fi
+  if [ $(( i % 15 )) -eq 0 ]; then
+    echo "  still waiting (${i}s, cs2 pid=$CS2_PID alive)"
+    nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv,noheader 2>/dev/null \
+      | grep -F " $CS2_PID," | sed 's/^/    GPU: /' || true
+  fi
+  sleep 1
+done
+if [ -z "$WIN" ]; then
+  echo "  no window after 240s. Tail of cs2.log:"
+  tail -60 /tmp/cs2.log
+  echo ""
+  echo "  current X windows:"
+  xwininfo -display "$DISPLAY" -root -tree 2>/dev/null | grep -E '"[^"]+"' | head -20
+  exit 1
+fi
+
+# ----------------------------------------------------------------------
+say "6. start GStreamer capture -> MediaMTX"
+SRT_URL="${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
+echo "  publishing to: $SRT_URL"
+GOP=$(( FPS * 2 ))
+nohup gst-launch-1.0 -e \
+  ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer=false \
+    ! video/x-raw,framerate="$FPS"/1 \
+    ! videoconvert ! video/x-raw,format=NV12 \
+    ! nvh264enc preset=low-latency-hq gop-size="$GOP" bitrate="$VIDEO_KBPS" rc-mode=cbr \
+    ! h264parse config-interval=1 \
+    ! mpegtsmux alignment=7 \
+    ! srtsink uri="$SRT_URL" latency=200 \
+  >/tmp/gst.log 2>&1 &
+GST_PID=$!
+sleep 2
+if kill -0 "$GST_PID" 2>/dev/null; then
+  echo "  gst-launch pid=$GST_PID"
+else
+  echo "  gst-launch FAILED — tail /tmp/gst.log"
+  tail -30 /tmp/gst.log
+fi
+
+# ----------------------------------------------------------------------
+say "done"
+echo "  watch: https://hls.5stack.gg/${MATCH_ID}/"
+echo "  cs2 log: /tmp/cs2.log"
+echo "  gst log: /tmp/gst.log"
+echo ""
+echo "  stop:  pkill -f '/linuxsteamrt64/cs2'; pkill -f 'publish:${MATCH_ID}'"

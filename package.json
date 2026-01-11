@@ -1,0 +1,17 @@
+{
+  "name": "game-stream",
+  "version": "1.0.0",
+  "description": "",
+  "main": "obs.js",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "app-user": "sudo -u app env HOME=/steam bash"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@laihoe/demoparser2": "^0.40.2",
+    "obs-websocket-js": "^5.0.6"
+  }
+}
