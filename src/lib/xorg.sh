@@ -173,26 +173,61 @@ wait_for_main_steam_window() {
 # Cloud Out of Date / shader-skip dialogs Steam shows in 1280x800 mode.
 # When no dialog is up, the click hits Steam UI background — harmless.
 poke_steam_dialog() {
+  _poke_steam_dialog_impl 0
+}
+
+# Verbose form for ad-hoc 'dismiss': logs every step + cursor before/after.
+poke_steam_dialog_verbose() {
+  _poke_steam_dialog_impl 1
+}
+
+_poke_steam_dialog_impl() {
+  local verbose="$1"
   local id
   id=$(find_main_steam_window)
-  [ -z "$id" ] && return 0
+  if [ -z "$id" ]; then
+    [ "$verbose" = 1 ] && warn "no main Steam window — run 'windows' to see what's there"
+    return 0
+  fi
+  [ "$verbose" = 1 ] && log "main Steam window: $id"
 
-  # Activate via wmctrl AND xdotool — different paths to _NET_ACTIVE_WINDOW.
-  wmctrl -ia "$id" 2>/dev/null || true
-  xdotool windowactivate --sync "$id" 2>/dev/null || true
-
-  # Click using ABSOLUTE screen coords via XTest (no --window flag).
-  # `--window` uses XSendEvent which CEF/Chromium filters as synthetic
-  # and ignores; XTest events go through the X server's input path the
-  # same way real hardware events do, which CEF accepts.
   local ax ay aw ah
   read -r ax ay aw ah < <(_window_geom_abs "$id")
-  if [ -n "${aw:-}" ] && [ -n "${ah:-}" ]; then
-    local cx=$(( ax + aw * 54 / 100 ))
-    local cy=$(( ay + ah * 57 / 100 ))
-    xdotool mousemove --sync "$cx" "$cy" 2>/dev/null || true
-    xdotool click 1                      2>/dev/null || true
+  if [ -z "${aw:-}" ]; then
+    [ "$verbose" = 1 ] && warn "could not read window geometry"
+    return 0
+  fi
+  [ "$verbose" = 1 ] && log "geometry: pos=(${ax},${ay}) size=${aw}x${ah}"
+
+  if [ "$verbose" = 1 ]; then
+    log "cursor before: $(xdotool getmouselocation 2>/dev/null)"
   fi
 
+  # Activate via two paths — wmctrl talks to _NET_ACTIVE_WINDOW; xdotool's
+  # --sync waits for the WM to ack.
+  wmctrl -ia "$id" 2>/dev/null || true
+  xdotool windowactivate --sync "$id" 2>/dev/null || true
+  sleep 0.2
+
+  # Click "Play anyway" with ABSOLUTE coords + XTest. --window uses
+  # XSendEvent which Chromium/CEF rejects as synthetic; XTest sends
+  # through the X server's real input path, which CEF accepts.
+  local cx=$(( ax + aw * 54 / 100 ))
+  local cy=$(( ay + ah * 57 / 100 ))
+  [ "$verbose" = 1 ] && log "moving cursor to absolute (${cx}, ${cy}) [54% × 57% of Steam window]"
+  xdotool mousemove --sync "$cx" "$cy" 2>/dev/null || true
+  sleep 0.15
+  if [ "$verbose" = 1 ]; then
+    log "cursor after move: $(xdotool getmouselocation 2>/dev/null)"
+    log "left-click"
+  fi
+  xdotool click 1 2>/dev/null || true
+  sleep 0.15
+
+  # Belt-and-suspenders: send Return + space (CEF buttons sometimes
+  # respond to Space) targeted at the focused control of the active window.
+  [ "$verbose" = 1 ] && log "sending Return then space (kbd fallback)"
   xdotool key --clearmodifiers Return 2>/dev/null || true
+  sleep 0.1
+  xdotool key --clearmodifiers space  2>/dev/null || true
 }

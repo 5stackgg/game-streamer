@@ -195,15 +195,7 @@ case "$cmd" in
   debug-stream) cmd_debug_stream "$@" ;;
   status|state)   cmd_status ;;
   windows)        list_x_windows ;;
-  dismiss)
-    id=$(find_main_steam_window)
-    if [ -n "$id" ]; then
-      log "poking Steam window $id (Return + click at button position)"
-      poke_steam_dialog
-    else
-      warn "no Steam window found"
-    fi
-    ;;
+  dismiss)        poke_steam_dialog_verbose ;;
   cloud-state)    print_cloud_state ;;
   cloud-debug)    print_cloud_debug ;;
   disable-cloud)  cmd_disable_cloud ;;
