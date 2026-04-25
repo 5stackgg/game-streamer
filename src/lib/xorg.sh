@@ -186,6 +186,33 @@ poke_steam_dialog() {
   _poke_steam_dialog_impl 0
 }
 
+# Click the Skip button on the "Launching Counter-Strike 2 / Processing
+# Vulkan shaders" dialog. Returns 1 if the dialog isn't visible, so
+# callers can branch on that.
+dismiss_shader_dialog() {
+  local id
+  id=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
+    | awk '/"Launching Counter-Strike 2"|"Processing Vulkan shaders"/{print $1; exit}')
+  if [ -z "$id" ]; then
+    log "no shader dialog visible"
+    return 1
+  fi
+  log "shader dialog: $id — clicking Skip"
+  wmctrl -ia "$id" 2>/dev/null || true
+  xdotool windowactivate --sync "$id" 2>/dev/null || true
+  sleep 0.1
+  xdotool key --clearmodifiers Return 2>/dev/null || true
+  local ax ay aw ah
+  read -r ax ay aw ah < <(_window_geom_abs "$id")
+  if [ -n "${aw:-}" ] && [ -n "${ah:-}" ]; then
+    local cx=$(( ax + aw * 35 / 100 ))
+    local cy=$(( ay + ah * 75 / 100 ))
+    log "  geom=${aw}x${ah}+${ax}+${ay}, click at (${cx},${cy})"
+    xdotool mousemove --sync "$cx" "$cy" 2>/dev/null || true
+    xdotool click 1 2>/dev/null || true
+  fi
+}
+
 # Verbose form for ad-hoc 'dismiss': logs every step + cursor before/after.
 poke_steam_dialog_verbose() {
   _poke_steam_dialog_impl 1

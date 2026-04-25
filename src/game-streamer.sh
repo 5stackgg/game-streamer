@@ -84,6 +84,7 @@ control:
   windows                  print only the open X windows (cheap to poll)
   dismiss                  send Return to the Steam window
                            (clicks the focused button on any modal CEF dialog)
+  dismiss-shader           click Skip on "Processing Vulkan shaders" dialog
   install-cs2              install/update CS2 via steamcmd into the
                            registered library (kills Steam, runs steamcmd,
                            leaves Steam off — re-run 'up' afterward).
@@ -236,7 +237,8 @@ case "$cmd" in
   debug-stream) cmd_debug_stream "$@" ;;
   status|state)   cmd_status ;;
   windows)        list_x_windows ;;
-  dismiss)        poke_steam_dialog_verbose ;;
+  dismiss)         poke_steam_dialog_verbose ;;
+  dismiss-shader)  dismiss_shader_dialog ;;
   install-cs2)    cmd_install_cs2 ;;
   steam-log)      cmd_steam_log ;;
   debug)          cmd_debug "$@" ;;

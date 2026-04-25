@@ -3,12 +3,13 @@
 #
 # What it does (idempotent, safe to re-run):
 #   * Ensures Xorg + openbox are up
-#   * Auto-starts the debug capture stream so you can watch login progress
-#   * Migrates legacy CS2 install (if any) into the canonical library layout
+#   * Symlinks $STEAM_HOME into the cache mount so Steam state persists
+#   * Fixes ownership/perms + nukes stale package cache
 #   * Registers $STEAM_LIBRARY as a Steam library folder
-#   * Restores the real steamclient.so over any leftover gbe_fork stub
+#   * Installs/updates CS2 via steamcmd directly
+#   * Disables Steam Cloud sync at every known location
 #   * Launches the Steam UI with login prefilled
-#   * Waits for the Steam IPC pipe to come up
+#   * Waits for the Steam IPC pipe + main UI window
 #
 # After this, watch https://hls.5stack.gg/${DEBUG_STREAM_ID:-debug}/ until
 # you see the friends list / main Steam window — then run flow 2 (run-live).
@@ -45,9 +46,17 @@ fi
 say "3. clean up any prior Steam/cs2 processes"
 kill_steam
 
-# Fix the EACCES-on-package bug from prior-uid pollution on the host
-# volume. Without this, Steam shuts down at startup and webhelper
-# never spawns. Must run AFTER kill_steam (so we're not racing Steam).
+# Symlink $STEAM_HOME into the persisted cache mount BEFORE we touch
+# any Steam state. This avoids the dual-bind-mount EXDEV bug where
+# /root/.local/share/Steam was its own bind mount of the same hostPath
+# as /mnt/game-streamer — Steam's self-update rename across the two
+# would fail with error 18.
+say "3a. persist Steam home via symlink into cache mount"
+ensure_steam_home_persist
+
+# Fix lingering ownership/perms + nuke stale package cache. Must run
+# AFTER kill_steam (so we're not racing Steam) and AFTER the persist
+# symlink (so we operate on the right path).
 say "3b. fix Steam-home permissions + nuke stale package cache"
 fix_steam_perms
 
@@ -55,14 +64,11 @@ say "4. register steam library at $STEAM_LIBRARY"
 mkdir -p "$STEAM_LIBRARY/steamapps/common"
 register_library "$STEAM_LIBRARY"
 
-say "5. migrate legacy CS2 install (if present)"
-migrate_legacy_cs2
-
 # Install/update CS2 via steamcmd directly. Steam is OFF here (we
 # killed it at step 3), so steamcmd and Steam won't fight over
 # appmanifest. After this Steam picks up the install on launch and
 # the Install dialog never appears.
-say "5b. install/update CS2 via steamcmd"
+say "5. install/update CS2 via steamcmd"
 install_cs2_via_steamcmd
 
 # Must run while Steam is OFF — Steam clobbers localconfig.vdf on shutdown.

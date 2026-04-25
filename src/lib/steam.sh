@@ -200,29 +200,6 @@ install_cs2_via_steamcmd() {
   fi
 }
 
-# One-time migration of legacy CS2 install at $STEAM_LIBRARY/cs2 into the
-# canonical Steam library layout. No-op once moved.
-migrate_legacy_cs2() {
-  local src="$STEAM_LIBRARY/cs2"
-  local dst="$CS2_DIR"
-  if [ -d "$src" ] && [ ! -e "$dst" ]; then
-    log "migrating legacy CS2 install: $src -> $dst"
-    mkdir -p "$(dirname "$dst")"
-    mv "$src" "$dst"
-  fi
-
-  # Pull the manifest up out of the install dir if a prior steamcmd run
-  # put it there, so Steam picks it up.
-  local manifest="$dst/steamapps/appmanifest_730.acf"
-  if [ -f "$manifest" ]; then
-    mv "$manifest" "$STEAM_LIBRARY/steamapps/appmanifest_730.acf"
-    rmdir "$dst/steamapps" 2>/dev/null || true
-    sed -i 's|"installdir"[[:space:]]*"[^"]*"|"installdir"\t\t"Counter-Strike Global Offensive"|' \
-      "$STEAM_LIBRARY/steamapps/appmanifest_730.acf"
-    log "moved manifest into $STEAM_LIBRARY/steamapps/"
-  fi
-}
-
 # Set Steam Cloud sync to OFF for CS2 (appid 730) in every user's
 # localconfig.vdf. CS2's "Cloud Out of Date" / "Play anyway" prompt is a
 # CEF dialog with no X11 title — xdotool can't reliably target it — so we
@@ -814,37 +791,90 @@ print_full_debug() {
 #
 # The package dir is Steam's update cache — safe to nuke; Steam
 # recreates it on next start.
+# Make $STEAM_HOME a symlink into the cache mount so Steam's state
+# persists across pod restarts WITHOUT a second bind mount on
+# $STEAM_HOME (which would create EXDEV on Steam self-update — see
+# fix_steam_perms for the failure mode). After this:
+#   /root/.local/share/Steam   ->   /mnt/game-streamer/steam
+# Steam reads/writes via the canonical $HOME path; everything resolves
+# to one filesystem (the cache mount), so rename(2) always succeeds.
+#
+# On first ever run we migrate any pre-existing $STEAM_HOME content
+# into the target. If both have content (e.g. a prior pod populated
+# the cache and a new pod's image dropped a fresh empty Steam dir),
+# the persisted cache wins.
+ensure_steam_home_persist() {
+  local target="$STEAM_LIBRARY/steam"
+  mkdir -p "$target"
+
+  if [ -L "$STEAM_HOME" ] \
+     && [ "$(readlink -f "$STEAM_HOME" 2>/dev/null)" = "$(readlink -f "$target" 2>/dev/null)" ]; then
+    log "ensure_steam_home_persist: $STEAM_HOME already -> $target"
+    return 0
+  fi
+
+  if [ -L "$STEAM_HOME" ]; then
+    log "ensure_steam_home_persist: replacing wrong symlink ($STEAM_HOME -> $(readlink "$STEAM_HOME"))"
+    rm -f "$STEAM_HOME"
+  elif [ -d "$STEAM_HOME" ]; then
+    if [ -z "$(ls -A "$target" 2>/dev/null)" ]; then
+      log "ensure_steam_home_persist: migrating $STEAM_HOME contents -> $target"
+      cp -a "$STEAM_HOME/." "$target/" 2>/dev/null || true
+    else
+      log "ensure_steam_home_persist: cache already populated, dropping ephemeral $STEAM_HOME"
+    fi
+    rm -rf "$STEAM_HOME"
+  fi
+
+  mkdir -p "$(dirname "$STEAM_HOME")"
+  ln -sfn "$target" "$STEAM_HOME"
+  log "ensure_steam_home_persist: $STEAM_HOME -> $target"
+}
+
 fix_steam_perms() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
     log "fix_steam_perms: Steam is running — skip"
     return 0
   fi
 
+  # Legacy `$STEAM_HOME/steam` symlink that points to /mnt/game-streamer/steam.
+  # That target is a *different bind mount* from $STEAM_HOME, so rename(2)
+  # across the symlink boundary fails with EXDEV. Steam's self-update
+  # uses rename to commit `package/tmp/.../steam/cached/X` -> `./steam/cached/X`,
+  # which crosses the mount and dies with:
+  #   BCommitUpdatedFiles: failed to rename ... (error 18)
+  #   Failed to apply update, reverting...
+  #   dlmopen steamui.so failed: ... no such file
+  # — Steam exits before webhelper spawns. Removing the symlink lets Steam
+  # create ./steam/ as a real subdir on the same mount, so renames work.
+  if [ -L "$STEAM_HOME/steam" ]; then
+    log "fix_steam_perms: removing legacy $STEAM_HOME/steam symlink (-> $(readlink "$STEAM_HOME/steam"))"
+    rm -f "$STEAM_HOME/steam"
+  fi
+
+  # Steam's update working area. Anything left from a half-applied
+  # update (we just had one fail mid-rename) corrupts the next attempt.
   if [ -e "$STEAM_HOME/package" ]; then
     log "fix_steam_perms: removing $STEAM_HOME/package (Steam recreates fresh)"
     rm -rf "$STEAM_HOME/package"
   fi
 
-  # Stale lock/pid leftovers can also wedge Steam at startup.
+  # Stale lock/pid leftovers can wedge Steam at startup.
   rm -f "$STEAM_HOME/.steamstart.id" \
         "$STEAM_HOME/.steam.start" \
         "$STEAM_HOME/.crash" \
         "$STEAM_LIBRARY/steam/.crash" 2>/dev/null || true
 
-  # Normalize ownership on dirs Steam writes to. We deliberately do NOT
-  # recurse into CS2_DIR — it's 60GB on a separate path and chown'd
-  # ownership doesn't matter there.
-  log "fix_steam_perms: chown root + chmod u+rwX on Steam home"
-  chown root:root "$STEAM_HOME" 2>/dev/null || true
-  chmod u+rwx     "$STEAM_HOME" 2>/dev/null || true
-  local d
-  for d in config logs ubuntu12_32 ubuntu12_64 steamrt64 linux32 linux64 \
-           userdata steamapps clientui appcache depotcache; do
-    if [ -d "$STEAM_HOME/$d" ]; then
-      chown -R root:root "$STEAM_HOME/$d" 2>/dev/null || true
-      chmod -R u+rwX     "$STEAM_HOME/$d" 2>/dev/null || true
-    fi
-  done
+  # Normalize ownership across the ENTIRE Steam home. Earlier we only
+  # chown'd a hand-picked list of subdirs, but the persisted bind mount
+  # carries files owned by 1000:1000 / nobody:nogroup at the top level
+  # (steam.sh, clientui/, ubuntu12_32/, linux32/) from a prior host-uid
+  # mapping. Steam can't update those without owning them.
+  # CS2_DIR is on a separate path ($STEAM_LIBRARY/steamapps/...), not
+  # affected — and it's 60GB so we wouldn't want to chown it anyway.
+  log "fix_steam_perms: chown -R root:root + chmod -R u+rwX on $STEAM_HOME"
+  chown -R root:root "$STEAM_HOME" 2>/dev/null || true
+  chmod -R u+rwX     "$STEAM_HOME" 2>/dev/null || true
 }
 
 # Kill anything left over from a prior Steam/cs2 session.

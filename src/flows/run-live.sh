@@ -117,20 +117,42 @@ for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
   CS2_PID=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
   [ -n "$CS2_PID" ] && break
 
-  # Targeted shader-skip: only when that exact title is on screen.
+  # Targeted shader-skip. The "Launching Counter-Strike 2" /
+  # "Processing Vulkan shaders" dialog is a separate X window. "Skip"
+  # is the default-focused button; we send Return AND click its
+  # absolute screen position via XTest as a belt-and-suspenders. The
+  # CEF Return path can miss focus, but XTest mouse clicks reach CEF
+  # reliably (same trick we use for the cloud dialog).
   SHADER_WIN=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
-    | awk '/"Launching Counter-Strike 2"/{print $1; exit}')
+    | awk '/"Launching Counter-Strike 2"|"Processing Vulkan shaders"/{print $1; exit}')
   if [ -n "$SHADER_WIN" ]; then
-    log "  shader dialog ($SHADER_WIN) — Return"
+    log "  shader dialog detected: $SHADER_WIN — clicking Skip"
+    wmctrl -ia "$SHADER_WIN" 2>/dev/null || true
     xdotool windowactivate --sync "$SHADER_WIN" 2>/dev/null || true
+    sleep 0.1
     xdotool key --clearmodifiers Return 2>/dev/null || true
+    # Skip button is on the LEFT (highlighted blue), Cancel on the
+    # right. Roughly 35% across and 75% down within the dialog.
+    SKIP_GEOM=$(_window_geom_abs "$SHADER_WIN")
+    if [ -n "$SKIP_GEOM" ]; then
+      read SAX SAY SAW SAH <<<"$SKIP_GEOM"
+      SCX=$(( SAX + SAW * 35 / 100 ))
+      SCY=$(( SAY + SAH * 75 / 100 ))
+      log "    geom=${SAW}x${SAH}+${SAX}+${SAY}, clicking at (${SCX},${SCY})"
+      xdotool mousemove --sync "$SCX" "$SCY" 2>/dev/null || true
+      xdotool click 1 2>/dev/null || true
+    fi
   fi
 
-  # NOTE: auto-poke disabled. After downloads complete the click at
-  # (54%, 57%) was hitting Steam UI background (no cloud dialog up by
-  # then) and likely canceling the launch flow. Use `dismiss` manually
-  # if a CEF modal blocks. We dump Steam's own logs every 15s instead
-  # so we can see what Steam thinks it's doing.
+  # Auto-poke for the Cloud Out of Date dialog. BOUNDED to the first
+  # 30s of the wait — the dialog appears immediately after applaunch.
+  # Beyond 30s, downloads/runtime-init are happening and a click at
+  # the dialog's button position would land on Steam UI background
+  # (which previously was canceling the launch). Cs2 spawn breaks the
+  # loop, so this never fires once the game is up.
+  if [ "$i" -ge 3 ] && [ "$i" -le 30 ] && [ $(( i % 5 )) -eq 0 ]; then
+    poke_steam_dialog
+  fi
 
   if [ $(( i % 15 )) -eq 0 ]; then
     log "  ${i}s elapsed waiting on cs2 (likely updating + dialogs):"
