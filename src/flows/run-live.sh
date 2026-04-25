@@ -103,20 +103,36 @@ nohup "$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 \
   >"$LOG_DIR/cs2_launch.log" 2>&1 &
 log "  launcher pid=$!"
 
-# Wait for cs2 process. Auto-skip Steam's "Processing Vulkan shaders" dialog.
+# Wait for cs2 process. Two side-effects on each iteration:
+#  - poke the Steam window with Return: dismisses the focused button on
+#    any modal CEF dialog (cloud-out-of-date, "Launching ... shaders", etc).
+#  - every 15s, dump the open X windows + cs2/launcher state so the
+#    operator can see what Steam is actually showing right now.
 CS2_PID=""
 for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
   CS2_PID=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
   [ -n "$CS2_PID" ] && break
 
+  # Targeted shader-skip: only when that exact title is on screen.
   SHADER_WIN=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
     | awk '/"Launching Counter-Strike 2"/{print $1; exit}')
   if [ -n "$SHADER_WIN" ]; then
-    log "  shader dialog ($SHADER_WIN) — clicking Skip"
+    log "  shader dialog ($SHADER_WIN) — Return"
     xdotool windowactivate --sync "$SHADER_WIN" 2>/dev/null || true
     xdotool key --clearmodifiers Return 2>/dev/null || true
   fi
-  [ $(( i % 15 )) -eq 0 ] && log "  waiting for Steam to spawn cs2 (${i}s — likely updating)"
+
+  # Click "Play anyway" / Skip on whatever modal CEF dialog is up. Uses
+  # absolute screen coords + XTest so CEF accepts the click (--window
+  # variants get filtered as synthetic). Safe when no dialog is open —
+  # the click lands on Steam UI background.
+  [ $(( i % 3 )) -eq 0 ] && poke_steam_dialog
+
+  if [ $(( i % 15 )) -eq 0 ]; then
+    log "  ${i}s elapsed waiting on cs2 (likely updating + dialogs):"
+    log "  open X windows:"
+    list_x_windows
+  fi
   sleep 1
 done
 [ -n "$CS2_PID" ] || {
@@ -138,11 +154,16 @@ for i in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
     | awk '/"Counter-Strike 2"/{print $1; exit}')
   [ -n "$WIN" ] && { log "  window after ${i}s: $WIN"; break; }
   if ! kill -0 "$CS2_PID" 2>/dev/null; then
-    warn "cs2 EXITED early. Last 40 lines of $LOG_DIR/cs2.log:"
-    tail -40 "$LOG_DIR/cs2.log" 2>/dev/null
+    warn "cs2 EXITED early."
+    dump_log "$LOG_DIR/cs2.log"
     exit 1
   fi
-  [ $(( i % 15 )) -eq 0 ] && log "  still waiting (${i}s, cs2 alive)"
+  [ $(( i % 3 )) -eq 0 ] && poke_steam_dialog
+  if [ $(( i % 15 )) -eq 0 ]; then
+    log "  still waiting (${i}s, cs2 pid=$CS2_PID alive)"
+    log "  open X windows:"
+    list_x_windows
+  fi
   sleep 1
 done
 [ -n "$WIN" ] || {

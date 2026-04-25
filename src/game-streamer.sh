@@ -64,6 +64,9 @@ flows:
   setup-steam              flow 1: register library + start Steam (UI visible)
   run-live                 flow 2: launch CS2 + start match capture
                            (requires flow 1 to have completed login)
+  up                       run flow 1 then flow 2 end-to-end. Setup waits
+                           until the main Steam UI window is rendered
+                           before launching CS2.
 
 global flags:
   --debug                  publish on-screen capture to publish:debug
@@ -77,7 +80,17 @@ debug stream (ad-hoc):
   debug-stream url   [id]  print HLS playback URL
 
 control:
-  status                   show xorg / steam / streams / cs2 state
+  status                   show xorg / steam / streams / cs2 / x windows
+  windows                  print only the open X windows (cheap to poll)
+  dismiss                  send Return to the Steam window
+                           (clicks the focused button on any modal CEF dialog)
+  cloud-state              print Steam Cloud setting from disk (no edit)
+  cloud-debug              verbose dump: file paths, mtimes, raw VDF
+                           blocks (730 + Cloud + CloudEnabled), Steam
+                           log lines mentioning cloud — use when the
+                           dialog still appears despite disable-cloud
+  disable-cloud            cycle Steam: kill -9 -> edit cloud=off -> relaunch
+                           (use when 'Cloud Out of Date' dialog appears)
   stop-live                kill cs2 + match capture stream (keep Steam)
   stop-all                 kill cs2, capture, Steam, openbox, Xorg
 
@@ -120,6 +133,9 @@ cmd_status() {
     found=1
   done < <(pgrep -af 'gst-launch.*publish:' || true)
   [ "$found" = 0 ] && log "  none"
+
+  say "x windows"
+  list_x_windows
 }
 
 cmd_debug_stream() {
@@ -154,14 +170,45 @@ cmd_stop_all() {
   log "all stopped"
 }
 
+cmd_disable_cloud() {
+  require_env STEAM_USERNAME STEAM_PASSWORD
+  say "kill Steam (-9 — no graceful shutdown so the file edit isn't clobbered)"
+  kill_steam
+  say "edit registry.vdf + config.vdf + localconfig.vdf + sharedconfig.vdf"
+  disable_cloud_globally
+  disable_cloud_in_config_vdf
+  disable_cs2_cloud
+  print_cloud_state
+  say "relaunch Steam"
+  start_steam
+  wait_for_steam_pipe "${STEAM_PIPE_TIMEOUT:-300}"
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   setup-steam)  exec "$FLOWS_DIR/setup-steam.sh" "$@" ;;
   run-live)     exec "$FLOWS_DIR/run-live.sh"    "$@" ;;
+  up)
+    "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
+    exec "$FLOWS_DIR/run-live.sh" "$@"
+    ;;
   debug-stream) cmd_debug_stream "$@" ;;
-  status)       cmd_status ;;
-  stop-live)    cmd_stop_live ;;
-  stop-all)     cmd_stop_all ;;
+  status|state)   cmd_status ;;
+  windows)        list_x_windows ;;
+  dismiss)
+    id=$(find_main_steam_window)
+    if [ -n "$id" ]; then
+      log "poking Steam window $id (Return + click at button position)"
+      poke_steam_dialog
+    else
+      warn "no Steam window found"
+    fi
+    ;;
+  cloud-state)    print_cloud_state ;;
+  cloud-debug)    print_cloud_debug ;;
+  disable-cloud)  cmd_disable_cloud ;;
+  stop-live)      cmd_stop_live ;;
+  stop-all)       cmd_stop_all ;;
   -h|--help|help|"") usage ;;
   *) echo "unknown command: $cmd" >&2; usage >&2; exit 2 ;;
 esac

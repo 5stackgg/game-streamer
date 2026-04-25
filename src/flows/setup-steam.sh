@@ -59,8 +59,11 @@ migrate_legacy_cs2
 HAD_USERDATA=0
 [ -d "$STEAM_HOME/userdata" ] && HAD_USERDATA=1
 
-say "6. disable CS2 cloud sync"
+say "6. disable Steam Cloud sync (global + per-app)"
+disable_cloud_globally
+disable_cloud_in_config_vdf
 disable_cs2_cloud
+print_cloud_state
 
 say "7. launch Steam"
 start_steam
@@ -77,7 +80,9 @@ wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" || {
 if [ "$HAD_USERDATA" = 0 ]; then
   say "9. first-boot: cycle Steam to apply cloud-sync disable"
   kill_steam
+  disable_cloud_globally
   disable_cs2_cloud
+  print_cloud_state
   start_steam
   wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" || {
     warn "pipe never came up after cycle — check $LOG_DIR/steam.log"
@@ -85,5 +90,14 @@ if [ "$HAD_USERDATA" = 0 ]; then
   }
 fi
 
+# The IPC pipe comes up before the UI is rendered. Issuing -applaunch
+# before the main window exists can hang Steam; wait for the actual
+# 1280x800 Steam client window before declaring "ready".
+say "10. wait for main Steam window (login + UI render)"
+wait_for_main_steam_window "${STEAM_WINDOW_TIMEOUT:-300}" || {
+  warn "main Steam window not visible — Steam may still be downloading runtimes"
+  exit 1
+}
+
 say "done"
-log "next: src/game-streamer.sh run-live  (after you see the main Steam window)"
+log "Steam is fully up. next: src/game-streamer.sh run-live"
