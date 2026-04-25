@@ -4,7 +4,7 @@
 # to force-trigger the launch / install dialog.
 #
 # Usage:
-#   ./scripts/debug-steam-launch.sh
+#   ./debug-steam-launch.sh
 
 set -uo pipefail
 
@@ -25,7 +25,7 @@ if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
     echo "  WARN: pipe is stale"
   fi
 else
-  echo "  ERROR: Steam not running. Start with /opt/5stack/scripts/run-steam-debug.sh start"
+  echo "  ERROR: Steam not running. Start with /opt/game-streamer/src/game-streamer.sh start"
   exit 1
 fi
 

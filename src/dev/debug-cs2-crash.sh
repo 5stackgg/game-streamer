@@ -6,13 +6,13 @@
 # Requires: $CONNECT_ADDR, $CONNECT_PASSWORD, $MATCH_ID already exported.
 #
 # Usage:
-#   ./scripts/debug-cs2-crash.sh
+#   ./debug-cs2-crash.sh
 
 set -uo pipefail
 
 : "${CONNECT_ADDR:?set CONNECT_ADDR}"
 : "${CONNECT_PASSWORD:?set CONNECT_PASSWORD}"
-: "${CS2_DIR:=/mnt/game-streamer/cs2}"
+: "${CS2_DIR:=/mnt/game-streamer/steamapps/common/Counter-Strike Global Offensive}"
 : "${DISPLAY:=:0}"
 : "${XDG_RUNTIME_DIR:=/tmp/xdg-runtime-root}"
 
@@ -37,8 +37,8 @@ rm -f /tmp/source_engine_*.lock
 say "3. sanity checks"
 echo "STEAMCLIENT.so -> $(readlink /root/.steam/sdk64/steamclient.so)"
 echo "steam_appid.txt:"
-ls /mnt/game-streamer/cs2/game/csgo/steam_appid.txt \
-   /mnt/game-streamer/cs2/game/bin/linuxsteamrt64/steam_appid.txt 2>/dev/null
+ls /mnt/game-streamer/steamapps/common/Counter-Strike Global Offensive/game/csgo/steam_appid.txt \
+   /mnt/game-streamer/steamapps/common/Counter-Strike Global Offensive/game/bin/linuxsteamrt64/steam_appid.txt 2>/dev/null
 echo "gbe_fork steam_settings:"
 ls /opt/gbe_fork/steam_settings 2>/dev/null | head -5 || echo "  not configured"
 

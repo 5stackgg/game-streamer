@@ -1,9 +1,9 @@
 namespaces: [5stack]
 image: ghcr.io/5stackgg/game-streamer:latest
 deployment: game-streamer-live
-workdir: /opt/5stack
+workdir: /opt/game-streamer
 sync:
-  - .:/opt/5stack
+  - .:/opt/game-streamer
 ignore:
-  - "/bin"
-  - "/highlights/bin"
+  - "/.git"
+  - "/.github"

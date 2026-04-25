@@ -3,11 +3,11 @@
 # No args required. Just run.
 #
 # Commands:
-#   ./scripts/state.sh            # show status
-#   ./scripts/state.sh status     # same
-#   ./scripts/state.sh reset      # kill everything + wipe steam/cs2 temp state
-#   ./scripts/state.sh logs       # tail the important logs
-#   ./scripts/state.sh dismiss    # click/press Return on any blocking dialog
+#   ./state.sh            # show status
+#   ./state.sh status     # same
+#   ./state.sh reset      # kill everything + wipe steam/cs2 temp state
+#   ./state.sh logs       # tail the important logs
+#   ./state.sh dismiss    # click/press Return on any blocking dialog
 
 set -uo pipefail
 
@@ -95,8 +95,8 @@ cmd_reset() {
 
   say "RESET: done"
   echo "  Xorg/openbox left alone (cheap to restart if you need to)."
-  echo "  To relaunch Steam:  ./scripts/debug-steam-login.sh start"
-  echo "  To relaunch CS2:    ./scripts/live.sh   (needs MATCH_ID + CONNECT_ADDR env)"
+  echo "  To relaunch Steam:  ./debug-steam-login.sh start"
+  echo "  To relaunch CS2:    ./live.sh   (needs MATCH_ID + CONNECT_ADDR env)"
 }
 
 cmd_logs() {
