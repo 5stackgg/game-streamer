@@ -57,7 +57,9 @@ runs that common setup before anything action-specific:
 7. **`ensure_steamclient`** — symlink `steamclient.so` to wherever Steam
    extracted it.
 8. **`install_or_update_cs2`** — authenticated `steamcmd +app_update 730
-   validate`. Always pulls the latest public build before any action runs.
+   validate`. Skipped when the persistent volume already has CS2 fully
+   installed (`StateFlags=4`). Set `CS2_FORCE_UPDATE=1` or run
+   `game-streamer.sh update-cs2` to bypass the cache.
 
 Then `exec` the action — `actions/live.sh` or `actions/create-clips.sh` —
 based on `$MODE`. Subcommands (operator CLI) skip `prepare_runtime` and

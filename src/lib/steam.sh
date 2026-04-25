@@ -16,21 +16,25 @@ ensure_user_namespaces() {
   return 1
 }
 
-# Symlink ~/.local/share/Steam to a hostPath so login + downloaded games
-# survive pod restarts.
+# Symlink ~/.local/share/Steam (Steam client) AND ~/Steam (steamcmd home)
+# to hostPath dirs so login tokens, downloaded games, and the Steam
+# bootstrap survive pod restarts. After the first successful login, the
+# session token is reused — no re-auth and no Steam Guard prompt.
 persist_steam_state() {
-  local target="$HOME/.local/share/Steam"
-  local persist="$PERSIST_DIR/steam"
+  _persist_dir "$HOME/.local/share/Steam" "$PERSIST_DIR/steam"
+  _persist_dir "$HOME/Steam"              "$PERSIST_DIR/steamcmd"
+}
+
+_persist_dir() {
+  local target="$1" persist="$2"
   mkdir -p "$persist"
 
-  # Already correctly symlinked from a prior pod?
   if [ -L "$target" ] && [ "$(readlink -f "$target")" = "$(readlink -f "$persist")" ]; then
-    log "steam state already persisted at $persist"
+    log "already persisted: $target → $persist"
     return 0
   fi
 
-  # Migrate any pre-existing in-container state into the persist dir
-  # (only on first run when persist is empty).
+  # First run: migrate any in-container state into the persist dir.
   if [ -d "$target" ] && [ ! -L "$target" ] \
        && [ -n "$(ls -A "$target" 2>/dev/null)" ] \
        && [ -z "$(ls -A "$persist" 2>/dev/null)" ]; then
@@ -40,7 +44,7 @@ persist_steam_state() {
   rm -rf "$target" 2>/dev/null || true
   mkdir -p "$(dirname "$target")"
   ln -sfn "$persist" "$target"
-  log "steam state persisted at $persist"
+  log "persisted: $target → $persist"
 }
 
 # Register $PERSIST_DIR as a Steam library folder, write the marker file,
@@ -223,10 +227,41 @@ start_steam() {
   return 1
 }
 
-# steamcmd +app_update — uses real account when available (gets latest
-# build), falls back to anonymous (older public branch only).
+# Returns 0 if appmanifest_730.acf exists with StateFlags=4 (fully
+# installed and current). Looks at both the legacy +force_install_dir
+# location and the proper Steam library location.
+cs2_is_installed() {
+  local m
+  for m in "$PERSIST_DIR/steamapps/appmanifest_730.acf" \
+           "$CS2_DIR/steamapps/appmanifest_730.acf"; do
+    if [ -f "$m" ]; then
+      local flags
+      flags=$(grep -oE '"StateFlags"[[:space:]]+"[0-9]+"' "$m" \
+              | grep -oE '[0-9]+$' | head -1)
+      [ "$flags" = "4" ] && return 0
+    fi
+  done
+  return 1
+}
+
+# steamcmd +app_update — uses the real account when available (gets the
+# latest build), falls back to anonymous (older public branch only).
+#
+# Skipped when CS2 is already fully installed in the persistent volume,
+# which is the common case on every pod restart after first boot. Set
+# CS2_FORCE_UPDATE=1 (or run `game-streamer.sh update-cs2`) to force.
 install_or_update_cs2() {
-  log "checking CS2 (appid 730) install in $CS2_DIR"
+  if [ "${CS2_FORCE_UPDATE:-0}" != "1" ] && cs2_is_installed; then
+    local m="$PERSIST_DIR/steamapps/appmanifest_730.acf"
+    [ -f "$m" ] || m="$CS2_DIR/steamapps/appmanifest_730.acf"
+    local bid
+    bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$m" | head -1)
+    log "CS2 already installed — skipping steamcmd ($bid)"
+    log "  force with CS2_FORCE_UPDATE=1 or 'game-streamer.sh update-cs2'"
+    return 0
+  fi
+
+  log "running steamcmd +app_update 730 (install or update)"
   mkdir -p "$CS2_DIR"
 
   local login_args
@@ -237,11 +272,16 @@ install_or_update_cs2() {
     login_args=( +login anonymous )
   fi
 
+  local update_cmd="+app_update 730"
+  [ -n "${CS2_BETA_BRANCH:-}" ] && update_cmd="$update_cmd -beta $CS2_BETA_BRANCH"
+  update_cmd="$update_cmd validate"
+
+  # shellcheck disable=SC2086 — $update_cmd is intentionally word-split.
   /opt/steamcmd/steamcmd.sh \
     +@sSteamCmdForcePlatformType linux \
     +force_install_dir "$CS2_DIR" \
     "${login_args[@]}" \
-    +app_update 730 validate \
+    $update_cmd \
     +quit
 
   if [ -f "$PERSIST_DIR/steamapps/appmanifest_730.acf" ]; then

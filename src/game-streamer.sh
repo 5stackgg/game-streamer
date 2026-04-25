@@ -50,7 +50,8 @@ if [ $# -gt 0 ]; then
       quit_cs2 "$@"
       ;;
     update-cs2)
-      install_or_update_cs2
+      # Operator explicitly asked — bypass the install-cache fast-path.
+      CS2_FORCE_UPDATE=1 install_or_update_cs2
       ;;
     help|-h|--help)
       sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
