@@ -144,13 +144,12 @@ for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
     fi
   fi
 
-  # Auto-poke for the Cloud Out of Date dialog. BOUNDED to the first
-  # 30s of the wait — the dialog appears immediately after applaunch.
-  # Beyond 30s, downloads/runtime-init are happening and a click at
-  # the dialog's button position would land on Steam UI background
-  # (which previously was canceling the launch). Cs2 spawn breaks the
+  # Auto-poke for the Cloud Out of Date dialog. Bounded to first 90s
+  # of the wait — covers the case where the dialog appears late
+  # because Steam first has to download cloud files (we've seen
+  # 30-60s into the wait on cold-boot pods). Cs2 spawn breaks the
   # loop, so this never fires once the game is up.
-  if [ "$i" -ge 3 ] && [ "$i" -le 30 ] && [ $(( i % 5 )) -eq 0 ]; then
+  if [ "$i" -ge 3 ] && [ "$i" -le 90 ] && [ $(( i % 5 )) -eq 0 ]; then
     poke_steam_dialog
   fi
 

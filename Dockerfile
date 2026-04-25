@@ -76,6 +76,18 @@ RUN apt-get install -y --no-install-recommends \
       libnss3:i386 libnspr4:i386 libdbus-1-3:i386 \
       libfreetype6:i386 libpulse0:i386 libva2:i386
 
+# 32-bit Steam UI deps. steamui.so is 32-bit and uses dlmopen() to load
+# its UI stack; dlmopen creates a new linker namespace that does NOT
+# honor the bundled Steam runtime's LD_LIBRARY_PATH, so it falls
+# through to the system loader. Without these the system has only the
+# 64-bit equivalents and the load fails with "wrong ELF class:
+# ELFCLASS64" -> Steam exits before webhelper spawns.
+RUN apt-get install -y --no-install-recommends \
+      libglib2.0-0:i386 libgtk2.0-0:i386 libgdk-pixbuf-2.0-0:i386 \
+      libpango-1.0-0:i386 libpangocairo-1.0-0:i386 libpangoft2-1.0-0:i386 \
+      libcairo2:i386 libatk1.0-0:i386 \
+      libxslt1.1:i386 libxml2:i386
+
 RUN rm -rf /var/lib/apt/lists/*
 
 # steamcmd from Valve's CDN. Always invoked as /opt/steamcmd/steamcmd.sh

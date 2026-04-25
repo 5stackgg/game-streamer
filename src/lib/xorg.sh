@@ -226,7 +226,6 @@ _poke_steam_dialog_impl() {
     [ "$verbose" = 1 ] && warn "no main Steam window — run 'windows' to see what's there"
     return 0
   fi
-  [ "$verbose" = 1 ] && log "main Steam window: $id"
 
   local ax ay aw ah
   read -r ax ay aw ah < <(_window_geom_abs "$id")
@@ -234,7 +233,12 @@ _poke_steam_dialog_impl() {
     [ "$verbose" = 1 ] && warn "could not read window geometry"
     return 0
   fi
-  [ "$verbose" = 1 ] && log "geometry: pos=(${ax},${ay}) size=${aw}x${ah}"
+
+  # Always log a one-line summary (even in non-verbose) so the run-live
+  # output records that auto-poke fired and what it clicked.
+  local cx=$(( ax + aw * 54 / 100 ))
+  local cy=$(( ay + ah * 57 / 100 ))
+  log "poke_steam_dialog: window=$id geom=${aw}x${ah}+${ax}+${ay} click=(${cx},${cy})  [Play anyway]"
 
   if [ "$verbose" = 1 ]; then
     log "cursor before: $(xdotool getmouselocation 2>/dev/null)"
@@ -249,9 +253,6 @@ _poke_steam_dialog_impl() {
   # Click "Play anyway" with ABSOLUTE coords + XTest. --window uses
   # XSendEvent which Chromium/CEF rejects as synthetic; XTest sends
   # through the X server's real input path, which CEF accepts.
-  local cx=$(( ax + aw * 54 / 100 ))
-  local cy=$(( ay + ah * 57 / 100 ))
-  [ "$verbose" = 1 ] && log "moving cursor to absolute (${cx}, ${cy}) [54% × 57% of Steam window]"
   xdotool mousemove --sync "$cx" "$cy" 2>/dev/null || true
   sleep 0.15
   if [ "$verbose" = 1 ]; then

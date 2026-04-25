@@ -93,11 +93,31 @@ wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" || {
   exit 1
 }
 
-# First-boot auto-cycle: Steam just wrote a fresh localconfig.vdf with
-# cloudenabled=1. SIGKILL avoids a graceful shutdown (which would rewrite
-# the file from in-memory state and undo our edit), then we edit + relaunch.
+# Wait for the UI window BEFORE attempting any first-boot cycle. The
+# IPC pipe comes up well before login completes — at pipe-up time
+# userdata/<steamid>/ may not exist yet. Cycling at that point would
+# kill Steam mid-login, our disable_cs2_cloud would no-op (no
+# userdata to edit), and Steam's second start would write fresh
+# defaults — undoing the entire purpose of the cycle.
+say "9. wait for main Steam window (login + UI render)"
+wait_for_main_steam_window "${STEAM_WINDOW_TIMEOUT:-300}" || {
+  warn "main Steam window not visible — Steam may still be downloading runtimes"
+  exit 1
+}
+
+# First-boot auto-cycle: Steam has now logged in and written a fresh
+# localconfig.vdf + sharedconfig.vdf with cloud sync ENABLED.
+# SIGKILL avoids a graceful shutdown (which would rewrite both files
+# from in-memory state and undo our edits), then we edit + relaunch.
 if [ "$HAD_USERDATA" = 0 ]; then
-  say "9. first-boot: cycle Steam to apply cloud-sync disable"
+  say "10. first-boot: cycle Steam to apply cloud-sync disable"
+  # Belt-and-suspenders: even though main window appeared, give the
+  # roaming-config sync a moment to land sharedconfig.vdf on disk
+  # before we SIGKILL.
+  for _ in $(seq 1 20); do
+    [ -d "$STEAM_HOME/userdata" ] && break
+    sleep 0.5
+  done
   kill_steam
   disable_cloud_globally
   disable_cloud_in_config_vdf
@@ -108,16 +128,11 @@ if [ "$HAD_USERDATA" = 0 ]; then
     warn "pipe never came up after cycle — check $LOG_DIR/steam.log"
     exit 1
   }
+  wait_for_main_steam_window "${STEAM_WINDOW_TIMEOUT:-300}" || {
+    warn "main Steam window not visible after cycle"
+    exit 1
+  }
 fi
-
-# The IPC pipe comes up before the UI is rendered. Issuing -applaunch
-# before the main window exists can hang Steam; wait for the actual
-# 1280x800 Steam client window before declaring "ready".
-say "10. wait for main Steam window (login + UI render)"
-wait_for_main_steam_window "${STEAM_WINDOW_TIMEOUT:-300}" || {
-  warn "main Steam window not visible — Steam may still be downloading runtimes"
-  exit 1
-}
 
 say "done"
 log "Steam is fully up. next: src/game-streamer.sh run-live"
