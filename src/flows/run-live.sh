@@ -98,10 +98,22 @@ done
 # ---------------------------------------------------------------------------
 say "4. -applaunch 730 (Steam will update CS2 if needed)"
 do_applaunch() {
-  nohup "$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 \
-    -fullscreen -width 1920 -height 1080 -novid -nojoy -console \
-    +exec live_autoexec \
-    >>"$LOG_DIR/cs2_launch.log" 2>&1 &
+  # Pass connect/password directly as launch args. They run AFTER the
+  # engine is fully initialized, while +exec from a cfg can run too
+  # early (before networking) and silently no-op. We keep +exec as a
+  # backup path in case Steam reorders things.
+  local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730
+    -fullscreen -width 1920 -height 1080 -novid -nojoy -console
+    +exec live_autoexec)
+  if [ -n "${PLAYCAST_URL:-}" ]; then
+    cmd+=(+playcast "$PLAYCAST_URL")
+  else
+    # CS2 takes the password from the `password` cvar — set it BEFORE
+    # +connect so the auth is in place when the connection happens.
+    cmd+=(+password "$CONNECT_PASSWORD" +connect "$CONNECT_ADDR")
+  fi
+  log "  exec: ${cmd[*]}"
+  nohup "${cmd[@]}" >>"$LOG_DIR/cs2_launch.log" 2>&1 &
   log "  applaunch sent (launcher pid=$!)"
 }
 do_applaunch
@@ -216,6 +228,16 @@ done
   tail -60 "$LOG_DIR/cs2.log" 2>/dev/null
   exit 1
 }
+
+# ---------------------------------------------------------------------------
+say "5b. confirm CS2 actually attempted the connect"
+# CS2's stdout is captured by Steam's logger into console-linux.txt.
+# Look for connect-related lines so we can see if the +connect launch
+# arg / live_autoexec.cfg actually fired.
+log "recent cs2 output (connect / exec / live_autoexec):"
+grep -iE 'connect|password|live_autoexec|playcast|server|master' \
+  "$LOG_DIR/cs2.log" 2>/dev/null \
+  | tail -20 | sed 's/^/    /' || log "    (no relevant lines yet)"
 
 # ---------------------------------------------------------------------------
 say "6. start match capture stream"
