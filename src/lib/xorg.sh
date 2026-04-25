@@ -9,6 +9,21 @@ start_openbox() {
   log "openbox started"
 }
 
+# On Xorg startup failure, dump the things that distinguish "container
+# can't see GPU" from "host KMS state is wrong" from "Xorg conf is
+# broken" — saves a round-trip of "ssh in and check".
+_dump_xorg_diagnostics() {
+  log "--- Xorg diagnostics ---"
+  log "nvidia-smi -L:"
+  nvidia-smi -L 2>&1 | sed 's/^/  /' >&2 || true
+  log "ls -la /dev/dri/:"
+  ls -la /dev/dri/ 2>&1 | sed 's/^/  /' >&2 || true
+  log "cat /sys/module/nvidia_drm/parameters/modeset (host KMS):"
+  cat /sys/module/nvidia_drm/parameters/modeset 2>&1 | sed 's/^/  /' >&2 || true
+  log "last 80 lines of /tmp/xorg.log:"
+  tail -n 80 /tmp/xorg.log 2>&1 | sed 's/^/  /' >&2 || true
+}
+
 start_xorg() {
   if pgrep -x Xorg >/dev/null 2>&1; then
     log "Xorg already running on $DISPLAY"
@@ -39,8 +54,8 @@ start_xorg() {
     sleep 0.5
   done
 
-  log "ERROR: Xorg did not come up — last 80 lines of /tmp/xorg.log:"
-  tail -n 80 /tmp/xorg.log >&2 || true
+  log "ERROR: Xorg did not come up"
+  _dump_xorg_diagnostics
   return 1
 }
 
