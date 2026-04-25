@@ -97,11 +97,15 @@ done
 
 # ---------------------------------------------------------------------------
 say "4. -applaunch 730 (Steam will update CS2 if needed)"
-nohup "$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 \
-  -fullscreen -width 1920 -height 1080 -novid -nojoy -console \
-  +exec live_autoexec \
-  >"$LOG_DIR/cs2_launch.log" 2>&1 &
-log "  launcher pid=$!"
+do_applaunch() {
+  nohup "$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 \
+    -fullscreen -width 1920 -height 1080 -novid -nojoy -console \
+    +exec live_autoexec \
+    >>"$LOG_DIR/cs2_launch.log" 2>&1 &
+  log "  applaunch sent (launcher pid=$!)"
+}
+do_applaunch
+RELAUNCH_DONE=0
 
 # Wait for cs2 process. Two side-effects on each iteration:
 #  - poke the Steam window with Return: dismisses the focused button on
@@ -122,16 +126,35 @@ for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
     xdotool key --clearmodifiers Return 2>/dev/null || true
   fi
 
-  # Click "Play anyway" / Skip on whatever modal CEF dialog is up. Uses
-  # absolute screen coords + XTest so CEF accepts the click (--window
-  # variants get filtered as synthetic). Safe when no dialog is open —
-  # the click lands on Steam UI background.
-  [ $(( i % 3 )) -eq 0 ] && poke_steam_dialog
+  # NOTE: auto-poke disabled. After downloads complete the click at
+  # (54%, 57%) was hitting Steam UI background (no cloud dialog up by
+  # then) and likely canceling the launch flow. Use `dismiss` manually
+  # if a CEF modal blocks. We dump Steam's own logs every 15s instead
+  # so we can see what Steam thinks it's doing.
 
   if [ $(( i % 15 )) -eq 0 ]; then
     log "  ${i}s elapsed waiting on cs2 (likely updating + dialogs):"
     log "  open X windows:"
     list_x_windows
+    # What does Steam itself say? These are the lines that tell us
+    # whether Steam is still downloading, has launched cs2 already,
+    # is showing a dialog, or has bailed out.
+    log "  recent Steam log activity (cs2 / launch / 730):"
+    grep -iE 'cs2|appid 730|applaunch|launching|playstart|"730"' \
+      "$STEAM_HOME/logs/console-linux.txt" 2>/dev/null \
+      | tail -10 | sed 's/^/    /' || true
+    log "  recent cloud_log activity for AppID 730:"
+    grep -E '\[AppID 730\]' "$STEAM_HOME/logs/cloud_log.txt" 2>/dev/null \
+      | tail -5 | sed 's/^/    /' || true
+  fi
+
+  # Fallback: if cs2 still hasn't spawned after 90s, re-issue applaunch
+  # once. Steam sometimes finishes a depot update + cloud sync but
+  # doesn't auto-launch the game from the original applaunch session.
+  if [ "$i" = 90 ] && [ "$RELAUNCH_DONE" = 0 ]; then
+    log "  90s without cs2 — re-issuing -applaunch (one-shot fallback)"
+    do_applaunch
+    RELAUNCH_DONE=1
   fi
   sleep 1
 done
@@ -158,11 +181,12 @@ for i in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
     dump_log "$LOG_DIR/cs2.log"
     exit 1
   fi
-  [ $(( i % 3 )) -eq 0 ] && poke_steam_dialog
   if [ $(( i % 15 )) -eq 0 ]; then
     log "  still waiting (${i}s, cs2 pid=$CS2_PID alive)"
     log "  open X windows:"
     list_x_windows
+    log "  recent cs2 log activity:"
+    tail -10 "$LOG_DIR/cs2.log" 2>/dev/null | sed 's/^/    /' || true
   fi
   sleep 1
 done

@@ -242,51 +242,89 @@ cfg_path, appid = sys.argv[1], sys.argv[2]
 p = pathlib.Path(cfg_path)
 src = p.read_text()
 
+# ---------------------------------------------------------------------
+# Case 1: existing <appid> block — flip or insert cloudenabled inside.
+# ---------------------------------------------------------------------
 pat = re.compile(r'(^|\n)([ \t]*)"' + re.escape(appid) + r'"[ \t\r\n]*\{', re.MULTILINE)
 m = pat.search(src)
-if not m:
-    apps = re.search(r'(\n[ \t]*)"apps"[ \t\r\n]*\{', src)
-    if not apps:
-        print(f"  {cfg_path}: no 'apps' section yet — skipping (Steam writes it on first launch)")
-        sys.exit(0)
+if m:
+    brace_open = m.end() - 1
+    depth, i = 1, brace_open + 1
+    while i < len(src) and depth > 0:
+        if src[i] == '{': depth += 1
+        elif src[i] == '}': depth -= 1
+        i += 1
+    if depth != 0:
+        print(f"  {cfg_path}: unbalanced braces — refusing to edit")
+        sys.exit(1)
+    brace_close = i - 1
+    block = src[brace_open + 1:brace_close]
+    indent = m.group(2) + "\t"
+    # Steam writes the key as "CloudEnabled" (capitalized); historic docs
+    # use lowercase. Match either, preserve case to avoid duplicates.
+    ce = re.search(r'(^|\n)([ \t]*)"([Cc]loud[Ee]nabled)"[ \t]+"([^"]*)"', block)
+    if ce:
+        if ce.group(4) == "0":
+            sys.exit(0)
+        new_block = block[:ce.start()] \
+            + f'{ce.group(1)}{ce.group(2)}"{ce.group(3)}"\t\t"0"' \
+            + block[ce.end():]
+        p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
+        print(f"  {cfg_path}: flipped {ce.group(3)} to 0 in existing {appid} block")
+    else:
+        new_block = f'\n{indent}"CloudEnabled"\t\t"0"' + block
+        p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
+        print(f"  {cfg_path}: inserted CloudEnabled=0 in existing {appid} block")
+    sys.exit(0)
+
+# ---------------------------------------------------------------------
+# Case 2: existing "apps" block — insert <appid> block inside.
+# ---------------------------------------------------------------------
+apps = re.search(r'(\n[ \t]*)"apps"[ \t\r\n]*\{', src)
+if apps:
     indent = apps.group(1).rstrip("\n")
     insertion = (
         f'{indent}\t"{appid}"\n{indent}\t{{\n'
-        f'{indent}\t\t"cloudenabled"\t\t"0"\n{indent}\t}}\n'
+        f'{indent}\t\t"CloudEnabled"\t\t"0"\n{indent}\t}}\n'
     )
     p.write_text(src[:apps.end()] + insertion + src[apps.end():])
-    print(f"  {cfg_path}: inserted new {appid} block with cloudenabled=0")
+    print(f"  {cfg_path}: inserted new {appid} block with CloudEnabled=0")
     sys.exit(0)
 
-brace_open = m.end() - 1
-depth, i = 1, brace_open + 1
-while i < len(src) and depth > 0:
-    if src[i] == '{': depth += 1
-    elif src[i] == '}': depth -= 1
-    i += 1
-if depth != 0:
-    print(f"  {cfg_path}: unbalanced braces — refusing to edit")
-    sys.exit(1)
-brace_close = i - 1
-block = src[brace_open + 1:brace_close]
-indent = m.group(2) + "\t"
+# ---------------------------------------------------------------------
+# Case 3: no "apps" block at all — synthesize the whole structure under
+# the Steam block. sharedconfig.vdf is nearly empty before the first
+# CS2 launch, so this is the case that hit you.
+# ---------------------------------------------------------------------
+def find_block_open(src, key, start=0):
+    """Return offset right after the `{` of `"key" {` (or -1)."""
+    pat = re.compile(r'"' + re.escape(key) + r'"[ \t\r\n]*\{')
+    mm = pat.search(src, start)
+    return mm.end() if mm else -1
 
-# Steam writes the key as "CloudEnabled" (capitalized); historic
-# documentation uses lowercase. Match either, preserve the existing
-# case so we don't end up with two keys.
-ce = re.search(r'(^|\n)([ \t]*)"([Cc]loud[Ee]nabled)"[ \t]+"([^"]*)"', block)
-if ce:
-    if ce.group(4) == "0":
-        sys.exit(0)
-    new_block = block[:ce.start()] \
-        + f'{ce.group(1)}{ce.group(2)}"{ce.group(3)}"\t\t"0"' \
-        + block[ce.end():]
-    p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
-    print(f"  {cfg_path}: flipped {ce.group(3)} to 0")
-else:
-    new_block = f'\n{indent}"CloudEnabled"\t\t"0"' + block
-    p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
-    print(f"  {cfg_path}: inserted CloudEnabled=0")
+sw = find_block_open(src, "Software")
+if sw == -1:
+    print(f"  {cfg_path}: no Software block — leaving untouched"); sys.exit(0)
+valve = find_block_open(src, "Valve", sw)
+if valve == -1:
+    print(f"  {cfg_path}: no Valve block — leaving untouched"); sys.exit(0)
+steam = find_block_open(src, "Steam", valve)
+if steam == -1:
+    print(f"  {cfg_path}: no Steam block — leaving untouched"); sys.exit(0)
+
+# Pull the indent of the "Steam" line so the new block matches the file's style.
+sm = re.search(r'(\n)([ \t]*)"Steam"[ \t\r\n]*\{', src[:steam])
+steam_indent = sm.group(2) if sm else "\t\t\t"
+inner = steam_indent + "\t"  # one level deeper for "apps"
+
+insertion = (
+    f'\n{inner}"apps"\n{inner}{{\n'
+    f'{inner}\t"{appid}"\n{inner}\t{{\n'
+    f'{inner}\t\t"CloudEnabled"\t\t"0"\n{inner}\t}}\n'
+    f'{inner}}}'
+)
+p.write_text(src[:steam] + insertion + src[steam:])
+print(f"  {cfg_path}: synthesized apps/{appid}/CloudEnabled=0 under Steam block")
 PY
 }
 
