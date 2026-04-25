@@ -10,52 +10,62 @@ ENV GTK_A11Y=none
 ENV NO_AT_BRIDGE=1
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-# Common tools + i386 arch so we can install 32-bit deps Steam client
-# (and the gbe_fork stub, which is 64-bit only but its siblings may be 32-bit)
-# need.
+# Common tools + i386 arch for 32-bit Steam client deps.
+#   curl       — download Steam bootstrap + steamcmd at image build
+#   tini       — PID 1 reaper for the entrypoint
+#   procps     — pgrep/pkill used heavily in lib/* and dev/*
+#   xz-utils   — needed to extract bootstraplinux*.tar.xz from steam.deb
+#   binutils   — `nm` for the dev libpango symbol check
+#   gdb,strace — dev/debug-cs2-crash.sh
+#   locales    — Steam expects a real UTF-8 locale
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      software-properties-common \
-      ca-certificates curl wget jq tini gosu vim less procps strace \
-      bzip2 unzip p7zip-full binutils file xz-utils \
-      locales \
-    && add-apt-repository -y multiverse \
+      ca-certificates curl tini procps xz-utils binutils \
+      gdb strace locales software-properties-common \
     && add-apt-repository -y universe \
     && dpkg --add-architecture i386 \
     && apt-get update
 
-# X server + WM + dbus + zenity
+# X server + WM + dbus.
+#   xdotool   — used to dismiss "Processing Vulkan shaders" dialog and to
+#               drive console-connect.sh
+#   xwininfo  — used to detect when the CS2 window appears
+#   zenity    — Steam's bootstrap shells out to it for error popups; without
+#               it Steam crashes hard on certain failure paths
 RUN apt-get install -y --no-install-recommends \
       xserver-xorg-core xserver-xorg-legacy xserver-xorg-video-dummy \
-      xinit x11-xserver-utils xauth xdotool wmctrl x11-utils \
+      xinit x11-xserver-utils xauth xdotool x11-utils \
       openbox dbus dbus-x11 zenity
 
-# GPU userspace (NVIDIA runtime injects the actual driver libs)
+# GPU userspace (NVIDIA runtime injects the actual driver libs at runtime).
 RUN apt-get install -y --no-install-recommends \
       libgl1 libglx-mesa0 libegl1 libgles2 \
-      libvulkan1 mesa-vulkan-drivers mesa-utils vulkan-tools \
-      libasound2t64 libpulse0 pulseaudio-utils
+      libvulkan1 mesa-vulkan-drivers \
+      libasound2t64 libpulse0 pulseaudio pulseaudio-utils
 
-# CS2 runtime text/UI deps
+# CS2 runtime text/UI deps (the -dev variants are dropped — only runtime libs).
 RUN apt-get install -y --no-install-recommends \
-      libpango-1.0-0 libpangoft2-1.0-0 libpangocairo-1.0-0 libpango1.0-dev \
-      libfontconfig1 libfreetype6 libfreetype-dev \
-      libharfbuzz0b libharfbuzz-dev \
+      libpango-1.0-0 libpangoft2-1.0-0 libpangocairo-1.0-0 \
+      libfontconfig1 libfreetype6 libharfbuzz0b \
       libxrandr2 libxinerama1 libxi6 libxxf86vm1 libxcursor1 \
       libxcomposite1 libxdamage1 libxfixes3 libxtst6 \
       libnss3 libnspr4 \
       libatk1.0-0t64 libatk-bridge2.0-0t64 libcups2t64 \
       libdbus-1-3 libxkbcommon0 libgbm1 libcurl4t64
 
-# GStreamer capture pipeline + ffmpeg
+# GStreamer capture pipeline.
+#   plugins-bad — provides srtsink
+#   plugins-ugly — provides x264enc as a software fallback when NVENC fails
+#   libav — avenc_aac for the audio leg
+#   python3 — used by lib/steam.sh (libraryfolders.vdf manipulation)
 RUN apt-get install -y --no-install-recommends \
       gstreamer1.0-tools \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
       gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-      gstreamer1.0-libav gstreamer1.0-nice gstreamer1.0-x \
-      ffmpeg \
-      python3 python3-requests
+      gstreamer1.0-libav gstreamer1.0-x \
+      python3
 
-# 32-bit libs required by Steam client + gbe_fork stub companions
+# 32-bit libs required by the Steam client (Steam UI is 32-bit; CS2 itself
+# is 64-bit but the launcher path needs the 32-bit stack to run).
 RUN apt-get install -y --no-install-recommends \
       lib32gcc-s1 libc6-i386 \
       libsdl2-2.0-0:i386 libncurses6:i386 \
@@ -66,19 +76,13 @@ RUN apt-get install -y --no-install-recommends \
       libnss3:i386 libnspr4:i386 libdbus-1-3:i386 \
       libfreetype6:i386 libpulse0:i386 libva2:i386
 
-# (Steam 32-bit UI libs — libgtk2.0-0:i386 / libpango:i386 etc — dropped
-#  because we use the gbe_fork stub instead of the real Steam client. CS2
-#  itself is 64-bit and does not need 32-bit GTK/Pango.)
-
 RUN rm -rf /var/lib/apt/lists/*
 
-# steamcmd from Valve's CDN (Ubuntu repos have it via multiverse but
-# fetching directly is more deterministic and avoids debconf prompts).
+# steamcmd from Valve's CDN. Always invoked as /opt/steamcmd/steamcmd.sh
+# directly — the wrapper-script approach breaks steamcmd's self-relocation.
 RUN mkdir -p /opt/steamcmd \
  && curl -fsSL https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz \
-    | tar -xz -C /opt/steamcmd \
- && printf '#!/bin/sh\nexec /opt/steamcmd/steamcmd.sh "$@"\n' >/usr/local/bin/steamcmd \
- && chmod +x /usr/local/bin/steamcmd
+    | tar -xz -C /opt/steamcmd
 
 RUN locale-gen en_US.UTF-8
 
@@ -88,14 +92,27 @@ RUN printf 'allowed_users=anybody\nneeds_root_rights=yes\n' >/etc/X11/Xwrapper.c
 
 # Remove the default ubuntu user (UID 1000), run as root in this dev container.
 RUN if id -u ubuntu >/dev/null 2>&1; then userdel -r ubuntu 2>/dev/null || userdel ubuntu; fi \
- && mkdir -p /opt/game-streamer /opt/5stack \
+ && mkdir -p /opt/game-streamer \
  && chown -R root:root /opt
 
-COPY scripts/ /opt/game-streamer/scripts/
-COPY xorg-dummy.conf /etc/X11/xorg-dummy.conf
-COPY cfg/ /opt/game-streamer/cfg/
-RUN chmod +x /opt/game-streamer/scripts/*.sh /opt/game-streamer/scripts/*.py 2>/dev/null || true
+# Pre-extract the Steam bootstrap into the image so a fresh pod (with an
+# empty persistent volume) can launch Steam without first downloading and
+# unpacking the .deb. The entrypoint will copy these files into the
+# persisted Steam dir on first boot.
+RUN mkdir -p /opt/steam-bootstrap \
+ && curl -fsSL -o /tmp/steam.deb https://cdn.cloudflare.steamstatic.com/client/installer/steam.deb \
+ && dpkg-deb -x /tmp/steam.deb /tmp/steamdeb \
+ && tar -xJf "$(find /tmp/steamdeb -name 'bootstraplinux*.tar.xz' | head -1)" \
+        -C /opt/steam-bootstrap \
+ && rm -rf /tmp/steam.deb /tmp/steamdeb
 
-WORKDIR /root
+COPY src/ /opt/game-streamer/src/
+COPY resources/ /opt/game-streamer/resources/
+COPY resources/xorg-dummy.conf /etc/X11/xorg-dummy.conf
+RUN chmod +x /opt/game-streamer/src/*.sh \
+             /opt/game-streamer/src/actions/*.sh \
+             /opt/game-streamer/src/dev/*.sh 2>/dev/null || true
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/opt/game-streamer/scripts/entrypoint.sh"]
+WORKDIR /opt/game-streamer
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/game-streamer/src/game-streamer.sh"]
