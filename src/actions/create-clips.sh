@@ -18,11 +18,12 @@
 #   CLIPS_DIR              default /mnt/game-streamer/clips
 #   CLIP_LEAD_SECONDS      seconds before START_TICK to start recording (default 5)
 #   CLIP_TAIL_SECONDS      seconds after  END_TICK   to stop recording  (default 3)
-#   S3_ENDPOINT, S3_BUCKET_CLIPS, S3_ACCESS_KEY, S3_SECRET_KEY
-#                          if set, upload the produced mp4 to S3
+#
+# Upload of the produced mp4 is intentionally not wired here — a
+# separate TypeScript service will consume $CLIPS_DIR.
 set -euo pipefail
 
-LOG_TAG=render
+LOG_TAG=create-clips
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=lib/common.sh
@@ -62,9 +63,7 @@ write_autoexec clip_autoexec \
   "demo_resume"
 
 # Kill any prior cs2 + clear stale source-engine lock.
-pkill -9 -f '/linuxsteamrt64/cs2' 2>/dev/null || true
-sleep 1
-rm -f /tmp/source_engine_*.lock 2>/dev/null || true
+quit_cs2 hard
 
 launch_cs2_via_steam \
   -fullscreen -width "$DISPLAY_SIZEW" -height "$DISPLAY_SIZEH" \
@@ -79,7 +78,7 @@ record_to_mp4 "$OUTPUT" "$DURATION_SECS"
 log "clip written: $OUTPUT"
 
 # Tear down CS2 — Job pod will exit shortly after.
-pkill -TERM -f '/linuxsteamrt64/cs2' 2>/dev/null || true
+quit_cs2
 
 # TODO: re-add clip upload (will be a TypeScript service consuming
 # rendered clips from $CLIPS_DIR — see future highlight pipeline).

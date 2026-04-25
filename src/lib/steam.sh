@@ -35,11 +35,16 @@ _persist_dir() {
   fi
 
   # First run: migrate any in-container state into the persist dir.
+  # We must succeed at copying before removing the source, otherwise a
+  # failed cp leaves us with neither.
   if [ -d "$target" ] && [ ! -L "$target" ] \
        && [ -n "$(ls -A "$target" 2>/dev/null)" ] \
        && [ -z "$(ls -A "$persist" 2>/dev/null)" ]; then
     log "migrating $target → $persist"
-    cp -a "$target/." "$persist/"
+    if ! cp -a "$target/." "$persist/"; then
+      log "ERROR: failed to migrate $target — leaving in place"
+      return 1
+    fi
   fi
   rm -rf "$target" 2>/dev/null || true
   mkdir -p "$(dirname "$target")"
@@ -227,17 +232,17 @@ start_steam() {
   return 1
 }
 
-# Returns 0 if appmanifest_730.acf exists with StateFlags=4 (fully
-# installed and current). Looks at both the legacy +force_install_dir
-# location and the proper Steam library location.
+# Returns 0 if CS2 is fully installed: appmanifest_730.acf has
+# StateFlags=4 AND the cs2 binary actually exists in $CS2_DIR. The binary
+# check protects against a stale manifest pointing at a deleted install.
 cs2_is_installed() {
-  local m
+  [ -x "$CS2_DIR/game/bin/linuxsteamrt64/cs2" ] || return 1
+
+  local m flags
   for m in "$PERSIST_DIR/steamapps/appmanifest_730.acf" \
            "$CS2_DIR/steamapps/appmanifest_730.acf"; do
     if [ -f "$m" ]; then
-      local flags
-      flags=$(grep -oE '"StateFlags"[[:space:]]+"[0-9]+"' "$m" \
-              | grep -oE '[0-9]+$' | head -1)
+      flags=$(awk '/"StateFlags"/{gsub(/"/,"",$2); print $2; exit}' "$m")
       [ "$flags" = "4" ] && return 0
     fi
   done

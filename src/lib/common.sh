@@ -18,7 +18,7 @@
 mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null && chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
 export DISPLAY XDG_RUNTIME_DIR GTK_A11Y NO_AT_BRIDGE CS2_DIR PERSIST_DIR
 
-log() { echo "[${LOG_TAG:-entrypoint}] $*"; }
+log() { echo "[${LOG_TAG:-game-streamer}] $*"; }
 
 require_env() {
   local var

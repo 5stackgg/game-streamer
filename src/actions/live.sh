@@ -58,9 +58,7 @@ if [ -f "$REPO_DIR/resources/live_autoexec.cfg" ]; then
 fi
 
 # Kill any prior cs2 + clear stale source-engine lock.
-pkill -9 -f '/linuxsteamrt64/cs2' 2>/dev/null || true
-sleep 1
-rm -f /tmp/source_engine_*.lock 2>/dev/null || true
+quit_cs2 hard
 
 launch_cs2_via_steam \
   -fullscreen -width "$DISPLAY_SIZEW" -height "$DISPLAY_SIZEH" \
