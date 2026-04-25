@@ -22,11 +22,19 @@ jobs:
               echo "::error file=$f::bash syntax error"
               fail=1
             fi
-          done < <(find src -type f -name '*.sh' -print0)
+          done < <(find src tests -type f -name '*.sh' -print0)
           exit $fail
 
-  build-push-and-release:
+  cli-smoke:
     needs: shell-syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tests/cli.sh
+        run: tests/cli.sh
+
+  build-push-and-release:
+    needs: [shell-syntax, cli-smoke]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
     steps:

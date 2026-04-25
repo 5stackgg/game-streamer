@@ -51,7 +51,15 @@ SUBCOMMANDS=(
 )
 
 _cmd_help() {
-  awk 'NR==1{next} /^[^#]/{exit} {sub(/^# ?/, ""); print}' "$0"
+  # Skip shebang, stop on the first non-comment non-blank line, strip
+  # leading "# " from comment lines. This pulls the doc block at the
+  # top of the file as the help text.
+  awk '
+    NR == 1                 { next }
+    /^[[:space:]]*$/        { exit }
+    /^[^#]/                 { exit }
+    { sub(/^# ?/, ""); print }
+  ' "$0"
 }
 _cmd_quit_cs2()   { quit_cs2 "$@"; }
 _cmd_update_cs2() {
@@ -71,6 +79,11 @@ _dispatch_subcommand() {
     name="${entry%%:*}"
     target="${entry#*:}"
     [ "$name" = "$cmd" ] || continue
+    # Routing convention: targets that start with "dev/" are exec'd as
+    # standalone scripts (so the operator gets the script's own
+    # argument handling); everything else is the name of a function
+    # defined in this file. Don't add SUBCOMMANDS entries whose
+    # function name happens to start with "dev/".
     if [ "${target#dev/}" != "$target" ]; then
       local script="$SCRIPT_DIR/$target"
       [ -x "$script" ] || { echo "missing: $script" >&2; exit 2; }
