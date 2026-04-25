@@ -48,11 +48,13 @@ while [ $# -gt 0 ]; do
     --debug)         DEBUG_CAPTURE=1; shift ;;
     --debug-id)      DEBUG_STREAM_ID="$2"; DEBUG_CAPTURE=1; shift 2 ;;
     --debug-id=*)    DEBUG_STREAM_ID="${1#*=}"; DEBUG_CAPTURE=1; shift ;;
+    --trace|-x)      GS_TRACE=1; shift ;;
     --)              shift; break ;;
     *)               break ;;
   esac
 done
-export DEBUG_CAPTURE DEBUG_STREAM_ID
+export DEBUG_CAPTURE DEBUG_STREAM_ID GS_TRACE
+[ "${GS_TRACE:-0}" = "1" ] && set -x
 
 usage() {
   cat <<EOF
@@ -67,6 +69,7 @@ global flags:
   --debug                  publish on-screen capture to publish:debug
                            (watch at https://hls.5stack.gg/debug/)
   --debug-id <id>          override the debug stream id (implies --debug)
+  --trace, -x              set -x on every script (very loud, for debug)
 
 debug stream (ad-hoc):
   debug-stream start [id]  start screen-capture stream (default id: 'debug')

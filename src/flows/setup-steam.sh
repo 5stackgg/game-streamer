@@ -54,6 +54,11 @@ migrate_legacy_cs2
 
 # Must run while Steam is OFF — Steam clobbers localconfig.vdf on shutdown.
 # Without this CS2 pops a "Cloud Out of Date" CEF dialog we can't auto-dismiss.
+# On first boot there's no userdata/ yet, so this is a no-op; we cycle Steam
+# below once Steam has written its initial localconfig.vdf.
+HAD_USERDATA=0
+[ -d "$STEAM_HOME/userdata" ] && HAD_USERDATA=1
+
 say "6. disable CS2 cloud sync"
 disable_cs2_cloud
 
@@ -65,6 +70,20 @@ wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" || {
   warn "pipe never came up — check $LOG_DIR/steam.log and the debug stream"
   exit 1
 }
+
+# First-boot auto-cycle: Steam just wrote a fresh localconfig.vdf with
+# cloudenabled=1. SIGKILL avoids a graceful shutdown (which would rewrite
+# the file from in-memory state and undo our edit), then we edit + relaunch.
+if [ "$HAD_USERDATA" = 0 ]; then
+  say "9. first-boot: cycle Steam to apply cloud-sync disable"
+  kill_steam
+  disable_cs2_cloud
+  start_steam
+  wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" || {
+    warn "pipe never came up after cycle — check $LOG_DIR/steam.log"
+    exit 1
+  }
+fi
 
 say "done"
 log "next: src/game-streamer.sh run-live  (after you see the main Steam window)"

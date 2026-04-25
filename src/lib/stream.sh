@@ -29,7 +29,9 @@ start_capture() {
     return 0
   fi
 
-  log "starting capture '${stream_id}' -> $url"
+  log "starting capture '${stream_id}' (fps=$fps kbps=$kbps pointer=$pointer)"
+  log "  -> $url"
+  log "  log: $logf"
   nohup gst-launch-1.0 -e \
     ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
       ! video/x-raw,framerate="$fps"/1 \
@@ -42,10 +44,10 @@ start_capture() {
   local pid=$!
   sleep 2
   if kill -0 "$pid" 2>/dev/null; then
-    log "  pid=$pid (log: $logf)"
+    log "  pid=$pid"
   else
-    warn "capture '${stream_id}' failed to stay up — tail $logf:"
-    tail -30 "$logf" >&2 || true
+    warn "capture '${stream_id}' failed to stay up"
+    dump_log "$logf"
     return 1
   fi
 }

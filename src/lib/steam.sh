@@ -282,5 +282,7 @@ wait_for_steam_pipe() {
     sleep 1
   done
   warn "steam pipe never came up after ${timeout}s"
+  dump_log "$LOG_DIR/steam.log"
+  dump_log "$STEAM_HOME/logs/console-linux.txt" 30
   return 1
 }
