@@ -84,6 +84,16 @@ control:
   windows                  print only the open X windows (cheap to poll)
   dismiss                  send Return to the Steam window
                            (clicks the focused button on any modal CEF dialog)
+  install-cs2              install/update CS2 via steamcmd into the
+                           registered library (kills Steam, runs steamcmd,
+                           leaves Steam off — re-run 'up' afterward).
+                           Set CS2_FORCE_UPDATE=1 to force re-validate.
+  steam-log                tail Steam's logs (steam.log, console-linux,
+                           stderr, cef_log, webhelper-linux)
+  debug [out-file]         full diagnostic dump (env, processes, pipe,
+                           steamclient, binaries, runtime, user-namespaces,
+                           windows, all logs, crash dumps, manifest, cloud
+                           state, disk). Saves to $LOG_DIR/debug-*.txt.
   cloud-state              print Steam Cloud setting from disk (no edit)
   cloud-debug              verbose dump: file paths, mtimes, raw VDF
                            blocks (730 + Cloud + CloudEnabled), Steam
@@ -170,6 +180,37 @@ cmd_stop_all() {
   log "all stopped"
 }
 
+cmd_steam_log() {
+  local f
+  for f in "$LOG_DIR/steam.log" \
+           "$STEAM_HOME/logs/console-linux.txt" \
+           "$STEAM_HOME/logs/stderr.txt" \
+           "$STEAM_HOME/logs/cef_log.txt" \
+           "$STEAM_HOME/logs/webhelper-linux.txt"; do
+    dump_log "$f" 60
+  done
+}
+
+# Comprehensive single-command dump. Always also writes the same output
+# to a file so it can be diffed/grepped after the fact without
+# re-collecting.
+cmd_debug() {
+  local out="${1:-$LOG_DIR/debug-$(date +%Y%m%d-%H%M%S).txt}"
+  log "writing full debug dump to $out (and stdout)"
+  print_full_debug 2>&1 | tee "$out"
+  log "saved to $out"
+}
+
+cmd_install_cs2() {
+  require_env STEAM_USERNAME STEAM_PASSWORD
+  say "kill Steam (steamcmd + Steam clash on appmanifest writes)"
+  kill_steam
+  say "register library + install CS2 via steamcmd"
+  register_library "$STEAM_LIBRARY"
+  install_cs2_via_steamcmd
+  log "done. Re-run 'src/game-streamer.sh up' to bring Steam back up + launch"
+}
+
 cmd_disable_cloud() {
   require_env STEAM_USERNAME STEAM_PASSWORD
   say "kill Steam (-9 — no graceful shutdown so the file edit isn't clobbered)"
@@ -196,6 +237,9 @@ case "$cmd" in
   status|state)   cmd_status ;;
   windows)        list_x_windows ;;
   dismiss)        poke_steam_dialog_verbose ;;
+  install-cs2)    cmd_install_cs2 ;;
+  steam-log)      cmd_steam_log ;;
+  debug)          cmd_debug "$@" ;;
   cloud-state)    print_cloud_state ;;
   cloud-debug)    print_cloud_debug ;;
   disable-cloud)  cmd_disable_cloud ;;

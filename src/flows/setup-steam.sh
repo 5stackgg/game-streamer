@@ -45,12 +45,25 @@ fi
 say "3. clean up any prior Steam/cs2 processes"
 kill_steam
 
+# Fix the EACCES-on-package bug from prior-uid pollution on the host
+# volume. Without this, Steam shuts down at startup and webhelper
+# never spawns. Must run AFTER kill_steam (so we're not racing Steam).
+say "3b. fix Steam-home permissions + nuke stale package cache"
+fix_steam_perms
+
 say "4. register steam library at $STEAM_LIBRARY"
 mkdir -p "$STEAM_LIBRARY/steamapps/common"
 register_library "$STEAM_LIBRARY"
 
 say "5. migrate legacy CS2 install (if present)"
 migrate_legacy_cs2
+
+# Install/update CS2 via steamcmd directly. Steam is OFF here (we
+# killed it at step 3), so steamcmd and Steam won't fight over
+# appmanifest. After this Steam picks up the install on launch and
+# the Install dialog never appears.
+say "5b. install/update CS2 via steamcmd"
+install_cs2_via_steamcmd
 
 # Must run while Steam is OFF — Steam clobbers localconfig.vdf on shutdown.
 # Without this CS2 pops a "Cloud Out of Date" CEF dialog we can't auto-dismiss.
@@ -81,6 +94,7 @@ if [ "$HAD_USERDATA" = 0 ]; then
   say "9. first-boot: cycle Steam to apply cloud-sync disable"
   kill_steam
   disable_cloud_globally
+  disable_cloud_in_config_vdf
   disable_cs2_cloud
   print_cloud_state
   start_steam

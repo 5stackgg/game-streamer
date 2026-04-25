@@ -138,6 +138,68 @@ lf.write_text(src)
 PY
 }
 
+# Install or update CS2 via steamcmd directly into the configured library.
+# Skips when an appmanifest already exists (idempotent fast path); set
+# CS2_FORCE_UPDATE=1 to force a re-validate.
+#
+# Runs against $STEAM_LIBRARY (not the default ~/.local/share/Steam) by
+# passing +force_install_dir, so the install lands inside our registered
+# library folder and Steam picks it up on launch — no Install UI dialog.
+#
+# Steam should be OFF when this runs (we kill it in setup-steam before
+# calling). steamcmd and Steam can clash on appmanifest writes otherwise.
+install_cs2_via_steamcmd() {
+  require_env STEAM_USERNAME STEAM_PASSWORD
+
+  local manifest="$STEAM_LIBRARY/steamapps/appmanifest_730.acf"
+  local cs2_bin="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
+
+  if [ "${CS2_FORCE_UPDATE:-0}" != "1" ] \
+     && [ -f "$manifest" ] && [ -x "$cs2_bin" ]; then
+    local bid
+    bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
+    log "CS2 already installed at $CS2_DIR (${bid:-buildid unknown}) — skip steamcmd"
+    log "  force re-validate with CS2_FORCE_UPDATE=1"
+    return 0
+  fi
+
+  if ! command -v /opt/steamcmd/steamcmd.sh >/dev/null 2>&1 \
+       && [ ! -x /opt/steamcmd/steamcmd.sh ]; then
+    die "steamcmd not found at /opt/steamcmd/steamcmd.sh — image needs the steamcmd install layer"
+  fi
+
+  log "running steamcmd: install/update CS2 (appid 730) into $CS2_DIR"
+  log "  this is a ~57 GB download on a fresh install"
+  mkdir -p "$CS2_DIR"
+
+  # Call steamcmd.sh directly — the /usr/local/bin/steamcmd shim resolves
+  # its own dir wrong via symlink and can't find linux32/.
+  /opt/steamcmd/steamcmd.sh \
+    +@sSteamCmdForcePlatformType linux \
+    +force_install_dir "$CS2_DIR" \
+    +login "$STEAM_USERNAME" "$STEAM_PASSWORD" \
+    +app_update 730 validate \
+    +quit
+
+  if [ ! -f "$manifest" ] && [ -f "$CS2_DIR/steamapps/appmanifest_730.acf" ]; then
+    # steamcmd put the manifest inside the install dir; lift it to the
+    # library root where Steam expects it.
+    mv "$CS2_DIR/steamapps/appmanifest_730.acf" "$manifest"
+    rmdir "$CS2_DIR/steamapps" 2>/dev/null || true
+    sed -i 's|"installdir"[[:space:]]*"[^"]*"|"installdir"\t\t"Counter-Strike Global Offensive"|' \
+      "$manifest"
+    log "  lifted manifest to $manifest"
+  fi
+
+  if [ -f "$manifest" ]; then
+    local bid
+    bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
+    log "CS2 install OK — ${bid:-buildid unknown}"
+  else
+    die "steamcmd finished but no $manifest — install failed"
+  fi
+}
+
 # One-time migration of legacy CS2 install at $STEAM_LIBRARY/cs2 into the
 # canonical Steam library layout. No-op once moved.
 migrate_legacy_cs2() {
@@ -209,19 +271,22 @@ brace_close = i - 1
 block = src[brace_open + 1:brace_close]
 indent = m.group(2) + "\t"
 
-ce = re.search(r'(^|\n)([ \t]*)"cloudenabled"[ \t]+"([^"]*)"', block)
+# Steam writes the key as "CloudEnabled" (capitalized); historic
+# documentation uses lowercase. Match either, preserve the existing
+# case so we don't end up with two keys.
+ce = re.search(r'(^|\n)([ \t]*)"([Cc]loud[Ee]nabled)"[ \t]+"([^"]*)"', block)
 if ce:
-    if ce.group(3) == "0":
+    if ce.group(4) == "0":
         sys.exit(0)
     new_block = block[:ce.start()] \
-        + f'{ce.group(1)}{ce.group(2)}"cloudenabled"\t\t"0"' \
+        + f'{ce.group(1)}{ce.group(2)}"{ce.group(3)}"\t\t"0"' \
         + block[ce.end():]
     p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
-    print(f"  {cfg_path}: flipped cloudenabled to 0")
+    print(f"  {cfg_path}: flipped {ce.group(3)} to 0")
 else:
-    new_block = f'\n{indent}"cloudenabled"\t\t"0"' + block
+    new_block = f'\n{indent}"CloudEnabled"\t\t"0"' + block
     p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
-    print(f"  {cfg_path}: inserted cloudenabled=0")
+    print(f"  {cfg_path}: inserted CloudEnabled=0")
 PY
 }
 
@@ -443,8 +508,8 @@ while i < len(src) and depth > 0:
     elif src[i] == '}': depth -= 1
     i += 1
 block = src[m.end():i-1]
-ce = re.search(r'"cloudenabled"[ \t]+"([^"]*)"', block)
-print(f'cloudenabled="{ce.group(1)}"' if ce else "(no cloudenabled key)")
+ce = re.search(r'"([Cc]loud[Ee]nabled)"[ \t]+"([^"]*)"', block)
+print(f'{ce.group(1)}="{ce.group(2)}"' if ce else "(no CloudEnabled key)")
 PY
 )
         log "  $cfg: $m"
@@ -547,6 +612,201 @@ PY
   say "running Steam processes"
   pgrep -af 'ubuntu12_32/steam|steam\.sh|steamwebhelper|/linuxsteamrt64/cs2' \
     | sed 's/^/    /' || log "    (none)"
+}
+
+# Comprehensive diagnostic dump — everything we need to figure out why
+# Steam isn't behaving. One command, all signals.
+print_full_debug() {
+  say "ENVIRONMENT"
+  log "DISPLAY=$DISPLAY"
+  log "HOME=$HOME"
+  log "STEAM_HOME=$STEAM_HOME"
+  log "STEAM_LIBRARY=$STEAM_LIBRARY"
+  log "CS2_DIR=$CS2_DIR"
+  log "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+  log "LOG_DIR=$LOG_DIR"
+  log "uid=$(id -u) euid=$(id -u) user=$(id -un)"
+  log "container hostname: $(hostname 2>/dev/null)"
+
+  say "STEAM PROCESSES"
+  pgrep -af 'steam\.sh|ubuntu12_32/steam|ubuntu12_64|steamwebhelper|dbus-launch|/linuxsteamrt64/cs2|pressure-vessel|srt-bwrap|/steamcmd' \
+    | sed 's/^/  /' || log "  (none)"
+
+  say "STEAM PIPE"
+  if [ -p "$HOME/.steam/steam.pipe" ]; then
+    log "  $HOME/.steam/steam.pipe exists"
+  else
+    log "  $HOME/.steam/steam.pipe MISSING"
+  fi
+  if [ -f "$HOME/.steam/steam.pid" ]; then
+    local spid
+    spid=$(cat "$HOME/.steam/steam.pid" 2>/dev/null)
+    log "  $HOME/.steam/steam.pid = $spid (alive=$(kill -0 "$spid" 2>/dev/null && echo yes || echo no))"
+  else
+    log "  $HOME/.steam/steam.pid MISSING"
+  fi
+
+  say "STEAM SDK / steamclient.so"
+  for f in "$HOME/.steam/sdk32/steamclient.so" "$HOME/.steam/sdk64/steamclient.so"; do
+    if [ -L "$f" ]; then
+      log "  $f -> $(readlink "$f")  (resolved: $(readlink -f "$f" 2>/dev/null))"
+    elif [ -f "$f" ]; then
+      log "  $f (regular file, $(stat -c '%s' "$f") bytes)"
+    else
+      log "  $f MISSING"
+    fi
+  done
+
+  say "STEAM BINARIES"
+  for b in \
+    "$STEAM_HOME/steam.sh" \
+    "$STEAM_HOME/ubuntu12_32/steam" \
+    "$STEAM_HOME/ubuntu12_64/steamwebhelper"; do
+    if [ -x "$b" ]; then
+      log "  $b (exec, $(stat -c '%s' "$b") bytes)"
+    elif [ -e "$b" ]; then
+      log "  $b (NOT executable)"
+    else
+      log "  $b MISSING"
+    fi
+  done
+
+  say "STEAM HOME OWNERSHIP / PERMS  (EACCES-on-package debugging)"
+  log "  $STEAM_HOME:"
+  ls -lad "$STEAM_HOME" 2>/dev/null | sed 's/^/    /' || log "    MISSING"
+  log "  $STEAM_HOME contents (top level):"
+  ls -la "$STEAM_HOME" 2>/dev/null | head -25 | sed 's/^/    /' || true
+  log "  $STEAM_HOME/package:"
+  ls -lad "$STEAM_HOME/package" 2>/dev/null | sed 's/^/    /' \
+    || log "    (does not exist — Steam recreates on first start)"
+
+  say "STEAM RUNTIME"
+  for d in \
+    "$STEAM_HOME/ubuntu12_32/steam-runtime" \
+    "$STEAM_HOME/steamrt64/pv-runtime" \
+    "$STEAM_HOME/linux64"; do
+    if [ -d "$d" ]; then
+      log "  $d  ($(find "$d" -maxdepth 1 -type f 2>/dev/null | wc -l) files at top level)"
+    else
+      log "  $d MISSING"
+    fi
+  done
+
+  say "USER NAMESPACES (Steam needs unprivileged user-ns for bwrap sandbox)"
+  if unshare -U /bin/true 2>/dev/null; then
+    log "  unshare -U works — user namespaces are enabled"
+  else
+    log "  unshare -U FAILED — user namespaces DISABLED (Steam will hang)"
+  fi
+  if [ -r /proc/sys/user/max_user_namespaces ]; then
+    log "  max_user_namespaces = $(cat /proc/sys/user/max_user_namespaces)"
+  fi
+  if [ -r /proc/sys/kernel/unprivileged_userns_clone ]; then
+    log "  unprivileged_userns_clone = $(cat /proc/sys/kernel/unprivileged_userns_clone)"
+  fi
+  if [ -r /proc/self/status ]; then
+    log "  CapEff: $(grep '^CapEff' /proc/self/status 2>/dev/null)"
+  fi
+
+  say "X SERVER"
+  if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
+    log "  display $DISPLAY is up"
+  else
+    log "  display $DISPLAY DOWN"
+  fi
+
+  say "X WINDOWS"
+  if command -v list_x_windows >/dev/null 2>&1; then
+    list_x_windows
+  fi
+
+  say "STEAM LOGS (tail of each, if present)"
+  local logf
+  for logf in \
+    "$LOG_DIR/steam.log" \
+    "$STEAM_HOME/logs/console-linux.txt" \
+    "$STEAM_HOME/logs/stderr.txt" \
+    "$STEAM_HOME/logs/bootstrap_log.txt" \
+    "$STEAM_HOME/logs/cef_log.txt" \
+    "$STEAM_HOME/logs/webhelper-linux.txt" \
+    "$STEAM_HOME/logs/cloud_log.txt" \
+    "$LOG_DIR/xorg.log" \
+    "$LOG_DIR/openbox.log"; do
+    dump_log "$logf" 60
+  done
+
+  say "CRASH DUMPS"
+  ls -la /tmp/dumps* /tmp/source_engine_*.lock /mnt/game-streamer/steam/.crash 2>/dev/null \
+    | sed 's/^/  /' || log "  (none)"
+
+  say "CS2 INSTALL"
+  log "  $STEAM_LIBRARY/steamapps/appmanifest_730.acf:"
+  if [ -f "$STEAM_LIBRARY/steamapps/appmanifest_730.acf" ]; then
+    grep -E '"(buildid|installdir|StateFlags|name)"' \
+      "$STEAM_LIBRARY/steamapps/appmanifest_730.acf" | sed 's/^/    /'
+  else
+    log "    MISSING"
+  fi
+  log "  $CS2_DIR/game/bin/linuxsteamrt64/cs2:"
+  if [ -x "$CS2_DIR/game/bin/linuxsteamrt64/cs2" ]; then
+    log "    exec ($(stat -c '%s' "$CS2_DIR/game/bin/linuxsteamrt64/cs2") bytes)"
+  else
+    log "    MISSING or not executable"
+  fi
+
+  say "CLOUD STATE"
+  print_cloud_state
+
+  say "DISK USAGE"
+  df -h /mnt/game-streamer / "$STEAM_HOME" 2>/dev/null | sed 's/^/  /' || true
+}
+
+# Fix the persisted-state ownership/permissions bug that prevents Steam
+# from creating its update cache.
+#
+# Symptom: bootstrap_log.txt repeats:
+#   Error: Couldn't create cache directory /root/.local/share/Steam/package, got error 13
+#   Shutdown
+# Steam shuts down before webhelper spawns → no UI ever appears.
+#
+# Root cause: $STEAM_HOME is host-mounted, and at some point a process
+# running as a different uid (we saw 1000:1000 on the leftover .crash
+# file) wrote to it. Steam's pressure-vessel sandbox now can't write
+# the package dir under whatever effective uid bwrap maps it to.
+#
+# The package dir is Steam's update cache — safe to nuke; Steam
+# recreates it on next start.
+fix_steam_perms() {
+  if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
+    log "fix_steam_perms: Steam is running — skip"
+    return 0
+  fi
+
+  if [ -e "$STEAM_HOME/package" ]; then
+    log "fix_steam_perms: removing $STEAM_HOME/package (Steam recreates fresh)"
+    rm -rf "$STEAM_HOME/package"
+  fi
+
+  # Stale lock/pid leftovers can also wedge Steam at startup.
+  rm -f "$STEAM_HOME/.steamstart.id" \
+        "$STEAM_HOME/.steam.start" \
+        "$STEAM_HOME/.crash" \
+        "$STEAM_LIBRARY/steam/.crash" 2>/dev/null || true
+
+  # Normalize ownership on dirs Steam writes to. We deliberately do NOT
+  # recurse into CS2_DIR — it's 60GB on a separate path and chown'd
+  # ownership doesn't matter there.
+  log "fix_steam_perms: chown root + chmod u+rwX on Steam home"
+  chown root:root "$STEAM_HOME" 2>/dev/null || true
+  chmod u+rwx     "$STEAM_HOME" 2>/dev/null || true
+  local d
+  for d in config logs ubuntu12_32 ubuntu12_64 steamrt64 linux32 linux64 \
+           userdata steamapps clientui appcache depotcache; do
+    if [ -d "$STEAM_HOME/$d" ]; then
+      chown -R root:root "$STEAM_HOME/$d" 2>/dev/null || true
+      chmod -R u+rwX     "$STEAM_HOME/$d" 2>/dev/null || true
+    fi
+  done
 }
 
 # Kill anything left over from a prior Steam/cs2 session.

@@ -151,10 +151,20 @@ wait_for_main_steam_window() {
     if [ $(( i % 15 )) -eq 0 ]; then
       log "  still waiting (${i}s) — current windows:"
       list_x_windows
+      # Also report whether the webhelper that draws the UI is running.
+      local wh
+      wh=$(pgrep -af 'steamwebhelper' | head -1 || true)
+      log "  steamwebhelper: ${wh:-NOT RUNNING}"
     fi
     sleep 1
   done
   warn "main Steam window never appeared after ${timeout}s"
+  warn "running full debug dump (also saved to $LOG_DIR/debug-*.txt)"
+  if command -v print_full_debug >/dev/null 2>&1; then
+    local out="$LOG_DIR/debug-$(date +%Y%m%d-%H%M%S).txt"
+    print_full_debug 2>&1 | tee "$out" >&2
+    log "saved to $out"
+  fi
   return 1
 }
 
