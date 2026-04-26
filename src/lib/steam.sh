@@ -686,14 +686,33 @@ print_full_debug() {
     fi
   done
 
-  say "STEAM HOME OWNERSHIP / PERMS  (EACCES-on-package debugging)"
-  log "  $STEAM_HOME:"
+  say "STEAM HOME OWNERSHIP / PERMS  (root-cause debugging)"
+  log "  $STEAM_HOME (symlink itself):"
   ls -lad "$STEAM_HOME" 2>/dev/null | sed 's/^/    /' || log "    MISSING"
-  log "  $STEAM_HOME contents (top level):"
-  ls -la "$STEAM_HOME" 2>/dev/null | head -25 | sed 's/^/    /' || true
-  log "  $STEAM_HOME/package:"
-  ls -lad "$STEAM_HOME/package" 2>/dev/null | sed 's/^/    /' \
+  # Resolve through any symlink so we see the actual contents.
+  local resolved
+  resolved=$(readlink -f "$STEAM_HOME" 2>/dev/null)
+  if [ -n "$resolved" ] && [ "$resolved" != "$STEAM_HOME" ]; then
+    log "  resolved: $resolved"
+  fi
+  log "  $STEAM_HOME/ (top-level contents — following symlink):"
+  ls -laL "$STEAM_HOME" 2>/dev/null | head -40 | sed 's/^/    /' || log "    (cannot read)"
+  log "  $STEAM_HOME/package/:"
+  ls -la  "$STEAM_HOME/package/" 2>/dev/null | head -15 | sed 's/^/    /' \
     || log "    (does not exist — Steam recreates on first start)"
+  log "  $STEAM_HOME/package/tmp/ (interrupted-update marker):"
+  ls -la  "$STEAM_HOME/package/tmp/" 2>/dev/null | head -10 | sed 's/^/    /' \
+    || log "    (no tmp — clean state)"
+  log "  /tmp/steam_pipe_*, /tmp/dumps* (cross-pod leftovers):"
+  ls -la  /tmp/steam_pipe_* /tmp/dumps* 2>/dev/null | head -10 | sed 's/^/    /' \
+    || log "    (none)"
+  log "  $STEAM_HOME/package/steam_client_ubuntu12*  (manifest + interrupted markers):"
+  ls -la "$STEAM_HOME/package"/steam_client_ubuntu12* 2>/dev/null | sed 's/^/    /' \
+    || log "    (none — fresh state)"
+  log "  $STEAM_HOME/.crash, .steam.start, .steamstart.id (lock markers):"
+  ls -la "$STEAM_HOME/.crash" "$STEAM_HOME/.steam.start" "$STEAM_HOME/.steamstart.id" \
+    2>/dev/null | sed 's/^/    /' \
+    || log "    (none)"
 
   say "STEAM RUNTIME"
   for d in \
@@ -706,6 +725,28 @@ print_full_debug() {
       log "  $d MISSING"
     fi
   done
+
+  say "32-BIT LIB AVAILABILITY  (steamui.so dlmopen failure debugging)"
+  log "  Steam's UI is 32-bit and dlmopen()s these libs in a fresh"
+  log "  linker namespace; LD_LIBRARY_PATH isn't honored, so the system"
+  log "  must have the i386 versions installed (in /usr/lib/i386-linux-gnu)."
+  local lib
+  for lib in libgobject-2.0.so.0 libglib-2.0.so.0 libgtk-x11-2.0.so.0 \
+             libpango-1.0.so.0 libpangocairo-1.0.so.0 libcairo.so.2 \
+             libgdk_pixbuf-2.0.so.0 libatk-1.0.so.0; do
+    if [ -f "/usr/lib/i386-linux-gnu/$lib" ]; then
+      log "  /usr/lib/i386-linux-gnu/$lib  OK"
+    else
+      log "  /usr/lib/i386-linux-gnu/$lib  MISSING"
+    fi
+  done
+  log "  installed i386 packages (Steam-relevant):"
+  dpkg -l 2>/dev/null \
+    | grep ':i386' \
+    | grep -E 'glib|gtk|pango|cairo|gdk|atk|xml|xslt' \
+    | awk '{print "    " $2 " " $3}' \
+    | head -20 \
+    || log "    (dpkg unavailable or none installed)"
 
   say "USER NAMESPACES (Steam needs unprivileged user-ns for bwrap sandbox)"
   if unshare -U /bin/true 2>/dev/null; then
@@ -831,6 +872,52 @@ ensure_steam_home_persist() {
   log "ensure_steam_home_persist: $STEAM_HOME -> $target"
 }
 
+# Wipe Steam's binary install on each setup-steam run, preserving only
+# user state (userdata/, config/). Steam re-bootstraps from
+# /opt/steam-bootstrap (image-baked) or downloads on next start —
+# fast, deterministic, and immune to whatever partial-state corruption
+# the persisted host volume accumulated from prior pods.
+#
+# This is what the manual `rm -rf /opt/5stack/game-streamer/steam`
+# workaround does, except we keep:
+#   userdata/  — login (loginusers.vdf), cloud-disable per-app config
+#   config/    — libraryfolders.vdf, registry settings, hosts cache
+#
+# Set RESET_STEAM_INSTALL=0 to skip (e.g. for fast dev iteration when
+# you know the install is good).
+reset_steam_install() {
+  [ "${RESET_STEAM_INSTALL:-1}" = "1" ] || { log "reset_steam_install: skipped (RESET_STEAM_INSTALL=0)"; return 0; }
+
+  if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
+    warn "reset_steam_install: Steam is running — skip (run kill_steam first)"
+    return 0
+  fi
+  if [ ! -d "$STEAM_HOME" ]; then
+    log "reset_steam_install: $STEAM_HOME doesn't exist — nothing to wipe"
+    return 0
+  fi
+
+  local kept=("userdata" "config" "logs")
+  log "reset_steam_install: wiping $STEAM_HOME/* except: ${kept[*]}"
+
+  local entry name skip
+  shopt -s nullglob dotglob
+  for entry in "$STEAM_HOME"/*; do
+    name=$(basename "$entry")
+    skip=0
+    for k in "${kept[@]}"; do
+      if [ "$name" = "$k" ]; then skip=1; break; fi
+    done
+    if [ "$skip" = 1 ]; then
+      continue
+    fi
+    rm -rf -- "$entry"
+  done
+  shopt -u nullglob dotglob
+
+  log "reset_steam_install: done"
+}
+
 fix_steam_perms() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
     log "fix_steam_perms: Steam is running — skip"
@@ -865,16 +952,20 @@ fix_steam_perms() {
         "$STEAM_HOME/.crash" \
         "$STEAM_LIBRARY/steam/.crash" 2>/dev/null || true
 
-  # Normalize ownership across the ENTIRE Steam home. Earlier we only
-  # chown'd a hand-picked list of subdirs, but the persisted bind mount
-  # carries files owned by 1000:1000 / nobody:nogroup at the top level
-  # (steam.sh, clientui/, ubuntu12_32/, linux32/) from a prior host-uid
-  # mapping. Steam can't update those without owning them.
+  # Normalize ownership across the ENTIRE Steam home. The persisted
+  # host volume carries files owned by 1000:1000 / nobody:nogroup from
+  # a prior host-uid mapping; without root ownership Steam's bwrap
+  # sandbox can't always write what it needs.
+  #
+  # IMPORTANT: -H. Without it, $STEAM_HOME (a symlink to the cache
+  # mount) is NOT traversed — we'd be no-op'ing on the symlink itself
+  # and never touching the contents. With -H, chown follows command-line
+  # symlinks for the recursion. Same for chmod.
   # CS2_DIR is on a separate path ($STEAM_LIBRARY/steamapps/...), not
   # affected — and it's 60GB so we wouldn't want to chown it anyway.
-  log "fix_steam_perms: chown -R root:root + chmod -R u+rwX on $STEAM_HOME"
-  chown -R root:root "$STEAM_HOME" 2>/dev/null || true
-  chmod -R u+rwX     "$STEAM_HOME" 2>/dev/null || true
+  log "fix_steam_perms: chown -RH root:root + chmod -RH u+rwX on $STEAM_HOME"
+  chown -RH root:root "$STEAM_HOME" 2>/dev/null || true
+  chmod -RH u+rwX     "$STEAM_HOME" 2>/dev/null || true
 }
 
 # Kill anything left over from a prior Steam/cs2 session.
