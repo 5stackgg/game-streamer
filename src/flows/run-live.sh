@@ -19,6 +19,8 @@ SCRIPT_TAG=run-live
 # shellcheck disable=SC1091
 . "$LIB_DIR/stream.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/audio.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/steam.sh"
 
 load_env
@@ -37,7 +39,9 @@ fi
 if [ "${DEBUG_CAPTURE:-0}" = "1" ]; then
   say "0. debug capture stream"
   start_xorg
-  start_capture "$DEBUG_STREAM_ID" 30 4000 true
+  # debug stream is video-only — audio not useful for visual debugging
+  # and avoids contending for the cs2 sink.
+  start_capture "$DEBUG_STREAM_ID" 30 4000 true 0
   log "watch debug: https://hls.5stack.gg/${DEBUG_STREAM_ID}/"
 fi
 
@@ -113,6 +117,13 @@ cd "$(dirname "$CS2_BIN")"
 
 # ---------------------------------------------------------------------------
 say "4. launch CS2"
+# Force cs2's audio to the null sink we capture from. Without this,
+# cs2 may pick a cached different sink (or no sink at all in headless)
+# and we'd capture silence from cs2.monitor. PULSE_SINK is honored by
+# the PulseAudio client lib at startup of the app.
+export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
+log "  PULSE_SINK=$PULSE_SINK (cs2 audio routes here)"
+
 do_applaunch() {
   # Three independent paths trigger the connect — whichever cs2 honors
   # first wins:
@@ -292,7 +303,8 @@ ls -la "$CS2_DIR/game/csgo/cfg/" 2>/dev/null \
 
 # ---------------------------------------------------------------------------
 say "6. start match capture stream"
-start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false
+# 5th arg = 1 → include PulseAudio leg (cs2.monitor → AAC → mpegts mux)
+start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1
 
 say "done"
 log "watch:    https://hls.5stack.gg/${MATCH_ID}/"

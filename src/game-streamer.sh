@@ -33,6 +33,8 @@ SCRIPT_TAG=game-streamer
 # shellcheck disable=SC1091
 . "$LIB_DIR/stream.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/audio.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/steam.sh"
 
 load_env
@@ -94,12 +96,20 @@ control:
                              connect $CONNECT_ADDR; password "$CONNECT_PASSWORD"
                            (uses .env values; lets you verify network/auth
                            when the launch-arg connect didn't fire)
+  audio-state              print PulseAudio state: default sink, sinks,
+                           monitor sources, sink-inputs (apps playing),
+                           source-outputs (gst pulsesrc capturing)
+  audio-test               play a 2s 440Hz tone into the cs2 sink — should
+                           be audible on the HLS stream if the audio leg
+                           of the gst pipeline is working
   install-cs2              install/update CS2 via steamcmd into the
                            registered library (kills Steam, runs steamcmd,
                            leaves Steam off — re-run 'up' afterward).
                            Set CS2_FORCE_UPDATE=1 to force re-validate.
   steam-log                tail Steam's logs (steam.log, console-linux,
                            stderr, cef_log, webhelper-linux)
+  gst-log [stream-id]      tail the gstreamer log for a capture stream
+                           (no arg = list all gst logs in $LOG_DIR)
   debug [out-file]         full diagnostic dump (env, processes, pipe,
                            steamclient, binaries, runtime, user-namespaces,
                            windows, all logs, crash dumps, manifest, cloud
@@ -190,6 +200,17 @@ cmd_stop_all() {
   log "all stopped"
 }
 
+cmd_gst_log() {
+  local stream_id="${1:-}"
+  if [ -z "$stream_id" ]; then
+    log "all gst logs in $LOG_DIR:"
+    ls -la "$LOG_DIR"/gst-*.log 2>/dev/null | sed 's/^/  /' || log "  (none)"
+    log "use: $0 gst-log <stream-id>"
+    return 0
+  fi
+  dump_log "$LOG_DIR/gst-${stream_id}.log" 200
+}
+
 cmd_steam_log() {
   local f
   for f in "$LOG_DIR/steam.log" \
@@ -254,8 +275,11 @@ case "$cmd" in
     require_env CONNECT_ADDR CONNECT_PASSWORD
     cs2_console_connect "$CONNECT_ADDR" "$CONNECT_PASSWORD"
     ;;
+  audio-state)     audio_state ;;
+  audio-test)      audio_test_tone ;;
   install-cs2)    cmd_install_cs2 ;;
   steam-log)      cmd_steam_log ;;
+  gst-log)        cmd_gst_log "$@" ;;
   debug)          cmd_debug "$@" ;;
   cloud-state)    print_cloud_state ;;
   cloud-debug)    print_cloud_debug ;;

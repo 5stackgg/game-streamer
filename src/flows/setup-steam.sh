@@ -26,6 +26,8 @@ SCRIPT_TAG=setup-steam
 # shellcheck disable=SC1091
 . "$LIB_DIR/stream.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/audio.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/steam.sh"
 
 load_env
@@ -37,9 +39,12 @@ require_env STEAM_USERNAME STEAM_PASSWORD
 say "1. Xorg + openbox + X access"
 start_xorg
 
+say "1b. PulseAudio + cs2 null sink"
+start_pulseaudio
+
 if [ "${DEBUG_CAPTURE:-0}" = "1" ]; then
   say "2. debug capture stream"
-  start_capture "$DEBUG_STREAM_ID" 30 4000 true
+  start_capture "$DEBUG_STREAM_ID" 30 4000 true 0
   log "watch login: https://hls.5stack.gg/${DEBUG_STREAM_ID}/"
 fi
 
