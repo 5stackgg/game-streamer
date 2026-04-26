@@ -20,7 +20,7 @@
 # available for ad-hoc start/stop.
 #
 # Required env (load via src/.env, or export beforehand):
-#   STEAM_USERNAME, STEAM_PASSWORD               (setup-steam)
+#   STEAM_USER, STEAM_PASSWORD               (setup-steam)
 #   MATCH_ID + (PLAYCAST_URL | CONNECT_ADDR & CONNECT_PASSWORD) (run-live)
 
 set -uo pipefail
@@ -233,7 +233,7 @@ cmd_debug() {
 }
 
 cmd_install_cs2() {
-  require_env STEAM_USERNAME STEAM_PASSWORD
+  require_env STEAM_USER STEAM_PASSWORD
   say "kill Steam (steamcmd + Steam clash on appmanifest writes)"
   kill_steam
   say "register library + install CS2 via steamcmd"
@@ -243,7 +243,7 @@ cmd_install_cs2() {
 }
 
 cmd_disable_cloud() {
-  require_env STEAM_USERNAME STEAM_PASSWORD
+  require_env STEAM_USER STEAM_PASSWORD
   say "kill Steam (-9 — no graceful shutdown so the file edit isn't clobbered)"
   kill_steam
   say "edit registry.vdf + config.vdf + localconfig.vdf + sharedconfig.vdf"
@@ -260,7 +260,10 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   setup-steam)  exec "$FLOWS_DIR/setup-steam.sh" "$@" ;;
   run-live)     exec "$FLOWS_DIR/run-live.sh"    "$@" ;;
-  live)
+  # `up` is the legacy name — kept as an alias of `live` so older
+  # pod manifests and any scripts pinned to the previous arg keep
+  # working without coordinated redeploys.
+  live | up)
     "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
     exec "$FLOWS_DIR/run-live.sh" "$@"
     ;;

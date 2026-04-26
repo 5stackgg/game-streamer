@@ -25,6 +25,7 @@ chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \
        MEDIAMTX_SRT_BASE LOG_DIR XORG_CONFIG
 
+
 say()  { printf '\n=== %s ===\n' "$*"; }
 log()  { printf '[%s] %s\n' "${SCRIPT_TAG:-game-streamer}" "$*"; }
 warn() { printf '[%s] WARN: %s\n' "${SCRIPT_TAG:-game-streamer}" "$*" >&2; }

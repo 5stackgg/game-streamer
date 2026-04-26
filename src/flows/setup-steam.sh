@@ -14,7 +14,7 @@
 # After this, watch https://hls.5stack.gg/${DEBUG_STREAM_ID:-debug}/ until
 # you see the friends list / main Steam window — then run flow 2 (run-live).
 #
-# Required env: STEAM_USERNAME, STEAM_PASSWORD
+# Required env: STEAM_USER, STEAM_PASSWORD
 
 set -uo pipefail
 SCRIPT_TAG=setup-steam
@@ -31,7 +31,7 @@ SCRIPT_TAG=setup-steam
 . "$LIB_DIR/steam.sh"
 
 load_env
-require_env STEAM_USERNAME STEAM_PASSWORD
+require_env STEAM_USER STEAM_PASSWORD
 
 : "${DEBUG_STREAM_ID:=debug}"
 : "${STEAM_PIPE_TIMEOUT:=300}"

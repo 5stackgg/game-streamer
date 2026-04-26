@@ -149,7 +149,7 @@ PY
 # Steam should be OFF when this runs (we kill it in setup-steam before
 # calling). steamcmd and Steam can clash on appmanifest writes otherwise.
 install_cs2_via_steamcmd() {
-  require_env STEAM_USERNAME STEAM_PASSWORD
+  require_env STEAM_USER STEAM_PASSWORD
 
   local manifest="$STEAM_LIBRARY/steamapps/appmanifest_730.acf"
   local cs2_bin="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
@@ -177,7 +177,7 @@ install_cs2_via_steamcmd() {
   /opt/steamcmd/steamcmd.sh \
     +@sSteamCmdForcePlatformType linux \
     +force_install_dir "$CS2_DIR" \
-    +login "$STEAM_USERNAME" "$STEAM_PASSWORD" \
+    +login "$STEAM_USER" "$STEAM_PASSWORD" \
     +app_update 730 validate \
     +quit
 
@@ -937,7 +937,7 @@ kill_steam() {
 # Launch Steam with login prefilled. UI visible so we can watch via the
 # debug stream and complete any 2FA/captcha. Logs stream into $LOG_DIR.
 start_steam() {
-  require_env STEAM_USERNAME STEAM_PASSWORD
+  require_env STEAM_USER STEAM_PASSWORD
 
   if steam_pipe_up; then
     log "steam already running (pid $(cat "$HOME/.steam/steam.pid"))"
@@ -947,11 +947,11 @@ start_steam() {
   ensure_steam_bootstrap
   restore_real_steamclient
 
-  log "launching Steam with login=$STEAM_USERNAME (UI visible on debug stream)"
+  log "launching Steam with login=$STEAM_USER (UI visible on debug stream)"
   (
     stdbuf -oL -eL dbus-launch --exit-with-session \
       "$STEAM_HOME/steam.sh" \
-        -login "$STEAM_USERNAME" "$STEAM_PASSWORD" 2>&1 \
+        -login "$STEAM_USER" "$STEAM_PASSWORD" 2>&1 \
       | stdbuf -oL tee "$LOG_DIR/steam.log" \
       | sed -u 's/^/  [steam] /' >&2
   ) &
