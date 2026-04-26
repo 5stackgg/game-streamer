@@ -87,6 +87,7 @@ say "6. disable Steam Cloud sync (global + per-app)"
 disable_cloud_globally
 disable_cloud_in_config_vdf
 disable_cs2_cloud
+apply_steam_ui_preferences
 print_cloud_state
 
 say "7. launch Steam"
@@ -127,6 +128,7 @@ if [ "$HAD_USERDATA" = 0 ]; then
   disable_cloud_globally
   disable_cloud_in_config_vdf
   disable_cs2_cloud
+  apply_steam_ui_preferences
   print_cloud_state
   start_steam
   wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" || {

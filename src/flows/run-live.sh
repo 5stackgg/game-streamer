@@ -166,14 +166,11 @@ for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
     fi
   fi
 
-  # Auto-poke for the Cloud Out of Date dialog. Bounded to first 90s
-  # of the wait — covers the case where the dialog appears late
-  # because Steam first has to download cloud files (we've seen
-  # 30-60s into the wait on cold-boot pods). Cs2 spawn breaks the
-  # loop, so this never fires once the game is up.
-  if [ "$i" -ge 3 ] && [ "$i" -le 90 ] && [ $(( i % 5 )) -eq 0 ]; then
-    poke_steam_dialog
-  fi
+  # Auto-poke disabled. Operator dismisses dialogs manually via
+  #   src/game-streamer.sh poke-left
+  #   src/game-streamer.sh poke-space
+  #   src/game-streamer.sh poke-return
+  # while testing which key is fastest. Re-enable later once we know.
 
   if [ $(( i % 15 )) -eq 0 ]; then
     log "  ${i}s elapsed waiting on cs2 (likely updating + dialogs):"
@@ -189,13 +186,17 @@ for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
     log "  recent cloud_log activity for AppID 730:"
     grep -E '\[AppID 730\]' "$STEAM_HOME/logs/cloud_log.txt" 2>/dev/null \
       | tail -5 | sed 's/^/    /' || true
+    log "  cs2_launch.log (Steam's response to -applaunch):"
+    tail -15 "$LOG_DIR/cs2_launch.log" 2>/dev/null | sed 's/^/    /' \
+      || log "    (empty)"
   fi
 
-  # Fallback: if cs2 still hasn't spawned after 90s, re-issue applaunch
-  # once. Steam sometimes finishes a depot update + cloud sync but
-  # doesn't auto-launch the game from the original applaunch session.
-  if [ "$i" = 90 ] && [ "$RELAUNCH_DONE" = 0 ]; then
-    log "  90s without cs2 — re-issuing -applaunch (one-shot fallback)"
+  # Fallback: if cs2 still hasn't spawned after 30s, re-issue applaunch
+  # once. Steam sometimes ignores the very first applaunch on a fresh
+  # login (logs "Steam is already running, command line was forwarded"
+  # but never spawns cs2). A second applaunch reliably kicks it.
+  if [ "$i" = 30 ] && [ "$RELAUNCH_DONE" = 0 ]; then
+    log "  30s without cs2 — re-issuing -applaunch (one-shot fallback)"
     do_applaunch
     RELAUNCH_DONE=1
   fi
@@ -211,6 +212,13 @@ done
 }
 log "  cs2 pid=$CS2_PID"
 ln -sf "$STEAM_LIBRARY/steam/logs/console-linux.txt" "$LOG_DIR/cs2.log" 2>/dev/null || true
+
+# cs2 is up — hide Steam's main UI + Friends List so any missed
+# clicks (e.g. from the shader-skip auto-handler) don't fall through
+# to Steam buttons behind the dialog. Modal dialogs Steam pops on top
+# (shader pre-cache, etc.) remain visible since they're separate
+# X windows; only the persistent Steam UI gets hidden.
+minimize_steam_windows
 
 # ---------------------------------------------------------------------------
 say "5. wait for CS2 window"

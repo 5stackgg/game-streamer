@@ -85,6 +85,13 @@ control:
   dismiss                  send Return to the Steam window
                            (clicks the focused button on any modal CEF dialog)
   dismiss-shader           click Skip on "Processing Vulkan shaders" dialog
+  hide-steam               minimize the Steam main UI + Friends List
+                           (called automatically by run-live once cs2 is up,
+                           keeps stray clicks off Steam UI buttons)
+  poke-left                send Left  arrow to the active Steam window
+  poke-space               send Space        to the active Steam window
+  poke-return              send Return       to the active Steam window
+                           (test which dismisses CEF dialogs fastest)
   install-cs2              install/update CS2 via steamcmd into the
                            registered library (kills Steam, runs steamcmd,
                            leaves Steam off — re-run 'up' afterward).
@@ -239,6 +246,10 @@ case "$cmd" in
   windows)        list_x_windows ;;
   dismiss)         poke_steam_dialog_verbose ;;
   dismiss-shader)  dismiss_shader_dialog ;;
+  hide-steam)      minimize_steam_windows ;;
+  poke-left)       poke_steam_key Left ;;
+  poke-space)      poke_steam_key space ;;
+  poke-return)     poke_steam_key Return ;;
   install-cs2)    cmd_install_cs2 ;;
   steam-log)      cmd_steam_log ;;
   debug)          cmd_debug "$@" ;;

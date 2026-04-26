@@ -4,6 +4,3 @@ deployment: game-streamer-live
 workdir: /opt/5stack
 sync:
   - .:/opt/5stack
-ignore:
-  - "/bin"
-  - "/highlights/bin"

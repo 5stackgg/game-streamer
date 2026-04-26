@@ -14,8 +14,9 @@ shared `/cache` PVC so subsequent pods skip the download.
 
 ```
 Dockerfile              # nvidia/cuda base + Xorg-dummy + GStreamer + steamcmd
-xorg-dummy.conf         # dummy-driver X config (NVIDIA GLX/Vulkan at runtime)
-cfg/                    # CS2 autoexec cfgs copied into the install
+resources/
+  xorg-dummy.conf       # dummy-driver X config (NVIDIA GLX/Vulkan at runtime)
+  cfg/                  # CS2 autoexec cfgs copied into the install
 scripts/
   entrypoint.sh         # starts Xorg, installs CS2, dispatches on MODE
   live.sh               # MODE=live — CS2 GOTV + GStreamer -> SRT/WHIP

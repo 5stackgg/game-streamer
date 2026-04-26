@@ -209,6 +209,76 @@ install_cs2_via_steamcmd() {
 # Steam is running. Call BEFORE start_steam.
 # Edit a single VDF file (localconfig.vdf or sharedconfig.vdf) to set
 # cloudenabled=0 inside the apps/<appid> block. Idempotent.
+# Apply Steam UI preferences for headless/streamer use:
+#   - Don't auto-open the Friends List on login
+#   - Open the Library tab on startup, not the Store
+# These live in localconfig.vdf under
+#   UserLocalConfigStore/Software/Valve/Steam/{key}
+# The exact key names are best-effort (Valve doesn't publish a schema)
+# but writing extras is harmless — Steam ignores unknown keys.
+apply_steam_ui_preferences() {
+  if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
+    log "apply_steam_ui_preferences: Steam is running — skip"
+    return 0
+  fi
+
+  local roots=("$STEAM_HOME/userdata" "$HOME/.steam/steam/userdata")
+  local seen=() root user_dir cfg edited=0
+  for root in "${roots[@]}"; do
+    [ -d "$root" ] || continue
+    local real
+    real=$(readlink -f "$root" 2>/dev/null || echo "$root")
+    case " ${seen[*]} " in *" $real "*) continue ;; esac
+    seen+=("$real")
+
+    shopt -s nullglob
+    for user_dir in "$root"/*/; do
+      cfg="$user_dir/config/localconfig.vdf"
+      [ -f "$cfg" ] || continue
+      log "apply_steam_ui_preferences: editing $cfg"
+      python3 - "$cfg" <<'PY'
+import re, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+src = p.read_text()
+
+# Several keys Steam is observed to read for these behaviors. We set
+# all plausible variants; Steam quietly ignores ones it doesn't know.
+KEYS = [
+    ("OpenFriendsListAtLogin",  "0"),
+    ("FriendsAutoMinimize",     "1"),
+    ("StartupMode",             "0"),  # 0 = no special UI on start
+    ("StartPage",               "Library"),
+    ("LastSelectedTab",         "Library"),
+    ("LibraryAutoSetCollections", "0"),
+]
+
+def set_or_insert(src, key, value):
+    """Replace existing "key" "X" pair, or insert under the Steam block."""
+    pat = re.compile(r'("' + re.escape(key) + r'"[ \t\r\n]+")[^"]*(")')
+    m = pat.search(src)
+    if m:
+        return src[:m.start()] + m.group(1) + value + m.group(2) + src[m.end():]
+    # Inject right after "Steam" { at the deepest position
+    sm = list(re.finditer(r'(\n)([ \t]*)"Steam"[ \t\r\n]*\{', src))
+    if not sm:
+        return src
+    last = sm[-1]
+    indent = last.group(2) + "\t"
+    insertion = f'\n{indent}"{key}"\t\t"{value}"'
+    return src[:last.end()] + insertion + src[last.end():]
+
+for k, v in KEYS:
+    src = set_or_insert(src, k, v)
+p.write_text(src)
+print(f"  applied {len(KEYS)} UI prefs to {p}")
+PY
+      edited=1
+    done
+    shopt -u nullglob
+  done
+  [ "$edited" = 0 ] && log "apply_steam_ui_preferences: no userdata yet — skip"
+}
+
 _vdf_disable_app_cloud() {
   local cfg="$1"
   [ -f "$cfg" ] || return 0
