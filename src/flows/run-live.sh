@@ -94,11 +94,6 @@ EOF
 fi
 cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
 log "  wrote $CS2_CFG_DIR/autoexec.cfg + live_autoexec.cfg"
-log "  on-disk verification:"
-ls -la "$CS2_CFG_DIR"/autoexec.cfg "$CS2_CFG_DIR"/live_autoexec.cfg 2>/dev/null \
-  | sed 's/^/    /'
-log "  autoexec.cfg contents:"
-sed 's/^/    /' "$CS2_CFG_DIR/autoexec.cfg"
 
 # CS2 dlopen()s libpangoft2-1.0.so without the .0 suffix; pre-link.
 for base in libpangoft2-1.0 libpango-1.0; do
@@ -168,33 +163,6 @@ for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
   CS2_PID=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
   [ -n "$CS2_PID" ] && break
 
-  # Targeted shader-skip. The "Launching Counter-Strike 2" /
-  # "Processing Vulkan shaders" dialog is a separate X window. "Skip"
-  # is the default-focused button; we send Return AND click its
-  # absolute screen position via XTest as a belt-and-suspenders. The
-  # CEF Return path can miss focus, but XTest mouse clicks reach CEF
-  # reliably (same trick we use for the cloud dialog).
-  SHADER_WIN=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
-    | awk '/"Launching Counter-Strike 2"|"Processing Vulkan shaders"/{print $1; exit}')
-  if [ -n "$SHADER_WIN" ]; then
-    log "  shader dialog detected: $SHADER_WIN — clicking Skip"
-    wmctrl -ia "$SHADER_WIN" 2>/dev/null || true
-    xdotool windowactivate --sync "$SHADER_WIN" 2>/dev/null || true
-    sleep 0.1
-    xdotool key --clearmodifiers Return 2>/dev/null || true
-    # Skip button is on the LEFT (highlighted blue), Cancel on the
-    # right. Roughly 35% across and 75% down within the dialog.
-    SKIP_GEOM=$(_window_geom_abs "$SHADER_WIN")
-    if [ -n "$SKIP_GEOM" ]; then
-      read SAX SAY SAW SAH <<<"$SKIP_GEOM"
-      SCX=$(( SAX + SAW * 35 / 100 ))
-      SCY=$(( SAY + SAH * 75 / 100 ))
-      log "    geom=${SAW}x${SAH}+${SAX}+${SAY}, clicking at (${SCX},${SCY})"
-      xdotool mousemove --sync "$SCX" "$SCY" 2>/dev/null || true
-      xdotool click 1 2>/dev/null || true
-    fi
-  fi
-
   # Auto-poke: Space dismisses Steam's CEF dialogs (cloud-out-of-date,
   # shader pre-cache) by activating the default-focused button. Bounded
   # to the first 90s of the wait — covers a late-appearing dialog while
@@ -204,24 +172,7 @@ for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
     poke_steam_dialog
   fi
 
-  if [ $(( i % 15 )) -eq 0 ]; then
-    log "  ${i}s elapsed waiting on cs2 (likely updating + dialogs):"
-    log "  open X windows:"
-    list_x_windows
-    # What does Steam itself say? These are the lines that tell us
-    # whether Steam is still downloading, has launched cs2 already,
-    # is showing a dialog, or has bailed out.
-    log "  recent Steam log activity (cs2 / launch / 730):"
-    grep -iE 'cs2|appid 730|applaunch|launching|playstart|"730"' \
-      "$STEAM_HOME/logs/console-linux.txt" 2>/dev/null \
-      | tail -10 | sed 's/^/    /' || true
-    log "  recent cloud_log activity for AppID 730:"
-    grep -E '\[AppID 730\]' "$STEAM_HOME/logs/cloud_log.txt" 2>/dev/null \
-      | tail -5 | sed 's/^/    /' || true
-    log "  cs2_launch.log (Steam's response to -applaunch):"
-    tail -15 "$LOG_DIR/cs2_launch.log" 2>/dev/null | sed 's/^/    /' \
-      || log "    (empty)"
-  fi
+  [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
 
   # Fallback: if cs2 still hasn't spawned after 30s, re-issue applaunch
   # once. Steam sometimes ignores the very first applaunch on a fresh
@@ -264,13 +215,7 @@ for i in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
     dump_log "$LOG_DIR/cs2.log"
     exit 1
   fi
-  if [ $(( i % 15 )) -eq 0 ]; then
-    log "  still waiting (${i}s, cs2 pid=$CS2_PID alive)"
-    log "  open X windows:"
-    list_x_windows
-    log "  recent cs2 log activity:"
-    tail -10 "$LOG_DIR/cs2.log" 2>/dev/null | sed 's/^/    /' || true
-  fi
+  [ $(( i % 15 )) -eq 0 ] && log "  still waiting for cs2 window (${i}s, pid=$CS2_PID alive)"
   sleep 1
 done
 [ -n "$WIN" ] || {
@@ -278,28 +223,6 @@ done
   tail -60 "$LOG_DIR/cs2.log" 2>/dev/null
   exit 1
 }
-
-# ---------------------------------------------------------------------------
-say "5b. confirm CS2 actually attempted the connect"
-# CS2's stdout is captured by Steam's logger into console-linux.txt.
-# Several signals to look for:
-#   "Executing autoexec.cfg" / "exec'd"  — cfg WAS read
-#   "Connecting to ..." / "connect to" — connect was attempted
-#   "Connected to ..." / "Server connection established" — success
-#   "ConVar password ..." — password was set
-#   "Failed to connect" / "Connection rejected" — connection error
-log "recent cs2 output (connect / exec / autoexec / netchan):"
-grep -iE 'autoexec|exec.*cfg|connect|password|netchan|playcast|connection|joining|matchmaking|server address|loading map' \
-  "$LOG_DIR/cs2.log" 2>/dev/null \
-  | grep -vF 'capsule-capture-libs' \
-  | grep -vF 'libserver.so' \
-  | grep -vF 'libnvidia-egl-wayland' \
-  | tail -25 | sed 's/^/    /' \
-  || log "    (no relevant lines — autoexec likely never executed)"
-
-log "  cs2 cfg dir contents:"
-ls -la "$CS2_DIR/game/csgo/cfg/" 2>/dev/null \
-  | grep -E 'autoexec|live_autoexec' | sed 's/^/    /' || true
 
 # ---------------------------------------------------------------------------
 say "6. start match capture stream"

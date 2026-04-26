@@ -66,7 +66,7 @@ flows:
   setup-steam              flow 1: register library + start Steam (UI visible)
   run-live                 flow 2: launch CS2 + start match capture
                            (requires flow 1 to have completed login)
-  up                       run flow 1 then flow 2 end-to-end. Setup waits
+  live                     run flow 1 then flow 2 end-to-end. Setup waits
                            until the main Steam UI window is rendered
                            before launching CS2.
 
@@ -93,9 +93,8 @@ control:
                            keeps stray clicks off Steam UI buttons)
   cs2-console              open CS2's dev console (sends backtick to cs2)
   cs2-connect              open dev console and type the connect command:
-                             connect $CONNECT_ADDR; password "$CONNECT_PASSWORD"
-                           (uses .env values; lets you verify network/auth
-                           when the launch-arg connect didn't fire)
+                             connect <CONNECT_ADDR>; password "<CONNECT_PASSWORD>"
+                           (values from .env)
   audio-state              print PulseAudio state: default sink, sinks,
                            monitor sources, sink-inputs (apps playing),
                            source-outputs (gst pulsesrc capturing)
@@ -104,7 +103,7 @@ control:
                            of the gst pipeline is working
   install-cs2              install/update CS2 via steamcmd into the
                            registered library (kills Steam, runs steamcmd,
-                           leaves Steam off — re-run 'up' afterward).
+                           leaves Steam off — re-run 'live' afterward).
                            Set CS2_FORCE_UPDATE=1 to force re-validate.
   steam-log                tail Steam's logs (steam.log, console-linux,
                            stderr, cef_log, webhelper-linux)
@@ -196,6 +195,7 @@ cmd_stop_all() {
   cmd_stop_live
   stop_capture "${DEBUG_STREAM_ID:-debug}"
   kill_steam
+  stop_pulseaudio
   stop_xorg
   log "all stopped"
 }
@@ -239,7 +239,7 @@ cmd_install_cs2() {
   say "register library + install CS2 via steamcmd"
   register_library "$STEAM_LIBRARY"
   install_cs2_via_steamcmd
-  log "done. Re-run 'src/game-streamer.sh up' to bring Steam back up + launch"
+  log "done. Re-run 'src/game-streamer.sh live' to bring Steam back up + launch"
 }
 
 cmd_disable_cloud() {
@@ -260,7 +260,7 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   setup-steam)  exec "$FLOWS_DIR/setup-steam.sh" "$@" ;;
   run-live)     exec "$FLOWS_DIR/run-live.sh"    "$@" ;;
-  up)
+  live)
     "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
     exec "$FLOWS_DIR/run-live.sh" "$@"
     ;;

@@ -65,11 +65,6 @@ ensure_steam_home_persist
 say "3b. fix Steam-home permissions + nuke stale package cache"
 fix_steam_perms
 
-# NOTE: `reset_steam_install` exists in lib/steam.sh as an opt-in
-# (RESET_STEAM_INSTALL=1 src/game-streamer.sh up) but is intentionally
-# NOT called by default — it's the heavy hammer that hides the actual
-# bug. We diagnose root cause first; the wipe is the last resort.
-
 say "4. register steam library at $STEAM_LIBRARY"
 mkdir -p "$STEAM_LIBRARY/steamapps/common"
 register_library "$STEAM_LIBRARY"
@@ -92,7 +87,6 @@ say "6. disable Steam Cloud sync (global + per-app)"
 disable_cloud_globally
 disable_cloud_in_config_vdf
 disable_cs2_cloud
-apply_steam_ui_preferences
 print_cloud_state
 
 say "7. launch Steam"
@@ -133,7 +127,6 @@ if [ "$HAD_USERDATA" = 0 ]; then
   disable_cloud_globally
   disable_cloud_in_config_vdf
   disable_cs2_cloud
-  apply_steam_ui_preferences
   print_cloud_state
   start_steam
   wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" || {

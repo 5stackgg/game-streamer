@@ -114,26 +114,6 @@ find_main_steam_window() {
   '
 }
 
-# Window dimensions for an id. Echoes "WIDTH HEIGHT" or nothing.
-_window_size() {
-  xwininfo -display "$DISPLAY" -id "$1" 2>/dev/null | awk '
-    /^  Width:/  { w = $2 }
-    /^  Height:/ { h = $2 }
-    END { if (w && h) print w, h }
-  '
-}
-
-# Absolute screen geometry for an id. Echoes "X Y WIDTH HEIGHT".
-_window_geom_abs() {
-  xwininfo -display "$DISPLAY" -id "$1" 2>/dev/null | awk '
-    /Absolute upper-left X:/ { x = $4 }
-    /Absolute upper-left Y:/ { y = $4 }
-    /^  Width:/  { w = $2 }
-    /^  Height:/ { h = $2 }
-    END { if (w && h) print x, y, w, h }
-  '
-}
-
 # Wait until the main Steam window is on screen — i.e. login is fully
 # complete and the UI is rendered. This is a stronger "Steam is ready"
 # signal than the IPC pipe alone (the pipe comes up before the UI does,

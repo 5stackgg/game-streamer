@@ -207,78 +207,9 @@ install_cs2_via_steamcmd() {
 #
 # Steam rewrites localconfig.vdf on shutdown, so this is a no-op while
 # Steam is running. Call BEFORE start_steam.
+
 # Edit a single VDF file (localconfig.vdf or sharedconfig.vdf) to set
 # cloudenabled=0 inside the apps/<appid> block. Idempotent.
-# Apply Steam UI preferences for headless/streamer use:
-#   - Don't auto-open the Friends List on login
-#   - Open the Library tab on startup, not the Store
-# These live in localconfig.vdf under
-#   UserLocalConfigStore/Software/Valve/Steam/{key}
-# The exact key names are best-effort (Valve doesn't publish a schema)
-# but writing extras is harmless — Steam ignores unknown keys.
-apply_steam_ui_preferences() {
-  if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
-    log "apply_steam_ui_preferences: Steam is running — skip"
-    return 0
-  fi
-
-  local roots=("$STEAM_HOME/userdata" "$HOME/.steam/steam/userdata")
-  local seen=() root user_dir cfg edited=0
-  for root in "${roots[@]}"; do
-    [ -d "$root" ] || continue
-    local real
-    real=$(readlink -f "$root" 2>/dev/null || echo "$root")
-    case " ${seen[*]} " in *" $real "*) continue ;; esac
-    seen+=("$real")
-
-    shopt -s nullglob
-    for user_dir in "$root"/*/; do
-      cfg="$user_dir/config/localconfig.vdf"
-      [ -f "$cfg" ] || continue
-      log "apply_steam_ui_preferences: editing $cfg"
-      python3 - "$cfg" <<'PY'
-import re, sys, pathlib
-p = pathlib.Path(sys.argv[1])
-src = p.read_text()
-
-# Several keys Steam is observed to read for these behaviors. We set
-# all plausible variants; Steam quietly ignores ones it doesn't know.
-KEYS = [
-    ("OpenFriendsListAtLogin",  "0"),
-    ("FriendsAutoMinimize",     "1"),
-    ("StartupMode",             "0"),  # 0 = no special UI on start
-    ("StartPage",               "Library"),
-    ("LastSelectedTab",         "Library"),
-    ("LibraryAutoSetCollections", "0"),
-]
-
-def set_or_insert(src, key, value):
-    """Replace existing "key" "X" pair, or insert under the Steam block."""
-    pat = re.compile(r'("' + re.escape(key) + r'"[ \t\r\n]+")[^"]*(")')
-    m = pat.search(src)
-    if m:
-        return src[:m.start()] + m.group(1) + value + m.group(2) + src[m.end():]
-    # Inject right after "Steam" { at the deepest position
-    sm = list(re.finditer(r'(\n)([ \t]*)"Steam"[ \t\r\n]*\{', src))
-    if not sm:
-        return src
-    last = sm[-1]
-    indent = last.group(2) + "\t"
-    insertion = f'\n{indent}"{key}"\t\t"{value}"'
-    return src[:last.end()] + insertion + src[last.end():]
-
-for k, v in KEYS:
-    src = set_or_insert(src, k, v)
-p.write_text(src)
-print(f"  applied {len(KEYS)} UI prefs to {p}")
-PY
-      edited=1
-    done
-    shopt -u nullglob
-  done
-  [ "$edited" = 0 ] && log "apply_steam_ui_preferences: no userdata yet — skip"
-}
-
 _vdf_disable_app_cloud() {
   local cfg="$1"
   [ -f "$cfg" ] || return 0
@@ -940,52 +871,6 @@ ensure_steam_home_persist() {
   mkdir -p "$(dirname "$STEAM_HOME")"
   ln -sfn "$target" "$STEAM_HOME"
   log "ensure_steam_home_persist: $STEAM_HOME -> $target"
-}
-
-# Wipe Steam's binary install on each setup-steam run, preserving only
-# user state (userdata/, config/). Steam re-bootstraps from
-# /opt/steam-bootstrap (image-baked) or downloads on next start —
-# fast, deterministic, and immune to whatever partial-state corruption
-# the persisted host volume accumulated from prior pods.
-#
-# This is what the manual `rm -rf /opt/5stack/game-streamer/steam`
-# workaround does, except we keep:
-#   userdata/  — login (loginusers.vdf), cloud-disable per-app config
-#   config/    — libraryfolders.vdf, registry settings, hosts cache
-#
-# Set RESET_STEAM_INSTALL=0 to skip (e.g. for fast dev iteration when
-# you know the install is good).
-reset_steam_install() {
-  [ "${RESET_STEAM_INSTALL:-1}" = "1" ] || { log "reset_steam_install: skipped (RESET_STEAM_INSTALL=0)"; return 0; }
-
-  if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
-    warn "reset_steam_install: Steam is running — skip (run kill_steam first)"
-    return 0
-  fi
-  if [ ! -d "$STEAM_HOME" ]; then
-    log "reset_steam_install: $STEAM_HOME doesn't exist — nothing to wipe"
-    return 0
-  fi
-
-  local kept=("userdata" "config" "logs")
-  log "reset_steam_install: wiping $STEAM_HOME/* except: ${kept[*]}"
-
-  local entry name skip
-  shopt -s nullglob dotglob
-  for entry in "$STEAM_HOME"/*; do
-    name=$(basename "$entry")
-    skip=0
-    for k in "${kept[@]}"; do
-      if [ "$name" = "$k" ]; then skip=1; break; fi
-    done
-    if [ "$skip" = 1 ]; then
-      continue
-    fi
-    rm -rf -- "$entry"
-  done
-  shopt -u nullglob dotglob
-
-  log "reset_steam_install: done"
 }
 
 fix_steam_perms() {
