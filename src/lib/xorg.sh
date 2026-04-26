@@ -195,133 +195,17 @@ minimize_steam_windows() {
 }
 
 # Dismiss whatever modal CEF dialog is currently overlaying the Steam UI
-# (Cloud Out of Date, shader-skip, etc). Strategy:
-#   1. Find the real Steam main window (largest "Steam" window — the
-#      48x48 tray icon would steal a naive --name search otherwise).
-#   2. Activate it via wmctrl, which is more reliable against openbox
-#      than xdotool windowactivate alone.
-#   3. Click at the default-button position inside the dialog — CEF
-#      dialogs accept XTest button events, but XTest Return often goes
-#      nowhere because the button isn't keyboard-focused.
-#   4. Also send Return as a belt-and-suspenders.
-#
-# The button coords are window-relative percentages measured against the
-# Cloud Out of Date / shader-skip dialogs Steam shows in 1280x800 mode.
-# When no dialog is up, the click hits Steam UI background — harmless.
+# (Cloud Out of Date "Play anyway", shader pre-cache "Skip", etc).
+# Confirmed empirically: Space activates the default-focused button on
+# Steam's CEF dialogs. No mouse, no button-position guessing — just
+# trust the focus that's already there.
 poke_steam_dialog() {
-  _poke_steam_dialog_impl 0
-}
-
-# Send a single keypress to the active Steam window. Used by the
-# `poke-left` / `poke-space` / `poke-return` subcommands so the
-# operator can test which key dismisses CEF dialogs (cloud-out-of-date,
-# shader pre-cache) fastest. No mouse, no guessing button positions.
-poke_steam_key() {
-  local key="$1"
   local id
   id=$(find_main_steam_window)
-  if [ -z "$id" ]; then
-    warn "no main Steam window — run 'windows' to see what's there"
-    return 1
-  fi
-  log "poke_steam_key: activating $id and sending '$key'"
+  [ -z "$id" ] && return 0
+  log "poke_steam_dialog: window=$id sending Space"
   wmctrl -ia "$id" 2>/dev/null || true
   xdotool windowactivate --sync "$id" 2>/dev/null || true
   sleep 0.1
-  xdotool key --clearmodifiers "$key" 2>/dev/null || true
-}
-
-# Click the Skip button on the "Launching Counter-Strike 2 / Processing
-# Vulkan shaders" dialog. Returns 1 if the dialog isn't visible, so
-# callers can branch on that.
-dismiss_shader_dialog() {
-  local id
-  id=$(xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
-    | awk '/"Launching Counter-Strike 2"|"Processing Vulkan shaders"/{print $1; exit}')
-  if [ -z "$id" ]; then
-    log "no shader dialog visible"
-    return 1
-  fi
-  log "shader dialog: $id — clicking Skip"
-  wmctrl -ia "$id" 2>/dev/null || true
-  xdotool windowactivate --sync "$id" 2>/dev/null || true
-  sleep 0.1
-  xdotool key --clearmodifiers Return 2>/dev/null || true
-  local ax ay aw ah
-  read -r ax ay aw ah < <(_window_geom_abs "$id")
-  if [ -n "${aw:-}" ] && [ -n "${ah:-}" ]; then
-    local cx=$(( ax + aw * 35 / 100 ))
-    local cy=$(( ay + ah * 75 / 100 ))
-    log "  geom=${aw}x${ah}+${ax}+${ay}, click at (${cx},${cy})"
-    xdotool mousemove --sync "$cx" "$cy" 2>/dev/null || true
-    xdotool click 1 2>/dev/null || true
-  fi
-}
-
-# Verbose form for ad-hoc 'dismiss': logs every step + cursor before/after.
-poke_steam_dialog_verbose() {
-  _poke_steam_dialog_impl 1
-}
-
-_poke_steam_dialog_impl() {
-  local verbose="$1"
-
-  # Refuse to fire if the shader pre-cache dialog is on screen. Our
-  # click target (54%, 57% of the Steam window) is the cloud-dialog
-  # "Play anyway" position; on the smaller, centered shader dialog
-  # those same coords land on **Cancel**, which closes the dialog AND
-  # cancels the launch. The shader dialog has its own dedicated
-  # handler in run-live's spawn-wait loop with the correct Skip
-  # position — let that fire instead.
-  if xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
-       | grep -qE '"Launching Counter-Strike 2"|"Processing Vulkan shaders"'; then
-    [ "$verbose" = 1 ] && log "poke_steam_dialog: shader dialog detected — skipping (different button positions)"
-    return 0
-  fi
-
-  local id
-  id=$(find_main_steam_window)
-  if [ -z "$id" ]; then
-    [ "$verbose" = 1 ] && warn "no main Steam window — run 'windows' to see what's there"
-    return 0
-  fi
-
-  local ax ay aw ah
-  read -r ax ay aw ah < <(_window_geom_abs "$id")
-  if [ -z "${aw:-}" ]; then
-    [ "$verbose" = 1 ] && warn "could not read window geometry"
-    return 0
-  fi
-
-  # Always log a one-line summary (even in non-verbose) so the run-live
-  # output records that auto-poke fired.
-  log "poke_steam_dialog: window=$id geom=${aw}x${ah}+${ax}+${ay} (kbd: Left + Return + space)"
-
-  if [ "$verbose" = 1 ]; then
-    log "cursor before: $(xdotool getmouselocation 2>/dev/null)"
-  fi
-
-  # Activate via two paths — wmctrl talks to _NET_ACTIVE_WINDOW; xdotool's
-  # --sync waits for the WM to ack.
-  wmctrl -ia "$id" 2>/dev/null || true
-  xdotool windowactivate --sync "$id" 2>/dev/null || true
-  sleep 0.2
-
-  # KEYBOARD ONLY — no mouse click. The default-focused button on
-  # Steam's CEF dialogs (cloud-out-of-date "Play anyway", shader
-  # "Skip") is highlighted blue. Trust the focus already in place
-  # rather than guessing button coordinates that vary per dialog
-  # size and accidentally hitting Cancel on smaller dialogs.
-  #
-  # We send a sequence covering the common cases:
-  #   - Left arrow: in case Cancel grabbed focus, move back to Skip
-  #     (the leftward button — both dialogs have it on the left).
-  #   - Return: activates focused button.
-  #   - Space:  CEF buttons sometimes prefer Space.
-  [ "$verbose" = 1 ] && log "sending Left, Return, space to active window"
-  xdotool key --clearmodifiers Left   2>/dev/null || true
-  sleep 0.05
-  xdotool key --clearmodifiers Return 2>/dev/null || true
-  sleep 0.05
-  xdotool key --clearmodifiers space  2>/dev/null || true
+  xdotool key --clearmodifiers space 2>/dev/null || true
 }

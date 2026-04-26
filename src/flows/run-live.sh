@@ -90,6 +90,11 @@ EOF
 fi
 cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
 log "  wrote $CS2_CFG_DIR/autoexec.cfg + live_autoexec.cfg"
+log "  on-disk verification:"
+ls -la "$CS2_CFG_DIR"/autoexec.cfg "$CS2_CFG_DIR"/live_autoexec.cfg 2>/dev/null \
+  | sed 's/^/    /'
+log "  autoexec.cfg contents:"
+sed 's/^/    /' "$CS2_CFG_DIR/autoexec.cfg"
 
 # CS2 dlopen()s libpangoft2-1.0.so without the .0 suffix; pre-link.
 for base in libpangoft2-1.0 libpango-1.0; do
@@ -107,24 +112,37 @@ CS2_BIN="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
 cd "$(dirname "$CS2_BIN")"
 
 # ---------------------------------------------------------------------------
-say "4. -applaunch 730 (Steam will update CS2 if needed)"
+say "4. launch CS2"
 do_applaunch() {
   # Three independent paths trigger the connect — whichever cs2 honors
   # first wins:
   #   1) autoexec.cfg in cfg/ — cs2 auto-loads this at engine init
   #   2) +exec live_autoexec  — explicit cfg execution via launch arg
   #   3) +connect / +password — direct launch args, run after engine init
-  local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730
+  local cs2_args=(
     -fullscreen -width 1920 -height 1080 -novid -nojoy -console
     +exec live_autoexec)
   if [ -n "${PLAYCAST_URL:-}" ]; then
-    cmd+=(+playcast "$PLAYCAST_URL")
+    cs2_args+=(+playcast "$PLAYCAST_URL")
   else
-    cmd+=(+password "$CONNECT_PASSWORD" +connect "$CONNECT_ADDR")
+    cs2_args+=(+password "$CONNECT_PASSWORD" +connect "$CONNECT_ADDR")
   fi
-  log "  exec: ${cmd[*]}"
-  nohup "${cmd[@]}" >>"$LOG_DIR/cs2_launch.log" 2>&1 &
-  log "  applaunch sent (launcher pid=$!)"
+
+  if [ "${LAUNCH_CS2_DIRECT:-0}" = "1" ]; then
+    # Bypass Steam's -applaunch handoff. cs2 reads steamclient.so
+    # via $HOME/.steam/sdk64/ and talks to the running Steam
+    # directly; -applaunch was dropping our +connect args silently.
+    local cs2_bin="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
+    log "  exec (DIRECT): $cs2_bin ${cs2_args[*]}"
+    cd "$CS2_DIR/game/bin/linuxsteamrt64"
+    nohup "$cs2_bin" "${cs2_args[@]}" >>"$LOG_DIR/cs2_launch.log" 2>&1 &
+    log "  cs2 direct launch (pid=$!)"
+  else
+    local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
+    log "  exec: ${cmd[*]}"
+    nohup "${cmd[@]}" >>"$LOG_DIR/cs2_launch.log" 2>&1 &
+    log "  applaunch sent (launcher pid=$!)"
+  fi
 }
 do_applaunch
 RELAUNCH_DONE=0
@@ -166,11 +184,14 @@ for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
     fi
   fi
 
-  # Auto-poke disabled. Operator dismisses dialogs manually via
-  #   src/game-streamer.sh poke-left
-  #   src/game-streamer.sh poke-space
-  #   src/game-streamer.sh poke-return
-  # while testing which key is fastest. Re-enable later once we know.
+  # Auto-poke: Space dismisses Steam's CEF dialogs (cloud-out-of-date,
+  # shader pre-cache) by activating the default-focused button. Bounded
+  # to the first 90s of the wait — covers a late-appearing dialog while
+  # cs2 is downloading cloud files. cs2 spawn breaks the loop so this
+  # never fires once the game is up.
+  if [ "$i" -ge 3 ] && [ "$i" -le 90 ] && [ $(( i % 5 )) -eq 0 ]; then
+    poke_steam_dialog
+  fi
 
   if [ $(( i % 15 )) -eq 0 ]; then
     log "  ${i}s elapsed waiting on cs2 (likely updating + dialogs):"
@@ -250,16 +271,24 @@ done
 # ---------------------------------------------------------------------------
 say "5b. confirm CS2 actually attempted the connect"
 # CS2's stdout is captured by Steam's logger into console-linux.txt.
-# Look for connect-related lines so we can see if the +connect launch
-# arg / autoexec.cfg actually fired. Filter out the noisy
-# capsule-capture-libs lines about libwayland-server.so.0 (irrelevant).
-log "recent cs2 output (connect / exec / autoexec / connection):"
-grep -iE 'connect|password|autoexec|playcast|connection|joining|matchmaking|netchan|server.*address' \
+# Several signals to look for:
+#   "Executing autoexec.cfg" / "exec'd"  — cfg WAS read
+#   "Connecting to ..." / "connect to" — connect was attempted
+#   "Connected to ..." / "Server connection established" — success
+#   "ConVar password ..." — password was set
+#   "Failed to connect" / "Connection rejected" — connection error
+log "recent cs2 output (connect / exec / autoexec / netchan):"
+grep -iE 'autoexec|exec.*cfg|connect|password|netchan|playcast|connection|joining|matchmaking|server address|loading map' \
   "$LOG_DIR/cs2.log" 2>/dev/null \
   | grep -vF 'capsule-capture-libs' \
   | grep -vF 'libserver.so' \
-  | tail -20 | sed 's/^/    /' \
-  || log "    (no relevant lines yet — autoexec didn't fire OR cs2 muted these)"
+  | grep -vF 'libnvidia-egl-wayland' \
+  | tail -25 | sed 's/^/    /' \
+  || log "    (no relevant lines — autoexec likely never executed)"
+
+log "  cs2 cfg dir contents:"
+ls -la "$CS2_DIR/game/csgo/cfg/" 2>/dev/null \
+  | grep -E 'autoexec|live_autoexec' | sed 's/^/    /' || true
 
 # ---------------------------------------------------------------------------
 say "6. start match capture stream"
