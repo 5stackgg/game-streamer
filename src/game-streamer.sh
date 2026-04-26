@@ -89,6 +89,11 @@ control:
   hide-steam               minimize the Steam main UI + Friends List
                            (called automatically by run-live once cs2 is up,
                            keeps stray clicks off Steam UI buttons)
+  cs2-console              open CS2's dev console (sends backtick to cs2)
+  cs2-connect              open dev console and type the connect command:
+                             connect $CONNECT_ADDR; password "$CONNECT_PASSWORD"
+                           (uses .env values; lets you verify network/auth
+                           when the launch-arg connect didn't fire)
   install-cs2              install/update CS2 via steamcmd into the
                            registered library (kills Steam, runs steamcmd,
                            leaves Steam off — re-run 'up' afterward).
@@ -243,6 +248,12 @@ case "$cmd" in
   windows)        list_x_windows ;;
   dismiss)         poke_steam_dialog ;;
   hide-steam)      minimize_steam_windows ;;
+  cs2-console)     cs2_open_console ;;
+  cs2-connect)
+    load_env
+    require_env CONNECT_ADDR CONNECT_PASSWORD
+    cs2_console_connect "$CONNECT_ADDR" "$CONNECT_PASSWORD"
+    ;;
   install-cs2)    cmd_install_cs2 ;;
   steam-log)      cmd_steam_log ;;
   debug)          cmd_debug "$@" ;;

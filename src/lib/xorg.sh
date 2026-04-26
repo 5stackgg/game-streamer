@@ -209,3 +209,46 @@ poke_steam_dialog() {
   sleep 0.1
   xdotool key --clearmodifiers space 2>/dev/null || true
 }
+
+# Find the CS2 window. Returns "" if not running yet.
+find_cs2_window() {
+  xwininfo -display "$DISPLAY" -root -tree 2>/dev/null \
+    | awk '/"Counter-Strike 2"/{print $1; exit}'
+}
+
+# Activate the CS2 window and toggle the dev console open with `.
+# Requires cs2 launched with -console (which run-live does).
+cs2_open_console() {
+  local id
+  id=$(find_cs2_window)
+  if [ -z "$id" ]; then
+    warn "no CS2 window — is CS2 running?"
+    return 1
+  fi
+  log "CS2 window: $id — opening dev console (backtick)"
+  wmctrl -ia "$id" 2>/dev/null || true
+  xdotool windowactivate --sync "$id" 2>/dev/null || true
+  sleep 0.2
+  xdotool key --clearmodifiers grave 2>/dev/null || true
+}
+
+# Open the dev console and type the connect command + password.
+# Mirrors what you'd type by hand:
+#   connect <addr>; password "<pw>"
+# Closes the console afterwards (backtick toggles) so the game view
+# isn't covered by the console once we're connecting.
+cs2_console_connect() {
+  local addr="${1:?connect addr required}"
+  local pw="${2:-}"
+  cs2_open_console || return 1
+  sleep 0.3
+  local line="connect $addr"
+  [ -n "$pw" ] && line="connect $addr; password \"$pw\""
+  log "typing: $line"
+  xdotool type --delay 30 "$line"
+  sleep 0.1
+  xdotool key --clearmodifiers Return 2>/dev/null || true
+  sleep 0.2
+  log "closing console"
+  xdotool key --clearmodifiers grave 2>/dev/null || true
+}
