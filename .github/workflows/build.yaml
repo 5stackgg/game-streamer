@@ -44,5 +44,5 @@ jobs:
         with:
           package-name: game-streamer
           package-type: container
-          min-versions-to-keep: 3
+          min-versions-to-keep: 4
           ignore-versions: '^buildcache-*'
