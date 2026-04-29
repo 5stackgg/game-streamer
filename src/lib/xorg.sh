@@ -13,7 +13,7 @@ start_xorg() {
   if xorg_running; then
     log "xorg already up on $DISPLAY"
   else
-    log "starting Xorg on $DISPLAY (config: $XORG_CONFIG, log: $LOG_DIR/xorg.log)"
+    log "starting Xorg on $DISPLAY (config: $XORG_CONFIG)"
     local n="${DISPLAY#:}"
     rm -f "/tmp/.X${n}-lock" "/tmp/.X11-unix/X${n}" 2>/dev/null || true
     # NOTE: -config takes a BARE filename here. Xorg.wrap (the setuid
@@ -22,33 +22,29 @@ start_xorg() {
     local cmd=(Xorg "$DISPLAY" -config "$XORG_CONFIG" -noreset
                -nolisten tcp -listen unix vt7)
     log "  exec: ${cmd[*]}"
-    nohup "${cmd[@]}" >"$LOG_DIR/xorg.log" 2>&1 &
-    local xpid=$!
+    spawn_logged xorg "${cmd[@]}"
+    local xpid=$SPAWNED_PID
     log "  Xorg pid=$xpid — waiting up to 10s for display"
     local i
     for i in $(seq 1 20); do
       xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break
       if ! kill -0 "$xpid" 2>/dev/null; then
-        warn "Xorg died (pid $xpid)"
-        dump_log "$LOG_DIR/xorg.log"
-        die "Xorg failed to start"
+        die "Xorg failed to start (pid $xpid died — see [xorg] log lines above)"
       fi
       sleep 0.5
     done
     if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
-      warn "Xorg never accepted clients on $DISPLAY"
-      dump_log "$LOG_DIR/xorg.log"
-      die "Xorg failed to start"
+      die "Xorg never accepted clients on $DISPLAY (see [xorg] log lines above)"
     fi
     log "  Xorg ready on $DISPLAY"
   fi
 
   if ! pgrep -x openbox >/dev/null 2>&1; then
-    log "starting openbox (log: $LOG_DIR/openbox.log)"
-    nohup openbox >"$LOG_DIR/openbox.log" 2>&1 &
+    log "starting openbox"
+    spawn_logged openbox openbox
     sleep 1
     pgrep -x openbox >/dev/null 2>&1 \
-      || { warn "openbox didn't start"; dump_log "$LOG_DIR/openbox.log"; }
+      || warn "openbox didn't start (see [openbox] log lines above)"
   fi
 
   # Open X access so processes spawned outside our pgid can connect.
@@ -119,33 +115,28 @@ find_main_steam_window() {
 # signal than the IPC pipe alone (the pipe comes up before the UI does,
 # and `-applaunch` issued before the UI renders sometimes hangs).
 wait_for_main_steam_window() {
-  local timeout="${1:-300}"
-  log "waiting up to ${timeout}s for the main Steam window (login + UI render)"
-  local i id
-  for i in $(seq 1 "$timeout"); do
+  # Waits indefinitely — operator cancels by closing the popup
+  # window (which drops the WS → api deletes the pod). No
+  # self-imposed timeout. The "timeout" arg is still accepted but
+  # treated as a no-op for callsite compatibility.
+  log "waiting for the main Steam window (login + UI render)"
+  local i=0 id
+  while :; do
     id=$(find_main_steam_window)
     if [ -n "$id" ]; then
       log "  main Steam window after ${i}s: $id"
       return 0
     fi
+    i=$(( i + 1 ))
     if [ $(( i % 15 )) -eq 0 ]; then
       log "  still waiting (${i}s) — current windows:"
       list_x_windows
-      # Also report whether the webhelper that draws the UI is running.
       local wh
       wh=$(pgrep -af 'steamwebhelper' | head -1 || true)
       log "  steamwebhelper: ${wh:-NOT RUNNING}"
     fi
     sleep 1
   done
-  warn "main Steam window never appeared after ${timeout}s"
-  warn "running full debug dump (also saved to $LOG_DIR/debug-*.txt)"
-  if command -v print_full_debug >/dev/null 2>&1; then
-    local out="$LOG_DIR/debug-$(date +%Y%m%d-%H%M%S).txt"
-    print_full_debug 2>&1 | tee "$out" >&2
-    log "saved to $out"
-  fi
-  return 1
 }
 
 # Minimize/hide Steam's main UI + Friends List so they don't sit

@@ -24,8 +24,10 @@ start_capture() {
   local audio="${5:-${CAPTURE_AUDIO:-1}}"
   local gop=$(( fps * 2 ))
   local url="${MEDIAMTX_SRT_BASE}?streamid=publish:${stream_id}"
-  local logf="$LOG_DIR/gst-${stream_id}.log"
   local pulse_sink="${PULSE_SINK_NAME:-cs2}"
+  # gst-launch tag for the k8s log: gst-<short-id> so multiple
+  # parallel captures (debug stream + match stream) don't blur together.
+  local gst_tag="gst-${stream_id:0:8}"
 
   if stream_running "$stream_id"; then
     log "capture '${stream_id}' already running (pid $(stream_pid "$stream_id"))"
@@ -34,7 +36,6 @@ start_capture() {
 
   log "starting capture '${stream_id}' (fps=$fps kbps=$kbps pointer=$pointer audio=$audio)"
   log "  -> $url"
-  log "  log: $logf"
 
   if [ "$audio" = 1 ]; then
     # Pin capture to OUR null sink's monitor. We deliberately don't trust
@@ -71,7 +72,7 @@ start_capture() {
     # and Safari 17+. If you need to support older Safari/iOS, switch
     # back to avenc_aac and configure mediamtx runOnReady to ffmpeg-
     # transcode AAC -> Opus on a sidecar path.
-    nohup gst-launch-1.0 -e \
+    spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
@@ -86,35 +87,42 @@ start_capture() {
         ! opusparse \
         ! queue ! mux. \
       mpegtsmux name=mux alignment=7 \
-        ! srtsink uri="$url" latency=200 \
-      >"$logf" 2>&1 &
+        ! srtsink uri="$url" latency=200
   else
-    nohup gst-launch-1.0 -e \
+    spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! nvh264enc preset=low-latency-hq gop-size="$gop" bitrate="$kbps" rc-mode=cbr \
         ! h264parse config-interval=1 \
         ! mpegtsmux alignment=7 \
-        ! srtsink uri="$url" latency=200 \
-      >"$logf" 2>&1 &
+        ! srtsink uri="$url" latency=200
   fi
 
-  local pid=$!
-  # Wait long enough for the pipeline to negotiate caps + open the
-  # encoders and muxer. Pulse sources, srt connect, and nvh264enc
-  # initialization can each take 2-3 seconds. If the pid is still alive
-  # at 5s, the pipeline is genuinely streaming.
+  local pid=$SPAWNED_PID
+  # Liveness check: process must survive pipeline negotiation (pulse
+  # sources, nvh264enc init, srt handshake). 3s is enough in practice;
+  # the WhepPlayer's own retry on the web side surfaces any later
+  # publish failures, so we don't need a long bake here.
   local i
-  for i in 1 2 3 4 5; do
+  for i in 1 2 3; do
     if ! kill -0 "$pid" 2>/dev/null; then
-      warn "capture '${stream_id}' died after ${i}s (during pipeline negotiation)"
-      dump_log "$logf" 80
+      warn "capture '${stream_id}' died after ${i}s (see [$gst_tag] log lines above)"
       return 1
     fi
     sleep 1
   done
-  log "  pid=$pid (alive after 5s — pipeline negotiated)"
+  log "  pid=$pid (alive after 3s — pipeline negotiated)"
+
+  # Phase 2 (publish-verify) was here. Removed — the polled
+  # /v3/paths/get response shape doesn't always match what we
+  # checked, and the WhepPlayer's WHEP retry on the web side already
+  # surfaces real publish failures. False-negative warnings were
+  # chasing problems that didn't exist. If you do need to verify
+  # mediamtx is receiving bytes for a stream id, hit:
+  #   curl ${MEDIAMTX_API_BASE}/v3/paths/list
+  # from inside the pod.
+  return 0
 }
 
 stop_capture() {

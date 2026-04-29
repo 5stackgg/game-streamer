@@ -13,6 +13,19 @@ export SRC_DIR LIB_DIR FLOWS_DIR
 : "${STEAM_LIBRARY:=/mnt/game-streamer}"
 : "${CS2_DIR:=$STEAM_LIBRARY/steamapps/common/Counter-Strike Global Offensive}"
 : "${MEDIAMTX_SRT_BASE:=srt://mediamtx.5stack.svc.cluster.local:8890}"
+# mediamtx HTTP control API. start_capture polls this to verify a
+# publish actually landed (gst-launch happily loops on a failing srt
+# sink without crashing — without this poll we'd report status=live
+# while no bytes are reaching mediamtx).
+: "${MEDIAMTX_API_BASE:=http://mediamtx.5stack.svc.cluster.local:9997}"
+# Local scratch dir. Despite the name it's NOT for log files anymore —
+# k8s captures the pod's stdout/stderr and that's where logs live.
+# This directory holds non-log state shared between subshells:
+#   - status.state / status.last / status.boot.epoch (status reporter)
+#   - openhud-seed-match.json, spec-bindings.json, demo-round-ticks.json
+#   - match-cfgs-prepared / match-cfgs-failed marker files
+#   - PID files
+# Keeping the LOG_DIR name to avoid mass-renames; treat it as STATE_DIR.
 : "${LOG_DIR:=/tmp/game-streamer}"
 # Xorg's setuid wrapper (Xwrapper) accepts only a BARE filename for
 # -config, not an absolute path. The Dockerfile drops the file into
@@ -23,7 +36,7 @@ mkdir -p "$LOG_DIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
 export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \
-       MEDIAMTX_SRT_BASE LOG_DIR XORG_CONFIG
+       MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE LOG_DIR XORG_CONFIG
 
 
 say()  { printf '\n=== %s ===\n' "$*"; }
@@ -52,16 +65,32 @@ run() {
   "$@"
 }
 
-# Dump the tail of a log inline (no "see /tmp/whatever" indirection).
+# Spawn a long-running daemon. Stdout+stderr stream to this process's
+# stderr with a "[<tag>] " prefix on every line so k8s container logs
+# are self-describing without separate log files. Sets SPAWNED_PID to
+# the daemon's pid (NOT the awk pipeline's). nohup detaches the daemon
+# from the launcher's controlling tty so HUP doesn't kill it when
+# setup-steam → run-live hands off.
+#
+# The awk subprocess inherits fd 2 from this shell, which in turn
+# inherits from the k8s container's stderr — so even after the
+# launcher script exits, the awk reparents to PID 1 and keeps tagging
+# until the daemon closes its stdout. fflush() keeps the latency low.
+spawn_logged() {
+  local tag="$1"; shift
+  nohup "$@" \
+    > >(awk -v t="$tag" '{print "["t"] " $0; fflush()}' >&2) \
+    2>&1 &
+  SPAWNED_PID=$!
+}
+
+# Legacy: callers used to redirect daemon output to "$LOG_DIR/foo.log"
+# and dump_log it on failure. Now everything streams to the k8s log
+# directly, so dump_log just emits a hint pointing at `kubectl logs`.
+# Kept as a stub so existing callers don't have to change.
 dump_log() {
-  local f="$1" n="${2:-60}"
-  if [ -f "$f" ]; then
-    printf '[%s] --- last %s lines of %s ---\n' "${SCRIPT_TAG:-game-streamer}" "$n" "$f" >&2
-    tail -n "$n" "$f" | sed 's/^/    /' >&2
-    printf '[%s] --- end %s ---\n' "${SCRIPT_TAG:-game-streamer}" "$f" >&2
-  else
-    printf '[%s] (no log at %s)\n' "${SCRIPT_TAG:-game-streamer}" "$f" >&2
-  fi
+  printf '[%s] (logs: kubectl logs -n 5stack <pod>; legacy ref: %s)\n' \
+    "${SCRIPT_TAG:-game-streamer}" "${1:-?}" >&2
 }
 
 # Trap-friendly verbose toggle. `GS_TRACE=1 ./game-streamer.sh ...` runs

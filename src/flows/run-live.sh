@@ -180,9 +180,42 @@ fi
 # already-running OpenHud server. Always written even if the server
 # isn't up — cs2 will just retry on the timeout interval and the HUD
 # will start updating once OpenHud catches up.
+#
+# setup-steam.sh kicks off this work in the background as soon as
+# the Steam pipe is up, so by the time we reach this stage the
+# marker file usually exists already. Wait briefly for it, then
+# fall back to inline if it didn't run (e.g. setup-steam was bypassed
+# or env was missing).
 say "3b. OpenHud GSI cfg + DB seed"
-write_openhud_gsi_cfg
-seed_openhud_db "$MATCH_ID"
+PREP_MARKER="$LOG_DIR/match-cfgs-prepared"
+PREP_FAILED="$LOG_DIR/match-cfgs-failed"
+PREP_SKIPPED="$LOG_DIR/match-cfgs-skipped"
+if [ -f "$PREP_MARKER" ]; then
+  log "  parallel cfg-prep already finished — reusing seeded match metadata"
+elif [ -f "$PREP_SKIPPED" ]; then
+  # setup-steam.sh decided not to spawn the bg job (e.g. no API_BASE).
+  # Fall straight through to the inline path; no point waiting.
+  log "  parallel cfg-prep was skipped — running inline"
+  write_openhud_gsi_cfg
+  seed_openhud_db "$MATCH_ID"
+else
+  # bg job is still in flight (rare) OR setup-steam was bypassed. Wait
+  # briefly, then fall through.
+  if [ ! -f "$PREP_FAILED" ]; then
+    log "  waiting up to 5s for parallel cfg-prep marker"
+    for _ in $(seq 1 10); do
+      [ -f "$PREP_MARKER" ] || [ -f "$PREP_FAILED" ] && break
+      sleep 0.5
+    done
+  fi
+  if [ -f "$PREP_MARKER" ]; then
+    log "  parallel cfg-prep finished — reusing seeded match metadata"
+  else
+    [ -f "$PREP_FAILED" ] && warn "  parallel cfg-prep failed — retrying inline"
+    write_openhud_gsi_cfg
+    seed_openhud_db "$MATCH_ID"
+  fi
+fi
 
 # Per-player spec binds. Appends `bind "F<n>" "spec_player_by_accountid <id>"`
 # lines to the autoexec from the just-cached seed JSON (written by
@@ -262,13 +295,13 @@ do_applaunch() {
     local cs2_bin="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
     log "  exec (DIRECT): $cs2_bin ${cs2_args[*]}"
     cd "$CS2_DIR/game/bin/linuxsteamrt64"
-    nohup "$cs2_bin" "${cs2_args[@]}" >>"$LOG_DIR/cs2_launch.log" 2>&1 &
-    log "  cs2 direct launch (pid=$!)"
+    spawn_logged cs2-launch "$cs2_bin" "${cs2_args[@]}"
+    log "  cs2 direct launch (pid=$SPAWNED_PID)"
   else
     local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
     log "  exec: ${cmd[*]}"
-    nohup "${cmd[@]}" >>"$LOG_DIR/cs2_launch.log" 2>&1 &
-    log "  applaunch sent (launcher pid=$!)"
+    spawn_logged cs2-launch "${cmd[@]}"
+    log "  applaunch sent (launcher pid=$SPAWNED_PID)"
   fi
 }
 do_applaunch
@@ -307,14 +340,14 @@ for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
   sleep 1
 done
 [ -n "$CS2_PID" ] || {
-  log "--- $LOG_DIR/cs2_launch.log ---"
-  tail -40 "$LOG_DIR/cs2_launch.log"
-  log "--- $STEAM_LIBRARY/steam/logs/console-linux.txt ---"
+  # Steam-side console log isn't piped to stderr (it's a file Steam
+  # owns) so dump its tail inline. Other diagnostics live in the k8s
+  # log under [cs2-launch] / [steam].
+  log "--- $STEAM_LIBRARY/steam/logs/console-linux.txt (last 20) ---"
   tail -20 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null || true
   die "Steam never spawned cs2 in ${CS2_LAUNCH_TIMEOUT}s"
 }
 log "  cs2 pid=$CS2_PID"
-ln -sf "$STEAM_LIBRARY/steam/logs/console-linux.txt" "$LOG_DIR/cs2.log" 2>/dev/null || true
 
 # cs2 is up — hide Steam's main UI + Friends List so any missed
 # clicks (e.g. from the shader-skip auto-handler) don't fall through
@@ -332,15 +365,16 @@ for i in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
     | awk '/"Counter-Strike 2"/{print $1; exit}')
   [ -n "$WIN" ] && { log "  window after ${i}s: $WIN"; break; }
   if ! kill -0 "$CS2_PID" 2>/dev/null; then
-    dump_log "$LOG_DIR/cs2.log"
+    log "--- cs2 console-linux.txt (last 60) ---"
+    tail -60 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null
     die "cs2 EXITED early."
   fi
   [ $(( i % 15 )) -eq 0 ] && log "  still waiting for cs2 window (${i}s, pid=$CS2_PID alive)"
   sleep 1
 done
 [ -n "$WIN" ] || {
-  log "cs2.log tail:"
-  tail -60 "$LOG_DIR/cs2.log" 2>/dev/null
+  log "--- cs2 console-linux.txt (last 60) ---"
+  tail -60 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null
   die "no CS2 window after ${CS2_WINDOW_TIMEOUT}s"
 }
 
@@ -391,7 +425,8 @@ fi
 
 say "6. start match capture stream"
 # 5th arg = 1 → include PulseAudio leg (cs2.monitor → AAC → mpegts mux)
-start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1
+start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
+  || die "capture failed to publish — see [gst-${MATCH_ID:0:8}] log lines above"
 
 # Stream is publishing to mediamtx — surface the SRT publish URL on the
 # match_streams row and flip is_live=true via the API. The viewer-facing
@@ -401,8 +436,7 @@ report_status status=live \
 
 say "done"
 log "watch:    https://hls.5stack.gg/${MATCH_ID}/"
-log "cs2 log:  $LOG_DIR/cs2.log"
-log "gst log:  $LOG_DIR/gst-${MATCH_ID}.log"
+log "logs:     kubectl logs (cs2-launch / gst-${MATCH_ID} / spec-server tags)"
 log "stop:     src/game-streamer.sh stop-live"
 
 # Keep the K8s Job in a running state — the api decides when the stream

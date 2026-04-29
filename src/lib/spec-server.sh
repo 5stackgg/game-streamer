@@ -27,11 +27,10 @@ start_spec_server() {
     log "spec-server already running (pid $(pgrep -f '[s]pec-server.mjs' | head -1))"
     return 0
   fi
-  log "starting spec-server on :$SPEC_SERVER_PORT (log: $LOG_DIR/spec-server.log)"
+  log "starting spec-server on :$SPEC_SERVER_PORT"
   SPEC_PORT="$SPEC_SERVER_PORT" \
-    nohup node "$SPEC_SERVER_BIN" \
-      >"$LOG_DIR/spec-server.log" 2>&1 &
-  log "  spec-server pid=$!"
+    spawn_logged spec-server node "$SPEC_SERVER_BIN"
+  log "  spec-server pid=$SPAWNED_PID"
 }
 
 stop_spec_server() {

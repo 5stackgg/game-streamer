@@ -45,16 +45,14 @@ start_picom() {
     log "picom already up"
     return 0
   fi
-  log "starting picom (log: $LOG_DIR/picom.log)"
-  nohup picom --backend xrender --no-fading-openclose --daemon \
-    >"$LOG_DIR/picom.log" 2>&1 &
+  log "starting picom"
+  spawn_logged picom picom --backend xrender --no-fading-openclose --daemon
   local i
   for i in $(seq 1 20); do
     picom_running && { log "  picom up"; return 0; }
     sleep 0.2
   done
-  warn "picom didn't come up — HUD overlay will composite as opaque black"
-  dump_log "$LOG_DIR/picom.log"
+  warn "picom didn't come up — HUD overlay will composite as opaque black (see [picom] log lines above)"
   return 1
 }
 
@@ -88,7 +86,7 @@ start_openhud() {
     return 0
   fi
   mkdir -p "$OPENHUD_USERDATA"
-  log "starting openhud ($OPENHUD_BIN, log: $LOG_DIR/openhud.log)"
+  log "starting openhud ($OPENHUD_BIN)"
   # --no-sandbox is required for Electron-as-root in the container; CS2
   # itself also runs as root here so the security delta is zero.
   # PORT honored by src/electron/index.ts (PORT || 1349).
@@ -106,30 +104,32 @@ start_openhud() {
   # use case, so muting here is free.
   PORT="$OPENHUD_PORT" \
   OPENHUD_AUTO_OVERLAY=1 \
-    nohup "$OPENHUD_BIN" --no-sandbox --disable-gpu-sandbox --mute-audio \
-      >"$LOG_DIR/openhud.log" 2>&1 &
-  log "  openhud pid=$!"
+    spawn_logged openhud "$OPENHUD_BIN" --no-sandbox --disable-gpu-sandbox --mute-audio
+  log "  openhud pid=$SPAWNED_PID"
 }
 
-# Poll the local HUD endpoint until it answers.
+# Poll the local HUD endpoint until it answers. Waits indefinitely —
+# the only abort condition is the openhud process actually exiting
+# (a real failure that retrying won't fix). The "timeout" arg is
+# still accepted for callsite compatibility but treated as no-op.
 wait_for_openhud_server() {
-  local timeout="${1:-60}" i
-  log "waiting up to ${timeout}s for OpenHud server on :${OPENHUD_PORT}"
-  for i in $(seq 1 "$timeout"); do
+  log "waiting for OpenHud server on :${OPENHUD_PORT}"
+  local i=0
+  while :; do
     if openhud_server_up; then
       log "  openhud server up after ${i}s"
       return 0
     fi
     if ! openhud_running; then
-      warn "openhud process exited early"
-      dump_log "$LOG_DIR/openhud.log"
+      warn "openhud process exited early (see [openhud] log lines above)"
       return 1
+    fi
+    i=$(( i + 1 ))
+    if [ $(( i % 30 )) -eq 0 ]; then
+      log "  still waiting (${i}s)"
     fi
     sleep 1
   done
-  warn "openhud server never responded on :${OPENHUD_PORT}"
-  dump_log "$LOG_DIR/openhud.log"
-  return 1
 }
 
 stop_openhud() {
@@ -334,6 +334,38 @@ bind "F5" "spec_autodirector 0"
 EOF
 }
 
+# Demo-playback keybinds. Every interactive control the operator
+# touches resolves to a key press here — no console flash, no
+# typed-input fragility. Mirrored in src/spec-server.mjs's KEY_DEMO_*
+# constants — change both together.
+#
+# CS2's demo system uses tick offsets for relative seeking. We assume
+# 64-tick demos for the bind table (most pro/CS2 demos); ±15s = ±960
+# ticks. If we ever support sub-tick or 128-tick demos this needs to
+# parameterise — for now hardcoded.
+#
+#   Pause       = demo_togglepause   (/demo/toggle)
+#   Home        = demo_gototick -960 (/demo/skip secs=-15)
+#   End         = demo_gototick +960 (/demo/skip secs=+15)
+#   Insert      = host_timescale 1   (/demo/speed rate=1)
+#   PageDown    = host_timescale 0.25 (/demo/speed rate=0.25)
+#   semicolon   = host_timescale 0.5 (/demo/speed rate=0.5)
+#   apostrophe  = host_timescale 2   (/demo/speed rate=2)
+#   PageUp      = host_timescale 4   (/demo/speed rate=4)
+demo_static_binds_block() {
+  cat <<'EOF'
+// === demo-playback keybinds (auto-generated; mirror in src/spec-server.mjs) ===
+bind "PAUSE" "demo_togglepause"
+bind "HOME" "demo_gototick -960"
+bind "END" "demo_gototick +960"
+bind "INS" "host_timescale 1"
+bind "SEMICOLON" "host_timescale 0.5"
+bind "APOSTROPHE" "host_timescale 2"
+bind "PGUP" "host_timescale 4"
+bind "PGDN" "host_timescale 0.25"
+EOF
+}
+
 # Append per-player `bind "F<n>" "spec_player_by_accountid <id>"` lines
 # to the autoexec from the seeded match JSON, and write the
 # accountid -> keysym map the spec-server reads at request time.
@@ -436,12 +468,13 @@ seed_openhud_db() {
   [ -n "$API_TOKEN" ] && hdr=(-H "Authorization: Bearer $API_TOKEN")
 
   local match_json
+  # curl stderr streams through the script's stderr so failures show up
+  # tagged in the k8s log without a temp file.
   if ! match_json=$(curl -fsS --max-time 10 "${hdr[@]}" \
-        "${API_BASE%/}/matches/${match_id}" 2>"$LOG_DIR/openhud-seed.err"); then
-    warn "match fetch failed — see $LOG_DIR/openhud-seed.err"
-    dump_log "$LOG_DIR/openhud-seed.err" 20
+        "${API_BASE%/}/matches/${match_id}" 2>&1 1>&3); then
+    warn "match fetch failed (see [openhud-seed] log lines above)"
     return 0
-  fi
+  fi 3>&1
 
   printf '%s\n' "$match_json" >"$LOG_DIR/openhud-seed-match.json"
   log "  match metadata cached at $LOG_DIR/openhud-seed-match.json"
@@ -450,11 +483,14 @@ seed_openhud_db() {
   # src/electron/api/v2/{teams,players,matches}/ in the OpenHud source —
   # we go through python3 (already in the image) for safe JSON handling
   # rather than jq (not installed) and shell out to curl per record.
-  python3 - <<'PY' "$match_json" "http://${OPENHUD_HOST}:${OPENHUD_PORT}/api/v2" "$LOG_DIR/openhud-seed.log"
+  # Python writes to its own stderr → script stderr → k8s log.
+  python3 - <<'PY' "$match_json" "http://${OPENHUD_HOST}:${OPENHUD_PORT}/api/v2"
 import json, sys, urllib.request, urllib.error
 
-raw, base, log_path = sys.argv[1], sys.argv[2], sys.argv[3]
-log = open(log_path, 'w')
+raw, base = sys.argv[1], sys.argv[2]
+
+def log(msg):
+    sys.stderr.write(f"[openhud-seed] {msg}\n"); sys.stderr.flush()
 
 def post(path, body):
     req = urllib.request.Request(
@@ -465,19 +501,18 @@ def post(path, body):
     )
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            log.write(f"POST {path} -> {r.status}\n")
+            log(f"POST {path} -> {r.status}")
             return json.loads(r.read() or b'{}')
     except urllib.error.HTTPError as e:
-        log.write(f"POST {path} -> HTTP {e.code}: {e.read().decode(errors='replace')}\n")
+        log(f"POST {path} -> HTTP {e.code}: {e.read().decode(errors='replace')}")
     except Exception as e:
-        log.write(f"POST {path} -> {type(e).__name__}: {e}\n")
+        log(f"POST {path} -> {type(e).__name__}: {e}")
     return None
 
 try:
     m = json.loads(raw)
 except Exception as e:
-    log.write(f"match json parse failed: {e}\n")
-    log.close()
+    log(f"match json parse failed: {e}")
     sys.exit(0)
 
 # Best-effort field probing — accept either a raw match record or a
@@ -515,12 +550,7 @@ if len(team_ids) >= 2:
         'current': True,
     })
 
-log.close()
 PY
-  if [ -s "$LOG_DIR/openhud-seed.log" ]; then
-    log "  seed responses:"
-    sed 's/^/    /' "$LOG_DIR/openhud-seed.log"
-  fi
   return 0
 }
 
