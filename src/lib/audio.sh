@@ -39,18 +39,19 @@ start_pulseaudio() {
   if pulseaudio_running; then
     log "pulseaudio already up"
   else
-    log "starting pulseaudio (log: $LOG_DIR/pulseaudio.log)"
+    log "starting pulseaudio"
     # --start daemonizes if not already running. --exit-idle-time=-1
-    # keeps it alive even when no clients connect.
-    nohup pulseaudio --start --exit-idle-time=-1 --log-target=newfile:"$LOG_DIR/pulseaudio.log" \
-      >/dev/null 2>&1 &
+    # keeps it alive even when no clients connect. Pulse's own daemon
+    # forks; spawn_logged just tags the brief startup output.
+    spawn_logged pulseaudio pulseaudio --start --exit-idle-time=-1 \
+      --log-target=stderr
     local i
     for i in $(seq 1 20); do
       pactl info >/dev/null 2>&1 && break
       sleep 0.5
     done
     pactl info >/dev/null 2>&1 \
-      || { dump_log "$LOG_DIR/pulseaudio.log"; die "pulseaudio failed to start"; }
+      || die "pulseaudio failed to start (see [pulseaudio] log lines above)"
     log "  pulseaudio up"
   fi
 
@@ -68,8 +69,7 @@ start_pulseaudio() {
   else
     log "  creating null sink '$PULSE_SINK_NAME'"
     if ! pactl load-module module-null-sink sink_name="$PULSE_SINK_NAME" >/dev/null; then
-      warn "module-null-sink load failed — apps will route to auto_null"
-      dump_log "$LOG_DIR/pulseaudio.log" 20
+      warn "module-null-sink load failed — apps will route to auto_null (see [pulseaudio] log lines above)"
     fi
   fi
   pactl set-default-sink "$PULSE_SINK_NAME" 2>/dev/null || true
@@ -87,8 +87,7 @@ start_pulseaudio() {
     if ! pactl load-module module-native-protocol-tcp \
            "listen=${PULSE_TCP_HOST}" "port=${PULSE_TCP_PORT}" \
            auth-anonymous=1 >/dev/null; then
-      warn "module-native-protocol-tcp load failed — cs2 may not find pulse via PULSE_SERVER"
-      dump_log "$LOG_DIR/pulseaudio.log" 20
+      warn "module-native-protocol-tcp load failed — cs2 may not find pulse via PULSE_SERVER (see [pulseaudio] log lines above)"
     fi
   fi
   # Now safe to export — daemon is up and listening on TCP. Do this

@@ -26,6 +26,23 @@
 //       true  -> spec_autodirector 1; spec_mode 5  (cinematic auto-cam)
 //       false -> spec_autodirector 0               (operator drives)
 //
+// Demo-playback routes (only meaningful when run-demo.sh launched cs2):
+//
+//   /demo/toggle               demo_togglepause (cs2-bound key)
+//   /demo/pause                idempotent — only fires the toggle if currently playing
+//   /demo/resume               idempotent — only fires the toggle if currently paused
+//   /demo/seek    {"tick": n}  demo_gototick n  (typed into dev console)
+//   /demo/skip    {"secs": n}  shifts current estimate by n seconds (negative ok)
+//   /demo/speed   {"rate": n}  host_timescale n; uses bound F-keys for the
+//                              presets {0.25,0.5,1,2,4} and typed console
+//                              commands for arbitrary values
+//   /demo/round   {"round": n} demo_gototick <round_n_start_tick>; tick map
+//                              comes from $LOG_DIR/demo-round-ticks.json
+//                              (written by run-demo.sh from $ROUND_TICKS)
+//   GET /demo/state            best-effort {tick, paused, rate, total_ticks,
+//                              tick_rate, last_activity_ms_ago} for the api's
+//                              idle-reaper + the web scrubber's animation
+//
 // How it works (and why it isn't xdotool-typing the dev console):
 //
 // The OpenHud overlay is raised above cs2 in the X stack so ximagesrc
@@ -85,6 +102,51 @@ const KEY_SPEC_PREV = "F2";
 const KEY_SPEC_JUMP = "F3";
 const KEY_AUTODIRECTOR_ON = "F4";
 const KEY_AUTODIRECTOR_OFF = "F5";
+
+// Demo-playback bound keys (run-demo.sh + lib/openhud.sh:demo_static_binds_block).
+const KEY_DEMO_TOGGLE = "Pause";
+const KEY_DEMO_SKIP_BACK = "Home";    // bound to demo_gototick -960 (~ -15s)
+const KEY_DEMO_SKIP_FWD  = "End";     // bound to demo_gototick +960 (~ +15s)
+const SPEED_KEY_BY_RATE = {
+  "0.25": "Next",        // PageDown
+  "0.5":  "semicolon",
+  "1":    "Insert",
+  "2":    "apostrophe",
+  "4":    "Prior",       // PageUp
+};
+
+// Sidecar JSON dropped by run-demo.sh so /demo/round can resolve a
+// round number to a tick without a round-trip back to the api.
+const DEMO_ROUND_TICKS_PATH =
+  process.env.DEMO_ROUND_TICKS_PATH ??
+  path.join(process.env.LOG_DIR ?? "/tmp/game-streamer", "demo-round-ticks.json");
+
+// Demo session bookkeeping for tick estimation + idle-timeout. Held in
+// memory for the life of the daemon (which is the life of the pod).
+const demoState = {
+  // Best-effort: tick at the moment of the most recent /demo/seek (or
+  // session start). Combined with `lastSeekRealMs` and `rate` lets us
+  // give the api a coarse current-tick estimate so the scrubber can
+  // animate without polling cs2's console.
+  lastTickAtSeek: 0,
+  lastSeekRealMs: Date.now(),
+  rate: 1,
+  paused: false,
+  totalTicks: parseInt(process.env.DEMO_TOTAL_TICKS ?? "0", 10) || 0,
+  tickRate: parseFloat(process.env.DEMO_TICK_RATE ?? "64") || 64,
+  // Bumped on every /demo/* POST. The api's idle reaper compares this
+  // against `now()` to decide whether to tear the pod down.
+  lastActivityMs: Date.now(),
+};
+function bumpActivity() { demoState.lastActivityMs = Date.now(); }
+function estimateCurrentTick() {
+  if (demoState.paused) return demoState.lastTickAtSeek;
+  const elapsedSec = (Date.now() - demoState.lastSeekRealMs) / 1000;
+  return Math.max(
+    0,
+    Math.round(demoState.lastTickAtSeek + elapsedSec * demoState.rate * demoState.tickRate),
+  );
+}
 
 // Where run-live.sh drops the accountid -> F-key map after seeding the
 // OpenHud DB. Read fresh per request so an operator can rerun the seed
@@ -207,6 +269,51 @@ async function sendKey(key) {
 }
 
 /**
+ * Open cs2's dev console, type a command, hit Return, close the console.
+ *
+ * Used for demo controls that take a runtime parameter (`demo_gototick
+ * <tick>`, arbitrary `host_timescale <rate>`) — these can't be pre-bound
+ * to a single F-key the way pause/speed-presets are.
+ *
+ * Why this is safe even with the OpenHud overlay raised: cs2 holds
+ * keyboard focus continuously (overlay is `focusable: false`), so the
+ * `xdotool key`/`xdotool type` calls — which target the focused window
+ * via XTest — go straight to cs2 without needing windowactivate. The
+ * windowactivate path used by lib/xorg.sh:cs2_console_command is only
+ * needed when called interactively from a debug shell where cs2 may
+ * have lost focus; here we never lose it.
+ *
+ * @param {string} cmd
+ * @returns {Promise<boolean>}
+ */
+async function sendConsoleCommand(cmd) {
+  if ((await findCs2Window()) === null) return false;
+  await run(["xdotool", "key", "--clearmodifiers", "grave"]);
+  await new Promise((r) => setTimeout(r, 80));
+  await run(["xdotool", "type", "--delay", "20", cmd]);
+  await new Promise((r) => setTimeout(r, 40));
+  await run(["xdotool", "key", "--clearmodifiers", "Return"]);
+  await new Promise((r) => setTimeout(r, 60));
+  await run(["xdotool", "key", "--clearmodifiers", "grave"]);
+  return true;
+}
+
+/**
+ * Read the round_ticks sidecar (written by run-demo.sh from $ROUND_TICKS).
+ * @returns {Array<{round: number, start_tick: number, end_tick: number}>}
+ */
+function loadRoundTicks() {
+  try {
+    const raw = readFileSync(DEMO_ROUND_TICKS_PATH, "utf8").trim();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Read the accountid -> keysym map written by run-live.sh after the
  * match-metadata seed. Returns an empty map if the file is missing or
  * malformed; callers treat that as "no per-player binds available"
@@ -282,6 +389,18 @@ const server = createServer(async (req, res) => {
         player_bindings: Object.keys(bindings).length,
       });
       log(`-> 200 (cs2_running=${wid !== null}, player_bindings=${Object.keys(bindings).length})`);
+      return;
+    }
+
+    if (method === "GET" && url === "/demo/state") {
+      sendJson(res, 200, {
+        tick: estimateCurrentTick(),
+        total_ticks: demoState.totalTicks,
+        tick_rate: demoState.tickRate,
+        rate: demoState.rate,
+        paused: demoState.paused,
+        last_activity_ms_ago: Date.now() - demoState.lastActivityMs,
+      });
       return;
     }
 
@@ -369,6 +488,177 @@ const server = createServer(async (req, res) => {
       const ok = await sendKey(key);
       sendJson(res, ok ? 200 : 503, ok ? { ok, enabled, key } : { error: "cs2 not running" });
       log(`-> ${ok ? 200 : 503} autodirector ${enabled} (${key})`);
+      return;
+    }
+
+    // ---- /demo/* — demo-playback controls ----
+    // Most run on cs2 console commands rather than F-key binds because
+    // they take parameters (tick, rate). Pause/speed-presets have F-key
+    // binds and use the safe sendKey path.
+
+    if (url === "/demo/toggle") {
+      const ok = await sendKey(KEY_DEMO_TOGGLE);
+      if (ok) {
+        demoState.paused = !demoState.paused;
+        // Snapshot the current estimated tick at the moment we paused
+        // so resume picks up from the right place.
+        if (demoState.paused) demoState.lastTickAtSeek = estimateCurrentTick();
+        demoState.lastSeekRealMs = Date.now();
+        bumpActivity();
+      }
+      sendJson(res, ok ? 200 : 503, ok ? { ok, paused: demoState.paused } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/toggle (paused=${demoState.paused})`);
+      return;
+    }
+
+    if (url === "/demo/pause") {
+      // Idempotent — only send the key if we believe we're playing.
+      // Accidentally double-toggling would actually unpause.
+      let ok = true;
+      if (!demoState.paused) {
+        ok = await sendKey(KEY_DEMO_TOGGLE);
+        if (ok) {
+          demoState.lastTickAtSeek = estimateCurrentTick();
+          demoState.paused = true;
+          demoState.lastSeekRealMs = Date.now();
+        }
+      }
+      bumpActivity();
+      sendJson(res, ok ? 200 : 503, ok ? { ok, paused: true } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/pause`);
+      return;
+    }
+
+    if (url === "/demo/resume") {
+      let ok = true;
+      if (demoState.paused) {
+        ok = await sendKey(KEY_DEMO_TOGGLE);
+        if (ok) {
+          demoState.paused = false;
+          demoState.lastSeekRealMs = Date.now();
+        }
+      }
+      bumpActivity();
+      sendJson(res, ok ? 200 : 503, ok ? { ok, paused: false } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/resume`);
+      return;
+    }
+
+    if (url === "/demo/seek") {
+      const tick = Number.parseInt(body.tick, 10);
+      if (!Number.isFinite(tick) || tick < 0) {
+        sendJson(res, 400, { error: "tick (non-negative int) required" });
+        log("-> 400 demo/seek bad tick");
+        return;
+      }
+      const ok = await sendConsoleCommand(`demo_gototick ${tick}`);
+      if (ok) {
+        demoState.lastTickAtSeek = tick;
+        demoState.lastSeekRealMs = Date.now();
+        bumpActivity();
+      }
+      sendJson(res, ok ? 200 : 503, ok ? { ok, tick } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/seek tick=${tick}`);
+      return;
+    }
+
+    if (url === "/demo/skip") {
+      const secs = Number.parseFloat(body.secs);
+      if (!Number.isFinite(secs)) {
+        sendJson(res, 400, { error: "secs (number) required" });
+        log("-> 400 demo/skip bad secs");
+        return;
+      }
+      // Bound keys for ±15s, the operator-friendly defaults. Anything
+      // else falls back to typed console (rare / debug).
+      let ok;
+      let via;
+      if (secs === -15 || secs === 15) {
+        const key = secs < 0 ? KEY_DEMO_SKIP_BACK : KEY_DEMO_SKIP_FWD;
+        ok = await sendKey(key);
+        via = `key:${key}`;
+      } else {
+        const target = Math.max(
+          0,
+          estimateCurrentTick() + Math.round(secs * demoState.tickRate),
+        );
+        ok = await sendConsoleCommand(`demo_gototick ${target}`);
+        via = "console";
+      }
+      if (ok) {
+        // Estimator drift: bump tick by approximation. Real tick will
+        // resync on next /demo/state poll.
+        demoState.lastTickAtSeek = Math.max(
+          0,
+          estimateCurrentTick() + Math.round(secs * demoState.tickRate),
+        );
+        demoState.lastSeekRealMs = Date.now();
+        bumpActivity();
+      }
+      sendJson(res, ok ? 200 : 503, ok ? { ok, secs, via } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/skip secs=${secs} (${via})`);
+      return;
+    }
+
+    if (url === "/demo/speed") {
+      const rate = Number.parseFloat(body.rate);
+      if (!Number.isFinite(rate) || rate <= 0) {
+        sendJson(res, 400, { error: "rate (positive number) required" });
+        log("-> 400 demo/speed bad rate");
+        return;
+      }
+      // Clamp aggressively — host_timescale beyond 8 destabilises cs2's
+      // physics tick + audio sync, and below 0.1 is indistinguishable
+      // from a near-pause for the operator.
+      const clamped = Math.min(8, Math.max(0.1, rate));
+      // Snapshot tick BEFORE changing rate so the estimator stays
+      // continuous across the transition.
+      demoState.lastTickAtSeek = estimateCurrentTick();
+      demoState.lastSeekRealMs = Date.now();
+      // Prefer the bound F-key for a known preset (no console flash);
+      // fall back to typed `host_timescale <rate>` for arbitrary values.
+      const presetKey = SPEED_KEY_BY_RATE[String(clamped)];
+      const ok = presetKey
+        ? await sendKey(presetKey)
+        : await sendConsoleCommand(`host_timescale ${clamped}`);
+      if (ok) {
+        demoState.rate = clamped;
+        bumpActivity();
+      }
+      sendJson(
+        res,
+        ok ? 200 : 503,
+        ok ? { ok, rate: clamped, via: presetKey ? "key" : "console" } : { error: "cs2 not running" },
+      );
+      log(`-> ${ok ? 200 : 503} demo/speed rate=${clamped} (${presetKey ? "key" : "console"})`);
+      return;
+    }
+
+    if (url === "/demo/round") {
+      const round = Number.parseInt(body.round, 10);
+      if (!Number.isFinite(round) || round < 1) {
+        sendJson(res, 400, { error: "round (int >= 1) required" });
+        log("-> 400 demo/round bad round");
+        return;
+      }
+      const map = loadRoundTicks();
+      const entry = map.find((r) => r.round === round);
+      if (!entry) {
+        sendJson(res, 404, {
+          error: `no tick mapping for round ${round}`,
+          hint: "demo metadata not parsed yet — try again in a few seconds",
+        });
+        log(`-> 404 demo/round ${round} (not in ticks map; have ${map.length})`);
+        return;
+      }
+      const ok = await sendConsoleCommand(`demo_gototick ${entry.start_tick}`);
+      if (ok) {
+        demoState.lastTickAtSeek = entry.start_tick;
+        demoState.lastSeekRealMs = Date.now();
+        bumpActivity();
+      }
+      sendJson(res, ok ? 200 : 503, ok ? { ok, round, tick: entry.start_tick } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/round ${round} -> tick ${entry.start_tick}`);
       return;
     }
 

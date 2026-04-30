@@ -168,6 +168,11 @@ install_cs2_via_steamcmd() {
     die "steamcmd not found at /opt/steamcmd/steamcmd.sh — image needs the steamcmd install layer"
   fi
 
+  # Only emit the download status when we're actually downloading.
+  # Pre-cached pods returned above and never light up "Downloading CS2"
+  # in the UI. status-reporter is a no-op when not configured.
+  report_status status=downloading_cs2
+
   log "running steamcmd: install/update CS2 (appid 730) into $CS2_DIR"
   log "  this is a ~57 GB download on a fresh install"
   mkdir -p "$CS2_DIR"
@@ -198,6 +203,52 @@ install_cs2_via_steamcmd() {
   else
     die "steamcmd finished but no $manifest — install failed"
   fi
+}
+
+# Pre-download a CS2 workshop map via steamcmd. Without this, +playdemo
+# on a workshop map stalls CS2 on a "Subscribe?" prompt and the demo
+# never starts. Idempotent — steamcmd skips if the .vpk is already on
+# disk at the expected path.
+#
+#   $1  workshop item id (numeric, from the demo header `workshop/<id>/...`)
+download_workshop_map() {
+  local id="${1:?workshop id required}"
+
+  # steamcmd writes to $STEAM_LIBRARY/steamapps/workshop/content/730/<id>/.
+  # CS2 looks there at runtime — no extra symlink required.
+  local target="$STEAM_LIBRARY/steamapps/workshop/content/730/${id}"
+  if compgen -G "$target/*.vpk" >/dev/null 2>&1; then
+    log "workshop map ${id} already present at $target — skip download"
+    return 0
+  fi
+
+  if [ ! -x /opt/steamcmd/steamcmd.sh ]; then
+    warn "steamcmd missing — cannot pre-download workshop map ${id}"
+    return 1
+  fi
+
+  # Creds only needed when we're actually about to call steamcmd; the
+  # idempotent skip above must work in env contexts that don't have them.
+  require_env STEAM_USER STEAM_PASSWORD
+
+  log "downloading workshop map ${id} via steamcmd"
+  # +force_install_dir matters: steamcmd places workshop content RELATIVE
+  # to the install dir, so this gives us $STEAM_LIBRARY/steamapps/workshop/...
+  /opt/steamcmd/steamcmd.sh \
+    +@sSteamCmdForcePlatformType linux \
+    +force_install_dir "$CS2_DIR" \
+    +login "$STEAM_USER" "$STEAM_PASSWORD" \
+    +workshop_download_item 730 "$id" \
+    +quit \
+    | sed -u 's/^/  [steamcmd] /'
+
+  if compgen -G "$target/*.vpk" >/dev/null 2>&1; then
+    log "  workshop map ${id} ready at $target"
+    return 0
+  fi
+  warn "  workshop_download_item finished but no .vpk at $target"
+  warn "  CS2 will likely show the Subscribe? prompt and stall"
+  return 1
 }
 
 # Set Steam Cloud sync to OFF for CS2 (appid 730) in every user's
@@ -868,7 +919,7 @@ print_full_debug() {
   log "STEAM_LIBRARY=$STEAM_LIBRARY"
   log "CS2_DIR=$CS2_DIR"
   log "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
-  log "LOG_DIR=$LOG_DIR"
+  log "STATE_DIR=$LOG_DIR (logs stream to k8s pod stdout/stderr)"
   log "uid=$(id -u) euid=$(id -u) user=$(id -un)"
   log "container hostname: $(hostname 2>/dev/null)"
 
@@ -1005,19 +1056,23 @@ print_full_debug() {
     list_x_windows
   fi
 
-  say "STEAM LOGS (tail of each, if present)"
+  say "STEAM LOGS (tail of each on-disk log Steam writes)"
+  # Process stdout/stderr (steam, xorg, openbox) all go to the k8s pod
+  # log already — `kubectl logs` shows them in chronological order. The
+  # files below are written by Steam itself, not us, so they're not in
+  # the container log; tail them inline.
   local logf
   for logf in \
-    "$LOG_DIR/steam.log" \
     "$STEAM_HOME/logs/console-linux.txt" \
     "$STEAM_HOME/logs/stderr.txt" \
     "$STEAM_HOME/logs/bootstrap_log.txt" \
     "$STEAM_HOME/logs/cef_log.txt" \
     "$STEAM_HOME/logs/webhelper-linux.txt" \
-    "$STEAM_HOME/logs/cloud_log.txt" \
-    "$LOG_DIR/xorg.log" \
-    "$LOG_DIR/openbox.log"; do
-    dump_log "$logf" 60
+    "$STEAM_HOME/logs/cloud_log.txt"; do
+    if [ -f "$logf" ]; then
+      log "--- $logf (last 60 lines) ---"
+      tail -60 "$logf" | sed 's/^/    /'
+    fi
   done
 
   say "CRASH DUMPS"
@@ -1122,11 +1177,32 @@ fix_steam_perms() {
     rm -f "$STEAM_HOME/steam"
   fi
 
-  # Steam's update working area. Anything left from a half-applied
-  # update (we just had one fail mid-rename) corrupts the next attempt.
-  if [ -e "$STEAM_HOME/package" ]; then
-    log "fix_steam_perms: removing $STEAM_HOME/package (Steam recreates fresh)"
-    rm -rf "$STEAM_HOME/package"
+  # Steam's update working area. Two distinct things live under package/:
+  #   * package/steam_client_ubuntu12_*.zip + .manifest — completed,
+  #     immutable downloads from the client-update CDN. Safe to keep
+  #     across crashes; reusing them lets Steam skip a ~45s redownload.
+  #   * package/tmp/                                    — half-extracted
+  #     staging area for an in-progress update. If the prior process
+  #     died mid-rename this can be inconsistent and will corrupt the
+  #     next update attempt.
+  #
+  # Pods in our deployment get SIGKILL'd on stop, so Steam never exits
+  # cleanly and a `.crash` marker shows up on every restart. That makes
+  # `.crash` an unreliable signal of update corruption — wiping the
+  # whole package/ on every boot would force a redownload on every
+  # cold-ish start. Only `package/tmp/` presence is a direct, reliable
+  # signal of a half-applied update; nuke just that.
+  #
+  # FORCE_PACKAGE_RESET=1 still wipes the whole package/ dir as a
+  # manual escape hatch when a download is genuinely corrupt.
+  if [ "${FORCE_PACKAGE_RESET:-0}" = "1" ]; then
+    if [ -e "$STEAM_HOME/package" ]; then
+      log "fix_steam_perms: FORCE_PACKAGE_RESET=1 — removing $STEAM_HOME/package"
+      rm -rf "$STEAM_HOME/package"
+    fi
+  elif [ -e "$STEAM_HOME/package/tmp" ]; then
+    log "fix_steam_perms: package/tmp present — removing only $STEAM_HOME/package/tmp (cache preserved)"
+    rm -rf "$STEAM_HOME/package/tmp"
   fi
 
   # Stale lock/pid leftovers can wedge Steam at startup.
@@ -1135,20 +1211,28 @@ fix_steam_perms() {
         "$STEAM_HOME/.crash" \
         "$STEAM_LIBRARY/steam/.crash" 2>/dev/null || true
 
-  # Normalize ownership across the ENTIRE Steam home. The persisted
-  # host volume carries files owned by 1000:1000 / nobody:nogroup from
-  # a prior host-uid mapping; without root ownership Steam's bwrap
-  # sandbox can't always write what it needs.
+  # Normalize ownership across the ENTIRE Steam home. Slow on warm
+  # boots (recurses ~10k files in the cache mount) but only matters
+  # the FIRST time a fresh host volume is mounted — once everything
+  # is root:root, subsequent boots can skip. Marker file `.perms-ok`
+  # records that we've done it. Bypass the skip by removing the
+  # marker or setting FORCE_FIX_STEAM_PERMS=1.
   #
   # IMPORTANT: -H. Without it, $STEAM_HOME (a symlink to the cache
   # mount) is NOT traversed — we'd be no-op'ing on the symlink itself
-  # and never touching the contents. With -H, chown follows command-line
-  # symlinks for the recursion. Same for chmod.
+  # and never touching the contents. With -H, chown follows
+  # command-line symlinks for the recursion. Same for chmod.
   # CS2_DIR is on a separate path ($STEAM_LIBRARY/steamapps/...), not
   # affected — and it's 60GB so we wouldn't want to chown it anyway.
-  log "fix_steam_perms: chown -RH root:root + chmod -RH u+rwX on $STEAM_HOME"
-  chown -RH root:root "$STEAM_HOME" 2>/dev/null || true
-  chmod -RH u+rwX     "$STEAM_HOME" 2>/dev/null || true
+  local perms_marker="$STEAM_HOME/.perms-ok"
+  if [ "${FORCE_FIX_STEAM_PERMS:-0}" != "1" ] && [ -f "$perms_marker" ]; then
+    log "fix_steam_perms: marker present at $perms_marker — skip chown/chmod"
+  else
+    log "fix_steam_perms: chown -RH root:root + chmod -RH u+rwX on $STEAM_HOME"
+    chown -RH root:root "$STEAM_HOME" 2>/dev/null || true
+    chmod -RH u+rwX     "$STEAM_HOME" 2>/dev/null || true
+    touch "$perms_marker" 2>/dev/null || true
+  fi
 }
 
 # Kill anything left over from a prior Steam/cs2 session.
@@ -1163,7 +1247,8 @@ kill_steam() {
 }
 
 # Launch Steam with login prefilled. UI visible so we can watch via the
-# debug stream and complete any 2FA/captcha. Logs stream into $LOG_DIR.
+# debug stream and complete any 2FA/captcha. Steam's stdout/stderr are
+# tagged [steam] and stream to the k8s pod log via spawn_logged.
 start_steam() {
   require_env STEAM_USER STEAM_PASSWORD
 
@@ -1175,32 +1260,81 @@ start_steam() {
   ensure_steam_bootstrap
   restore_real_steamclient
 
-  log "launching Steam with login=$STEAM_USER (UI visible on debug stream)"
-  (
-    stdbuf -oL -eL dbus-launch --exit-with-session \
-      "$STEAM_HOME/steam.sh" \
-        -login "$STEAM_USER" "$STEAM_PASSWORD" 2>&1 \
-      | stdbuf -oL tee "$LOG_DIR/steam.log" \
-      | sed -u 's/^/  [steam] /' >&2
-  ) &
-  log "  steam wrapper pid=$!"
+  # Webhelper bootstrap dominates cold-boot wall time (~50-60s on a
+  # warm cache). These flags drop subsystems we never use:
+  #
+  #   -nofriendsui    skip Friends UI initialisation
+  #   -nochatui       skip Chat UI initialisation
+  #   -no-browser     skip the in-Steam web browser
+  #
+  # All three are community-known and safe — they don't affect the
+  # webhelper paths +applaunch goes through. We deliberately do NOT
+  # use -silent (tested earlier — it suppresses the webhelper subset
+  # that handles +applaunch and cs2 never spawned).
+  #
+  # Override with STEAM_LAUNCH_FLAGS="" to fall back to a vanilla
+  # launch if any of these ever turn out to break a future Steam
+  # update.
+  : "${STEAM_LAUNCH_FLAGS:=-nofriendsui -nochatui -no-browser}"
+  # shellcheck disable=SC2206  # intentional word-split into argv
+  local extra_flags=( $STEAM_LAUNCH_FLAGS )
+
+  log "launching Steam with login=$STEAM_USER (flags: $STEAM_LAUNCH_FLAGS)"
+  spawn_logged steam stdbuf -oL -eL dbus-launch --exit-with-session \
+    "$STEAM_HOME/steam.sh" \
+      "${extra_flags[@]}" \
+      -login "$STEAM_USER" "$STEAM_PASSWORD"
+  log "  steam wrapper pid=$SPAWNED_PID"
 }
 
-# Wait for Steam IPC to come up. Login UI / 2FA delays go here.
+# Wait for Steam to finish login by polling for the userdata
+# directory. With `-silent` no window ever appears, so we can't proxy
+# the "logged in" signal off window visibility — userdata/<steamid>/
+# is what actually indicates a completed login + roaming-config sync.
+#
+# On warm boots (HAD_USERDATA=1) this returns immediately. On cold
+# first-boots it takes 30-60s (steamwebhelper has to fetch + sync).
+wait_for_steam_userdata() {
+  # Waits indefinitely — operator cancels by closing the popup.
+  # "timeout" arg accepted for callsite compatibility, treated as
+  # no-op.
+  log "waiting for steam userdata (login + roaming config)"
+  local i=0
+  while :; do
+    if [ -d "$STEAM_HOME/userdata" ]; then
+      local found
+      found=$(find "$STEAM_HOME/userdata" -mindepth 1 -maxdepth 1 -type d \
+        ! -name anonymous 2>/dev/null | head -1)
+      if [ -n "$found" ]; then
+        log "  userdata up after ${i}s ($found)"
+        return 0
+      fi
+    fi
+    i=$(( i + 1 ))
+    [ $(( i % 15 )) -eq 0 ] && log "  still waiting (${i}s)"
+    sleep 1
+  done
+}
+
+# Wait for Steam IPC to come up. Waits indefinitely — operator
+# cancels by closing the popup window (which drops the WS, which
+# tells the api to delete the pod). No need for a self-imposed
+# timeout that just bricks the pod with no recovery path.
+#
+# A "timeout" arg is still accepted but treated as a no-op so callers
+# can keep their old signatures.
 wait_for_steam_pipe() {
-  local timeout="${1:-300}"
-  log "waiting up to ${timeout}s for steam pipe (complete login on the debug stream if needed)"
-  local i
-  for i in $(seq 1 "$timeout"); do
+  log "waiting for steam pipe (Ctrl-C / pod delete to cancel)"
+  local i=0
+  while :; do
     if steam_pipe_up; then
       log "  PIPE UP after ${i}s (pid $(cat "$HOME/.steam/steam.pid"))"
       return 0
     fi
-    [ $(( i % 15 )) -eq 0 ] && log "  still waiting (${i}s)"
+    i=$(( i + 1 ))
+    if [ $(( i % 15 )) -eq 0 ]; then
+      log "  still waiting (${i}s)"
+    fi
     sleep 1
   done
-  warn "steam pipe never came up after ${timeout}s"
-  dump_log "$LOG_DIR/steam.log"
-  dump_log "$STEAM_HOME/logs/console-linux.txt" 30
-  return 1
 }

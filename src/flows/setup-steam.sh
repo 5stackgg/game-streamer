@@ -43,7 +43,9 @@ require_env STEAM_USER STEAM_PASSWORD
 : "${STEAM_PIPE_TIMEOUT:=300}"
 
 start_status_reporter
-report_status status=launching_steam
+# Pod is up; X/pulse/openhud spin up next. We don't emit a "preparing"
+# status — the UI doesn't surface it. The next reportable status is
+# launching_steam (or downloading_cs2 on cold-start), emitted below.
 
 say "1. Xorg + openbox + X access"
 start_xorg
@@ -59,24 +61,19 @@ start_pulseaudio
 say "1bb. spec-server (cs2 control HTTP daemon)"
 start_spec_server
 
-# OpenHud overlay stack. Brought up BEFORE Steam so the admin window has
-# already been hidden by the time Steam's UI appears — avoids cosmetic
-# Steam-on-top weirdness during the 90s shader-cache window. The overlay
-# itself only matters once cs2 is up and run-live raises it.
-say "1c. picom (compositor) + OpenHud server"
+# OpenHud overlay stack. Spawned now but the wait-for-server +
+# hide-admin + position-overlay work runs LATER (just before cs2
+# launches) so the 3-5s OpenHud bootstrap overlaps the Steam launch +
+# pipe wait + UI render — net ~3-5s shaved off the critical path.
+# The overlay isn't needed until cs2 actually spawns, so deferring is
+# safe; run-live re-raises it after cs2's window appears anyway.
+say "1c. picom (compositor) + OpenHud server (background)"
+OPENHUD_DEFERRED=0
 if [ -x "$OPENHUD_BIN" ]; then
   start_picom || warn "continuing without picom (HUD background won't be transparent)"
   start_openhud
-  if wait_for_openhud_server 60; then
-    hide_openhud_admin_window
-    # Position+raise the overlay BEFORE Steam/cs2 ever launches. With
-    # Electron's alwaysOnTop:true the HUD should stay on top once cs2
-    # goes fullscreen — but if it gets pushed down anyway, run-live
-    # re-raises it after cs2 spawns.
-    position_openhud_overlay || warn "early overlay positioning failed — will retry after cs2"
-  else
-    warn "OpenHud server didn't come up — continuing without HUD overlay"
-  fi
+  OPENHUD_DEFERRED=1
+  log "  openhud spawned — wait/positioning deferred to overlap Steam boot"
 else
   log "OpenHud not installed at $OPENHUD_BIN — skipping HUD setup"
   log "  rebuild image with --build-arg OPENHUD_VERSION=vX.Y.Z to enable"
@@ -113,16 +110,34 @@ register_library "$STEAM_LIBRARY"
 # killed it at step 3), so steamcmd and Steam won't fight over
 # appmanifest. After this Steam picks up the install on launch and
 # the Install dialog never appears.
+#
+# install_cs2_via_steamcmd emits its own status=downloading_cs2 only
+# when an install actually runs — pre-cached pods skip that stage so
+# the UI doesn't light up a misleading download bar.
 say "5. install/update CS2 via steamcmd"
-report_status status=downloading_cs2
 install_cs2_via_steamcmd
 
 # Must run while Steam is OFF — Steam clobbers localconfig.vdf on shutdown.
 # Without this CS2 pops a "Cloud Out of Date" CEF dialog we can't auto-dismiss.
 # On first boot there's no userdata/ yet, so this is a no-op; we cycle Steam
 # below once Steam has written its initial localconfig.vdf.
+#
+# HAD_USERDATA also gates the warm-boot fast-path: with userdata/ present
+# AND loginusers.vdf present, Steam reuses the cached refresh token instead
+# of re-auth'ing the password on -login, which trims a few more seconds
+# off the logging_in phase. Both files live under the persistent cache
+# mount via ensure_steam_home_persist, so they survive pod restarts.
 HAD_USERDATA=0
+HAS_LOGIN_TOKEN=0
 [ -d "$STEAM_HOME/userdata" ] && HAD_USERDATA=1
+[ -s "$STEAM_HOME/config/loginusers.vdf" ] && HAS_LOGIN_TOKEN=1
+if [ "$HAD_USERDATA" = 1 ] && [ "$HAS_LOGIN_TOKEN" = 1 ]; then
+  log "boot mode: WARM (userdata + loginusers.vdf cached → fast login expected)"
+elif [ "$HAD_USERDATA" = 1 ]; then
+  log "boot mode: PARTIAL (userdata cached but no loginusers.vdf → password re-auth)"
+else
+  log "boot mode: COLD (no cached state → first-time login + cloud-disable cycle)"
+fi
 
 say "6. disable Steam Cloud sync (global + per-app)"
 disable_cloud_globally
@@ -136,18 +151,72 @@ disable_cs2_overlay
 print_overlay_state
 
 say "7. launch Steam"
+report_status status=launching_steam
 start_steam
 
 say "8. wait for steam pipe"
 wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" \
-  || die "pipe never came up — check $LOG_DIR/steam.log and the debug stream"
+  || die "pipe never came up — check [steam] log lines and the debug stream"
 
-# Wait for the UI window BEFORE attempting any first-boot cycle. The
-# IPC pipe comes up well before login completes — at pipe-up time
-# userdata/<steamid>/ may not exist yet. Cycling at that point would
-# kill Steam mid-login, our disable_cs2_cloud would no-op (no
-# userdata to edit), and Steam's second start would write fresh
-# defaults — undoing the entire purpose of the cycle.
+# Finish the OpenHud bringup we deferred from stage 1c. By now openhud
+# has had at least the Xorg/pulse/spec-server setup time + Steam
+# launch + Steam pipe wait (~5-10s) to come up, so wait_for_server
+# usually returns immediately. Falling back gracefully if it didn't
+# come up at all — the overlay is ornamental for boot purposes.
+if [ "$OPENHUD_DEFERRED" = "1" ]; then
+  say "8b. finish OpenHud bringup (was started in 1c)"
+  if wait_for_openhud_server 60; then
+    hide_openhud_admin_window
+    # Pre-position the overlay even though run-live re-raises it
+    # after cs2 spawns — the early position prevents a frame of
+    # mis-placed HUD in the captured stream.
+    position_openhud_overlay \
+      || warn "early overlay positioning failed — will retry after cs2"
+  else
+    warn "OpenHud server didn't come up — continuing without HUD overlay"
+  fi
+fi
+
+# Kick off the match-cfg prep (OpenHud GSI cfg + api DB seed) in the
+# background so it overlaps the 30-50s Steam UI wait. None of this
+# work depends on Steam.
+#
+# Three outcomes — run-live picks one of these markers:
+#   match-cfgs-prepared  — full prep ran (GSI + seed)
+#   match-cfgs-failed    — prep started but errored, retry inline
+#   match-cfgs-skipped   — we deliberately didn't spawn (no MATCH_ID
+#                          or no API_BASE). The skipped marker is
+#                          critical: without it run-live used to
+#                          wait 10s for a marker that would never
+#                          come, then fall through anyway.
+rm -f "$LOG_DIR/match-cfgs-prepared" \
+      "$LOG_DIR/match-cfgs-failed" \
+      "$LOG_DIR/match-cfgs-skipped"
+if [ -n "${MATCH_ID:-}" ] && [ -n "${API_BASE:-}" ]; then
+  (
+    # set -e: a write_openhud_gsi_cfg failure must flip the marker to
+    # `match-cfgs-failed` rather than silently proceeding to seed_openhud_db
+    # and writing `match-cfgs-prepared` while the GSI cfg is missing.
+    set -euo pipefail
+    SCRIPT_TAG=cfg-prep
+    if write_openhud_gsi_cfg && seed_openhud_db "$MATCH_ID"; then
+      : > "$LOG_DIR/match-cfgs-prepared"
+    else
+      : > "$LOG_DIR/match-cfgs-failed"
+    fi
+  ) &
+  log "match-cfgs prep spawned (pid $!) — will overlap Steam wait"
+else
+  : > "$LOG_DIR/match-cfgs-skipped"
+  log "match-cfgs prep skipped (no MATCH_ID or API_BASE) — run-live will skip the wait"
+fi
+
+# Steam pipe → Steam UI window is the strict "Steam is fully up"
+# gate. We require BOTH the IPC pipe AND a rendered main window
+# before allowing cs2 to launch — Web Helper has to be bootstrapped
+# end-to-end, otherwise +applaunch silently drops AND direct-exec
+# starts cs2 against a half-initialised Steam where the demo never
+# loads. Demo and live both take this proven path.
 say "9. wait for main Steam window (login + UI render)"
 report_status status=logging_in
 wait_for_main_steam_window "${STEAM_WINDOW_TIMEOUT:-300}" \
@@ -176,7 +245,7 @@ if [ "$HAD_USERDATA" = 0 ]; then
   print_overlay_state
   start_steam
   wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" \
-    || die "pipe never came up after cycle — check $LOG_DIR/steam.log"
+    || die "pipe never came up after cycle — check [steam] log lines"
   wait_for_main_steam_window "${STEAM_WINDOW_TIMEOUT:-300}" \
     || die "main Steam window not visible after cycle"
 fi

@@ -13,6 +13,9 @@
 #   2.  run-live               — flow 2: -applaunch CS2 (Steam will
 #                                update if needed) and start the match
 #                                capture stream.
+#   2'. run-demo               — flow 2 variant: download a .dem from
+#                                DEMO_URL and play it back via +playdemo.
+#                                Same capture pipeline as run-live.
 #
 # Pass --debug as a top-level flag to publish an on-screen capture to
 # publish:debug for the duration of the flow (watch at
@@ -70,9 +73,12 @@ flows:
   setup-steam              flow 1: register library + start Steam (UI visible)
   run-live                 flow 2: launch CS2 + start match capture
                            (requires flow 1 to have completed login)
+  run-demo                 flow 2 variant: download \$DEMO_URL and play
+                           it back via +playdemo + start capture
   live                     run flow 1 then flow 2 end-to-end. Setup waits
                            until the main Steam UI window is rendered
                            before launching CS2.
+  demo                     run flow 1 then flow 2 (demo variant) end-to-end.
 
 global flags:
   --debug                  publish on-screen capture to publish:debug
@@ -96,9 +102,16 @@ control:
                            (called automatically by run-live once cs2 is up,
                            keeps stray clicks off Steam UI buttons)
   cs2-console              open CS2's dev console (sends backtick to cs2)
-  cs2-connect              open dev console and type the connect command:
-                             connect <CONNECT_ADDR>; password "<CONNECT_PASSWORD>"
-                           (values from .env)
+  cs2-connect              open dev console and connect to the running
+                           match. Picks the first available mode in
+                           priority order:
+                             1. \$PLAYCAST_URL                       → playcast
+                             2. \$CONNECT_TV_ADDR/_PASSWORD          → TV port
+                             3. \$CONNECT_ADDR/\$CONNECT_PASSWORD    → game port
+                           (values from pod env or src/.env)
+  cs2-playdemo [path]      open dev console and type:
+                             playdemo <path>
+                           (defaults to \$DEMO_FILE or /tmp/game-streamer/demo.dem)
   spec-auto on|off         toggle CS2 auto-director at runtime:
                              on  → spec_autodirector 1; spec_mode 5 (director cam)
                              off → spec_autodirector 0 (manual control)
@@ -116,16 +129,14 @@ control:
                            registered library (kills Steam, runs steamcmd,
                            leaves Steam off — re-run 'live' afterward).
                            Set CS2_FORCE_UPDATE=1 to force re-validate.
-  steam-log                tail Steam's logs (steam.log, console-linux,
-                           stderr, cef_log, webhelper-linux)
-  gst-log [stream-id]      tail the gstreamer log for a capture stream
-                           (no arg = list all gst logs in $LOG_DIR)
-  debug [out-file]         full diagnostic dump (env, processes, pipe,
+  steam-log                tail Steam's own on-disk logs (console-linux,
+                           stderr, cef_log, webhelper-linux). Process
+                           output (steam, xorg, openbox, openhud, gst)
+                           lives in the k8s pod log: 'kubectl logs ...'.
+  debug                    full diagnostic dump (env, processes, pipe,
                            steamclient, binaries, runtime, user-namespaces,
-                           windows, all logs, crash dumps, manifest, cloud
-                           state, disk). Saves to $LOG_DIR/debug-*.txt.
+                           windows, crash dumps, manifest, cloud, disk).
   openhud-status           OpenHud process / server / picom / window state
-  openhud-log              tail OpenHud's log
   openhud-restart          stop + relaunch OpenHud + wait for server
   openhud-seed [match-id]  re-run the OpenHud DB seed from the 5stack API
                            (defaults to \$MATCH_ID)
@@ -141,7 +152,7 @@ control:
   stop-all                 kill cs2, capture, Steam, openbox, Xorg
 
 env loaded from: $SRC_DIR/.env (if present)
-log dir:         $LOG_DIR
+state dir:       $LOG_DIR  (markers + json caches; logs stream to k8s)
 EOF
 }
 
@@ -220,36 +231,28 @@ cmd_stop_all() {
   log "all stopped"
 }
 
-cmd_gst_log() {
-  local stream_id="${1:-}"
-  if [ -z "$stream_id" ]; then
-    log "all gst logs in $LOG_DIR:"
-    ls -la "$LOG_DIR"/gst-*.log 2>/dev/null | sed 's/^/  /' || log "  (none)"
-    log "use: $0 gst-log <stream-id>"
-    return 0
-  fi
-  dump_log "$LOG_DIR/gst-${stream_id}.log" 200
-}
-
 cmd_steam_log() {
+  # Process stdout/stderr (steam wrapper, xorg, openbox, openhud, gst,
+  # spec-server) all stream to the k8s pod log live under their
+  # [<tag>] prefixes — `kubectl logs` is the canonical view. The files
+  # below are written by Steam itself and aren't in the container log,
+  # so we tail them directly.
   local f
-  for f in "$LOG_DIR/steam.log" \
-           "$STEAM_HOME/logs/console-linux.txt" \
+  for f in "$STEAM_HOME/logs/console-linux.txt" \
            "$STEAM_HOME/logs/stderr.txt" \
            "$STEAM_HOME/logs/cef_log.txt" \
            "$STEAM_HOME/logs/webhelper-linux.txt"; do
-    dump_log "$f" 60
+    if [ -f "$f" ]; then
+      log "--- $f (last 60) ---"
+      tail -60 "$f" | sed 's/^/    /'
+    fi
   done
+  log "(for our own process output run: kubectl logs -n 5stack <pod>)"
 }
 
-# Comprehensive single-command dump. Always also writes the same output
-# to a file so it can be diffed/grepped after the fact without
-# re-collecting.
+# Comprehensive single-command dump. Streams to stdout — k8s captures it.
 cmd_debug() {
-  local out="${1:-$LOG_DIR/debug-$(date +%Y%m%d-%H%M%S).txt}"
-  log "writing full debug dump to $out (and stdout)"
-  print_full_debug 2>&1 | tee "$out"
-  log "saved to $out"
+  print_full_debug
 }
 
 cmd_install_cs2() {
@@ -280,12 +283,83 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   setup-steam)  exec "$FLOWS_DIR/setup-steam.sh" "$@" ;;
   run-live)     exec "$FLOWS_DIR/run-live.sh"    "$@" ;;
+  run-demo)     exec "$FLOWS_DIR/run-demo.sh"    "$@" ;;
   # `up` is the legacy name — kept as an alias of `live` so older
   # pod manifests and any scripts pinned to the previous arg keep
   # working without coordinated redeploys.
   live | up)
     "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
     exec "$FLOWS_DIR/run-live.sh" "$@"
+    ;;
+  demo)
+    mkdir -p /tmp/game-streamer
+    # Kick the demo download off in parallel with setup-steam. setup
+    # takes 60-90s; a typical demo is 100-300MB and downloads in
+    # 5-30s — so by the time setup is done, the demo is usually
+    # already on disk and run-demo's "downloading_demo" stage flips
+    # to done immediately. Marker files (.dem on success / .failed on
+    # error) let run-demo poll without owning the curl pid.
+    if [ -n "${DEMO_URL:-}" ]; then
+      DEMO_FILE_BG="${DEMO_FILE:-/tmp/game-streamer/demo.dem}"
+      rm -f "$DEMO_FILE_BG" "$DEMO_FILE_BG.failed" "$DEMO_FILE_BG.partial"
+      (
+        if curl --fail --silent --show-error --location \
+                --retry 5 --retry-delay 2 --retry-all-errors \
+                --max-time "${DEMO_DOWNLOAD_TIMEOUT:-300}" \
+                --output "$DEMO_FILE_BG.partial" \
+                "$DEMO_URL"; then
+          mv -f "$DEMO_FILE_BG.partial" "$DEMO_FILE_BG"
+        else
+          touch "$DEMO_FILE_BG.failed"
+        fi
+      ) > >(awk '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
+      echo $! > /tmp/game-streamer/demo-download.pid
+    fi
+    # Workshop map: parallel-ish — runs in the same steamcmd "lane"
+    # as the cs2 install, which means it has to WAIT for the cs2
+    # install to finish (or be already-installed). Two concurrent
+    # steamcmd processes fight over ~/.steam state; if we ran them
+    # truly in parallel the workshop download would race the cs2
+    # install and silently drop, leaving cs2 to prompt "Subscribe?"
+    # at +playdemo time.
+    #
+    # Lifecycle: poll for the cs2 appmanifest (written by stage 5 of
+    # setup-steam.sh); once present, run download_workshop_map.
+    # Marker files: <target>/*.vpk on success, /tmp/.../workshop-${id}.failed
+    # on error. run-demo.sh waits for one of them in stage 3d.
+    if [ -n "${WORKSHOP_ID:-}" ]; then
+      WORKSHOP_TARGET="${STEAM_LIBRARY:-/mnt/game-streamer}/steamapps/workshop/content/730/${WORKSHOP_ID}"
+      WORKSHOP_FAILED="/tmp/game-streamer/workshop-${WORKSHOP_ID}.failed"
+      CS2_MANIFEST="${STEAM_LIBRARY:-/mnt/game-streamer}/steamapps/appmanifest_730.acf"
+      rm -f "$WORKSHOP_FAILED"
+      (
+        # shellcheck disable=SC1091
+        . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
+        # shellcheck disable=SC1091
+        . "$LIB_DIR/steam.sh"
+        SCRIPT_TAG=workshop-bg
+        # Wait for cs2 install (own steamcmd run) to finish before
+        # starting our own. Caps at the same timeout used elsewhere
+        # so a stuck cs2 install doesn't block forever.
+        for _ in $(seq 1 600); do
+          [ -f "$CS2_MANIFEST" ] && break
+          sleep 2
+        done
+        if [ ! -f "$CS2_MANIFEST" ]; then
+          warn "cs2 manifest never appeared — skipping workshop download"
+          touch "$WORKSHOP_FAILED"
+          exit 0
+        fi
+        if download_workshop_map "$WORKSHOP_ID"; then
+          : # download_workshop_map already left the .vpk in place
+        else
+          touch "$WORKSHOP_FAILED"
+        fi
+      ) > >(awk '{print "[workshop-download] " $0; fflush()}' >&2) 2>&1 &
+      echo $! > /tmp/game-streamer/workshop-download.pid
+    fi
+    "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
+    exec "$FLOWS_DIR/run-demo.sh" "$@"
     ;;
   debug-stream) cmd_debug_stream "$@" ;;
   status|state)   cmd_status ;;
@@ -295,8 +369,32 @@ case "$cmd" in
   cs2-console)     cs2_open_console ;;
   cs2-connect)
     load_env
-    require_env CONNECT_ADDR CONNECT_PASSWORD
-    cs2_console_connect "$CONNECT_ADDR" "$CONNECT_PASSWORD"
+    # Three connect modes — same fallback chain as run-live.sh:
+    #   1. PLAYCAST_URL                            (api: usePlaycast)
+    #   2. CONNECT_TV_ADDR + CONNECT_TV_PASSWORD   (api: server has TV port)
+    #   3. CONNECT_ADDR + CONNECT_PASSWORD         (api: game-port fallback)
+    if [ -n "${PLAYCAST_URL:-}" ]; then
+      cs2_console_command "playcast \"$PLAYCAST_URL\""
+    elif [ -n "${CONNECT_TV_ADDR:-}" ]; then
+      cs2_console_connect "$CONNECT_TV_ADDR" "${CONNECT_TV_PASSWORD:-}"
+    elif [ -n "${CONNECT_ADDR:-}" ]; then
+      cs2_console_connect "$CONNECT_ADDR" "${CONNECT_PASSWORD:-}"
+    else
+      die "no connect target — set PLAYCAST_URL, or CONNECT_TV_ADDR+CONNECT_TV_PASSWORD, or CONNECT_ADDR+CONNECT_PASSWORD"
+    fi
+    ;;
+  cs2-playdemo)
+    # Manually trigger demo playback. Defaults to whatever
+    # run-demo.sh wrote to disk; pass an explicit path to override.
+    # Useful for debugging when +playdemo on the launch line silently
+    # no-op'd: kubectl exec into the pod, run this, watch the debug
+    # stream to confirm cs2 receives the command.
+    DEMO_PATH="${1:-${DEMO_FILE:-/tmp/game-streamer/demo.dem}}"
+    if [ ! -f "$DEMO_PATH" ]; then
+      echo "demo file not found at $DEMO_PATH" >&2
+      exit 2
+    fi
+    cs2_console_command "playdemo $DEMO_PATH"
     ;;
   spec-auto)
     case "${1:-}" in
@@ -310,18 +408,15 @@ case "$cmd" in
       start)  start_spec_server ;;
       stop)   stop_spec_server ;;
       status) spec_server_status ;;
-      log)    dump_log "$LOG_DIR/spec-server.log" 200 ;;
-      *)      echo "usage: spec-server start|stop|status|log" >&2; exit 2 ;;
+      *)      echo "usage: spec-server start|stop|status (logs: kubectl logs)" >&2; exit 2 ;;
     esac
     ;;
   audio-state)     audio_state ;;
   audio-test)      audio_test_tone ;;
   install-cs2)    cmd_install_cs2 ;;
   steam-log)      cmd_steam_log ;;
-  gst-log)        cmd_gst_log "$@" ;;
   debug)          cmd_debug "$@" ;;
   openhud-status)   openhud_status ;;
-  openhud-log)      dump_log "$LOG_DIR/openhud.log" 200 ;;
   openhud-restart)  stop_openhud; sleep 1; start_openhud; wait_for_openhud_server 60 ;;
   openhud-seed)     seed_openhud_db "${1:-${MATCH_ID:?MATCH_ID not set}}" ;;
   openhud-position) position_openhud_overlay ;;
