@@ -127,11 +127,9 @@ snd_mute_losefocus 0
 engine_no_focus_sleep 0
 volume 1.0
 // Demo-mode HUD hiding. None of these are sv_cheats-gated for demo
-// playback (no server), so they stick at engine init and we don't
-// have to chase the demoui panel with a post-load F11 toggle. If
-// the operator wants any of these back on the manual demoui button
-// in the web UI fires F11 to toggle the panel.
-demoui 0
+// playback (no server), so they take at engine init. The demoui
+// panel itself is suppressed via `+demoui false` on the launch line
+// (post-+playdemo, when the panel context actually exists).
 cl_drawhud 0
 r_drawviewmodel 0
 cl_show_observer_crosshair 0
@@ -174,6 +172,7 @@ if [ -f "$PREP_MARKER" ]; then
 elif [ -f "$PREP_SKIPPED" ]; then
   log "  parallel cfg-prep was skipped — running inline"
   write_openhud_gsi_cfg
+  write_spec_gsi_cfg
   seed_openhud_db "$MATCH_ID"
 else
   if [ ! -f "$PREP_FAILED" ]; then
@@ -185,9 +184,13 @@ else
   fi
   if [ -f "$PREP_MARKER" ]; then
     log "  parallel cfg-prep finished — reusing seeded match metadata"
+    # Always re-write the spec-server GSI cfg — the parallel cfg-prep
+    # only handles OpenHud's. Cheap enough to be unconditional.
+    write_spec_gsi_cfg
   else
     [ -f "$PREP_FAILED" ] && warn "  parallel cfg-prep failed — retrying inline"
     write_openhud_gsi_cfg
+    write_spec_gsi_cfg
     seed_openhud_db "$MATCH_ID"
   fi
 fi
@@ -276,9 +279,9 @@ log "  PULSE_SINK=$PULSE_SINK PULSE_SERVER=$PULSE_SERVER"
 do_applaunch() {
   # +playdemo on the launch line: cs2 starts loading the demo during
   # engine init before its window even appears, so the stream never
-  # shows the cs2 main menu. The console-typed fallback path is
-  # racy (focus/timing) and was failing intermittently — going back
-  # to the launch-arg form which has always been reliable here.
+  # shows the cs2 main menu. demoui is hidden by the spec-server's
+  # GSI handler the moment cs2 fires its first game-state event —
+  # deterministic timing, no race vs. when the panel paints.
   local cs2_args=(
     -windowed -noborder -width 1920 -height 1080 -novid -nojoy -console
     -insecure

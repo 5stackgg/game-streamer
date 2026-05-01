@@ -305,6 +305,38 @@ EOF
   fi
 }
 
+# Drop a second GSI cfg alongside the OpenHud one so cs2 fires game
+# state to spec-server too. cs2 enumerates every
+# gamestate_integration_*.cfg in its cfg dir at engine init — adding
+# a second file forks GSI to both consumers without touching OpenHud.
+# spec-server uses the events to know exactly when the demo is
+# playing (round.phase / map.phase), so the web UI can start its
+# timeline at the right moment instead of guessing.
+write_spec_gsi_cfg() {
+  local cfg_dir="$CS2_DIR/game/csgo/cfg"
+  mkdir -p "$cfg_dir"
+  local dst="$cfg_dir/gamestate_integration_5stack.cfg"
+  local port="${SPEC_SERVER_PORT:-1350}"
+  log "writing GSI cfg to $dst (-> spec-server :$port/gsi)"
+  cat >"$dst" <<EOF
+"5Stack Spec-Server GSI"
+{
+  "uri" "http://127.0.0.1:${port}/gsi"
+  "timeout" "5.0"
+  "buffer" "0.0"
+  "throttle" "0.1"
+  "heartbeat" "10.0"
+  "data"
+  {
+    "provider" "1"
+    "map"      "1"
+    "round"    "1"
+    "player_id" "1"
+  }
+}
+EOF
+}
+
 # ---- spec keybinds -------------------------------------------------------
 # CS2 spec actions that the spec-server (src/spec-server.mjs) drives are
 # pre-bound to F-keys here so the server only ever has to send a single

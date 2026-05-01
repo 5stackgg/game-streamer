@@ -147,6 +147,63 @@ const demoState = {
 };
 function bumpActivity() { demoState.lastActivityMs = Date.now(); }
 
+// Latest cs2 GSI snapshot. cs2 fires the `gamestate_integration_*.cfg`
+// endpoints during demo playback the same as live matches — we get
+// real game state instead of having to guess "is the demo playing
+// yet" from log scrapes or fd checks. The web side reads
+// `gsi.map_phase === "live"` (or any non-null phase) as the
+// authoritative "demo is loaded and playing" signal.
+const gsiState = {
+  lastReceivedMs: 0,
+  mapName: null,
+  mapPhase: null,        // warmup | live | intermission | gameover
+  roundPhase: null,      // freezetime | live | over
+  roundNumber: null,     // 0-indexed CS2 demo round counter
+  spectatedSteamId: null,
+};
+
+// One-shot "tell the api the demo is actually playing now" beacon
+// + hide the auto-opened demoui Panorama panel. Fires on the first
+// GSI receipt — that's the deterministic "demo loaded and rolling"
+// signal we couldn't get from log scrapes. With this gate in place
+// we don't have to time anything: GSI lands AFTER the demo panel
+// has rendered, so F11 reliably toggles it from visible → hidden.
+let demoPlayingReported = false;
+async function reportDemoPlayingOnce() {
+  if (demoPlayingReported) return;
+  demoPlayingReported = true;
+  // Hide the demoui panel — runs in parallel with the api POST.
+  // F11 is bound to `demoui` in autoexec; one keystroke flips the
+  // visible panel off.
+  void sendKey("F11").catch(() => undefined);
+
+  const sessionId = process.env.DEMO_SESSION_ID;
+  const sessionToken = process.env.DEMO_SESSION_TOKEN;
+  const apiBase = process.env.STATUS_API_BASE ?? process.env.API_BASE;
+  if (!sessionId || !sessionToken || !apiBase) return;
+  try {
+    await fetch(`${apiBase}/demo-sessions/${sessionId}/status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${sessionId}:${sessionToken}`,
+      },
+      body: JSON.stringify({ status: "playing" }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    process.stdout.write(
+      `[spec-server] reported status=playing + sent F11 for session ${sessionId}\n`,
+    );
+  } catch (err) {
+    process.stderr.write(
+      `[spec-server] reportDemoPlayingOnce: api POST failed: ${(err && err.message) || err}\n`,
+    );
+    // Don't reset demoPlayingReported — F11 already fired, retrying
+    // would double-toggle the panel. The api retry is less critical:
+    // /demo/state still surfaces gsi.map_phase, web can fall back.
+  }
+}
+
 // Probe whether cs2 currently has the .dem file open. cs2 keeps the
 // demo file open via fd for the entire playback duration, so its
 // presence in /proc/<cs2_pid>/fd/ is a reliable "demo is actually
@@ -434,6 +491,16 @@ const server = createServer(async (req, res) => {
     }
 
     if (method === "GET" && url === "/demo/state") {
+      // demo_loaded comes from GSI when we have a recent event;
+      // /proc/<pid>/fd is the fallback for the brief window before
+      // the first GSI tick lands.
+      const gsiFresh =
+        gsiState.lastReceivedMs > 0 &&
+        Date.now() - gsiState.lastReceivedMs < 30_000;
+      const demoLoaded =
+        gsiFresh && gsiState.mapPhase != null
+          ? true
+          : await demoLoadedInProc();
       sendJson(res, 200, {
         tick: estimateCurrentTick(),
         total_ticks: demoState.totalTicks,
@@ -441,7 +508,17 @@ const server = createServer(async (req, res) => {
         rate: demoState.rate,
         paused: demoState.paused,
         last_activity_ms_ago: Date.now() - demoState.lastActivityMs,
-        demo_loaded: await demoLoadedInProc(),
+        demo_loaded: demoLoaded,
+        gsi: gsiFresh
+          ? {
+              map_name: gsiState.mapName,
+              map_phase: gsiState.mapPhase,
+              round_phase: gsiState.roundPhase,
+              round_number: gsiState.roundNumber,
+              spectated_steam_id: gsiState.spectatedSteamId,
+              last_received_ms_ago: Date.now() - gsiState.lastReceivedMs,
+            }
+          : null,
       });
       return;
     }
@@ -677,9 +754,10 @@ const server = createServer(async (req, res) => {
     }
 
     if (url === "/demo/reload") {
-      // Type `playdemo $DEMO_FILE` via the dev console. autoexec sets
-      // `demoui 0` so the Panorama panel stays hidden across reloads
-      // — no F11 dance needed.
+      // Type `playdemo $DEMO_FILE` via the dev console. The operator
+      // clicks "Toggle CS2 demo HUD" manually after reload if they
+      // want the panel hidden again — auto-toggle was racy against
+      // the post-reload panel re-render. Trade-off accepted.
       const ok = await sendConsoleCommand(
         `playdemo /tmp/game-streamer/demo.dem`,
       );
@@ -707,6 +785,48 @@ const server = createServer(async (req, res) => {
         ok ? { ok, enabled: Boolean(body.enabled) } : { error: "cs2 not running" },
       );
       log(`-> ${ok ? 200 : 503} demo/xray (key F12)`);
+      return;
+    }
+
+    if (url === "/gsi") {
+      // cs2 GSI POSTs land here — we parse out the bits we care about
+      // (map phase, round phase, currently-spectated steamid) and
+      // mirror them on demoState for the /demo/state consumer.
+      // No auth check: cs2 only POSTs to localhost from inside the
+      // pod, the listener binds to 0.0.0.0 but the K8s NetworkPolicy
+      // blocks external traffic.
+      const map = body?.map ?? {};
+      const round = body?.round ?? {};
+      const player = body?.player ?? {};
+      const prevMapPhase = gsiState.mapPhase;
+      const prevRoundPhase = gsiState.roundPhase;
+      const wasReceiving = gsiState.lastReceivedMs > 0;
+      gsiState.lastReceivedMs = Date.now();
+      gsiState.mapName = typeof map.name === "string" ? map.name : null;
+      gsiState.mapPhase = typeof map.phase === "string" ? map.phase : null;
+      gsiState.roundPhase =
+        typeof round.phase === "string" ? round.phase : null;
+      gsiState.roundNumber =
+        typeof map.round === "number" ? map.round : null;
+      gsiState.spectatedSteamId =
+        typeof player.steamid === "string" ? player.steamid : null;
+      bumpActivity();
+      sendJson(res, 200, { ok: true });
+      // Tell the api the demo is actually playing (one-shot).
+      void reportDemoPlayingOnce();
+      // Log only on transitions so a 10Hz throttle doesn't flood
+      // the daemon log. First event ever, map phase change, and
+      // round phase change all surface; routine ticks stay silent.
+      if (
+        !wasReceiving ||
+        prevMapPhase !== gsiState.mapPhase ||
+        prevRoundPhase !== gsiState.roundPhase
+      ) {
+        log(
+          `-> 200 gsi map=${gsiState.mapName ?? "?"}/${gsiState.mapPhase ?? "?"} ` +
+            `round=${gsiState.roundNumber ?? "?"}/${gsiState.roundPhase ?? "?"}`,
+        );
+      }
       return;
     }
 
