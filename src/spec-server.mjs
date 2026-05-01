@@ -110,7 +110,6 @@ const KEY_AUTODIRECTOR_OFF = "F5";
 const KEY_DEMO_TOGGLE = "Pause";
 const KEY_DEMO_SKIP_BACK = "Home";    // bound to demo_gototick -960 (~ -15s)
 const KEY_DEMO_SKIP_FWD  = "End";     // bound to demo_gototick +960 (~ +15s)
-const KEY_DEMO_RELOAD = "F10";        // bound to playdemo /tmp/game-streamer/demo.dem
 // X is cs2's built-in spec-mode x-ray toggle — no autoexec bind
 // needed, no console flash, no Steam-hotkey collision.
 const KEY_XRAY_TOGGLE = "x";
@@ -643,12 +642,20 @@ const server = createServer(async (req, res) => {
     }
 
     if (url === "/demo/reload") {
-      // Bound to F10 → `playdemo /tmp/game-streamer/demo.dem`. cs2
-      // re-opens the demoui panel on every playdemo, so we follow up
-      // with F11 (demoui toggle) once the demo has had time to load.
-      // 3s is generous for a same-file reload since the .vpk + map
-      // are already in cs2's process memory.
-      const ok = await sendKey(KEY_DEMO_RELOAD);
+      // Type `playdemo $DEMO_FILE` via the dev console. Same path as
+      // the initial demo load, deterministic regardless of autoexec
+      // bind state.
+      //
+      // demoui re-toggle: the Panorama panel re-renders on each
+      // playdemo. F11 is a TOGGLE so firing it before the panel
+      // re-paints flips internal state in the wrong direction and
+      // the panel ends up visible. Reload-with-flush is slower than
+      // initial-load, so use a 7s delay — past the panel's typical
+      // render ramp-up, before the operator notices the panel.
+      // Single F11 (toggling twice is worse than missing once).
+      const ok = await sendConsoleCommand(
+        `playdemo /tmp/game-streamer/demo.dem`,
+      );
       if (ok) {
         demoState.lastTickAtSeek = 0;
         demoState.lastSeekRealMs = Date.now();
@@ -656,7 +663,7 @@ const server = createServer(async (req, res) => {
         bumpActivity();
         setTimeout(() => {
           void sendKey("F11").catch(() => undefined);
-        }, 3000);
+        }, 7000);
       }
       sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
       log(`-> ${ok ? 200 : 503} demo/reload`);

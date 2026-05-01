@@ -368,7 +368,6 @@ bind "APOSTROPHE" "host_timescale 2"
 bind "PGUP" "host_timescale 4"
 bind "PGDN" "host_timescale 0.25"
 bind "F11" "demoui"
-bind "F10" "playdemo /tmp/game-streamer/demo.dem"
 EOF
 }
 
