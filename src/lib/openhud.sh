@@ -305,6 +305,43 @@ EOF
   fi
 }
 
+# Drop a second GSI cfg alongside the OpenHud one so cs2 fires game
+# state to spec-server too. cs2 enumerates every
+# gamestate_integration_*.cfg in its cfg dir at engine init — adding
+# a second file forks GSI to both consumers without touching OpenHud.
+# spec-server uses the events to know exactly when the demo is
+# playing (round.phase / map.phase), so the web UI can start its
+# timeline at the right moment instead of guessing.
+write_spec_gsi_cfg() {
+  local cfg_dir="$CS2_DIR/game/csgo/cfg"
+  mkdir -p "$cfg_dir"
+  local dst="$cfg_dir/gamestate_integration_5stack.cfg"
+  local port="${SPEC_SERVER_PORT:-1350}"
+  log "writing GSI cfg to $dst (-> spec-server :$port/gsi)"
+  # `auth` block is required by some cs2 builds — without it cs2
+  # silently skips the cfg. Token value isn't checked server-side
+  # (it's included in the POST body so listeners CAN validate; we
+  # don't bother since the listener only binds to localhost).
+  cat >"$dst" <<EOF
+"5Stack Spec-Server GSI"
+{
+  "uri" "http://127.0.0.1:${port}/gsi"
+  "timeout" "5.0"
+  "buffer" "0.0"
+  "throttle" "0.1"
+  "heartbeat" "10.0"
+  "auth" { "token" "5stack-spec" }
+  "data"
+  {
+    "provider" "1"
+    "map"      "1"
+    "round"    "1"
+    "player_id" "1"
+  }
+}
+EOF
+}
+
 # ---- spec keybinds -------------------------------------------------------
 # CS2 spec actions that the spec-server (src/spec-server.mjs) drives are
 # pre-bound to F-keys here so the server only ever has to send a single
@@ -355,6 +392,10 @@ EOF
 demo_static_binds_block() {
   cat <<'EOF'
 // === demo-playback keybinds (auto-generated; mirror in src/spec-server.mjs) ===
+// Every constant-arg console action lives here so the spec-server can
+// fire it via XTest keystroke instead of typing into the dev console
+// (which flashes briefly on the captured stream). Parameterized
+// actions (demo_gototick <tick>) still need typed console.
 bind "PAUSE" "demo_togglepause"
 bind "HOME" "demo_gototick -960"
 bind "END" "demo_gototick +960"
@@ -363,6 +404,7 @@ bind "SEMICOLON" "host_timescale 0.5"
 bind "APOSTROPHE" "host_timescale 2"
 bind "PGUP" "host_timescale 4"
 bind "PGDN" "host_timescale 0.25"
+bind "F11" "demoui"
 EOF
 }
 
@@ -392,10 +434,13 @@ import json, sys
 
 match_json_path, autoexec_path, map_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
-# F6..F12 — 7 slots. Enough for 5v5 plus two subs in the lineup; if a
-# match exceeds this and the operator wants direct-switch on slot 8+,
-# extend the range here AND in spec-server.mjs's KEY_* constants.
-KEYS = [f"F{n}" for n in range(6, 13)]
+# F6..F11 — 6 slots. Enough for 5v5 plus one sub. F12 is intentionally
+# excluded: Steam captures it as the global screenshot hotkey even
+# with the overlay disabled, so binding cs2 actions to it triggers a
+# Steam screenshot instead. If the operator needs direct-switch keys
+# beyond 6 slots, pick non-F12 keysyms (e.g. KP_*, BRACKETLEFT) here
+# AND in spec-server.mjs's KEY_* constants.
+KEYS = [f"F{n}" for n in range(6, 12)]
 
 STEAMID64_BASE = 76561197960265728
 def to_accountid(s):

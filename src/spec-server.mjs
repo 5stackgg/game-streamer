@@ -104,9 +104,15 @@ const KEY_AUTODIRECTOR_ON = "F4";
 const KEY_AUTODIRECTOR_OFF = "F5";
 
 // Demo-playback bound keys (run-demo.sh + lib/openhud.sh:demo_static_binds_block).
+// Goal: avoid typed-console commands wherever the action's args are
+// constant — typed console flashes briefly on the WHEP capture, bound
+// keys go through XTest with no UI side-effect.
 const KEY_DEMO_TOGGLE = "Pause";
 const KEY_DEMO_SKIP_BACK = "Home";    // bound to demo_gototick -960 (~ -15s)
 const KEY_DEMO_SKIP_FWD  = "End";     // bound to demo_gototick +960 (~ +15s)
+// X is cs2's built-in spec-mode x-ray toggle — no autoexec bind
+// needed, no console flash, no Steam-hotkey collision.
+const KEY_XRAY_TOGGLE = "x";
 const SPEED_KEY_BY_RATE = {
   "0.25": "Next",        // PageDown
   "0.5":  "semicolon",
@@ -120,6 +126,7 @@ const SPEED_KEY_BY_RATE = {
 const DEMO_ROUND_TICKS_PATH =
   process.env.DEMO_ROUND_TICKS_PATH ??
   path.join(process.env.LOG_DIR ?? "/tmp/game-streamer", "demo-round-ticks.json");
+
 
 // Demo session bookkeeping for tick estimation + idle-timeout. Held in
 // memory for the life of the daemon (which is the life of the pod).
@@ -139,6 +146,129 @@ const demoState = {
   lastActivityMs: Date.now(),
 };
 function bumpActivity() { demoState.lastActivityMs = Date.now(); }
+
+// Latest cs2 GSI snapshot. cs2 fires the `gamestate_integration_*.cfg`
+// endpoints during demo playback the same as live matches — we get
+// real game state instead of having to guess "is the demo playing
+// yet" from log scrapes or fd checks. The web side reads
+// `gsi.map_phase === "live"` (or any non-null phase) as the
+// authoritative "demo is loaded and playing" signal.
+const gsiState = {
+  lastReceivedMs: 0,
+  mapName: null,
+  mapPhase: null,        // warmup | live | intermission | gameover
+  roundPhase: null,      // freezetime | live | over
+  roundNumber: null,     // 0-indexed CS2 demo round counter
+  spectatedSteamId: null,
+};
+
+// One-shot "tell the api the demo is actually playing now" beacon
+// + hide the auto-opened demoui Panorama panel. Fires on the first
+// GSI receipt — that's the deterministic "demo loaded and rolling"
+// signal we couldn't get from log scrapes. With this gate in place
+// we don't have to time anything: GSI lands AFTER the demo panel
+// has rendered, so F11 reliably toggles it from visible → hidden.
+let demoPlayingReported = false;
+async function reportDemoPlayingOnce() {
+  if (demoPlayingReported) return;
+  demoPlayingReported = true;
+  // One console round-trip does both:
+  //   1. `demoui false` — hide cs2's auto-opened Panorama panel.
+  //   2. `demo_togglepause` — pause the demo at tick 0 so the
+  //      operator (not cs2's autoplay) drives playback. Lets the
+  //      web side render a known starting state and sync the
+  //      timeline scrubber with cs2's actual position from frame 1.
+  void sendConsoleCommand("demoui false; demo_togglepause").catch(
+    () => undefined,
+  );
+  // Mirror the pause locally so the tick estimator + scrubber
+  // freeze at tick 0 instead of advancing as if playback had
+  // started. The web's first /demo/state read after this will see
+  // paused=true.
+  demoState.paused = true;
+  demoState.lastTickAtSeek = 0;
+  demoState.lastSeekRealMs = Date.now();
+
+  const sessionId = process.env.DEMO_SESSION_ID;
+  const sessionToken = process.env.DEMO_SESSION_TOKEN;
+  const apiBase = process.env.STATUS_API_BASE ?? process.env.API_BASE;
+  if (!sessionId || !sessionToken || !apiBase) {
+    process.stderr.write(
+      `[spec-server] reportDemoPlayingOnce: skipping api POST — env missing ` +
+        `(DEMO_SESSION_ID=${sessionId ? "set" : "MISSING"} ` +
+        `DEMO_SESSION_TOKEN=${sessionToken ? "set" : "MISSING"} ` +
+        `STATUS_API_BASE/API_BASE=${apiBase ?? "MISSING"})\n`,
+    );
+    return;
+  }
+  const url = `${apiBase}/demo-sessions/${sessionId}/status`;
+  try {
+    process.stderr.write(`[spec-server] POSTing status=playing to ${url}\n`);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        // The api validates `x-origin-auth: <id>:<token>` — same
+        // format status-reporter.sh uses (see lib/status-reporter.sh).
+        // Authorization: Bearer is NOT what this endpoint reads.
+        "x-origin-auth": `${sessionId}:${sessionToken}`,
+      },
+      body: JSON.stringify({ status: "playing" }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      process.stderr.write(
+        `[spec-server] api POST returned ${res.status}: ${body.slice(0, 200)}\n`,
+      );
+      return;
+    }
+    process.stderr.write(
+      `[spec-server] reported status=playing + sent F11 for session ${sessionId}\n`,
+    );
+  } catch (err) {
+    process.stderr.write(
+      `[spec-server] reportDemoPlayingOnce: api POST failed: ${(err && err.message) || err}\n`,
+    );
+    // Don't reset demoPlayingReported — F11 already fired, retrying
+    // would double-toggle the panel. The api retry is less critical:
+    // /demo/state still surfaces gsi.map_phase, web can fall back.
+  }
+}
+
+// Probe whether cs2 currently has the .dem file open. cs2 keeps the
+// demo file open via fd for the entire playback duration, so its
+// presence in /proc/<cs2_pid>/fd/ is a reliable "demo is actually
+// loaded" signal — no log scraping, no timing guesses.
+async function demoLoadedInProc() {
+  const wid = await findCs2Window();
+  if (!wid) return false;
+  // findCs2Window doesn't give us the pid; pgrep does.
+  const r = await run(["pgrep", "-f", "/linuxsteamrt64/cs2"]);
+  if (r.code !== 0) return false;
+  const pid = r.stdout.trim().split("\n")[0];
+  if (!pid) return false;
+  const demoFile =
+    process.env.DEMO_FILE ?? "/tmp/game-streamer/demo.dem";
+  // Iterate fds via readdir-equivalent. fs/promises is already in
+  // node stdlib; cheaper than spawning ls.
+  try {
+    const fs = await import("node:fs/promises");
+    const fdDir = `/proc/${pid}/fd`;
+    const entries = await fs.readdir(fdDir);
+    for (const e of entries) {
+      try {
+        const target = await fs.readlink(`${fdDir}/${e}`);
+        if (target === demoFile) return true;
+      } catch {
+        // Race: fd closed between readdir and readlink. Skip.
+      }
+    }
+  } catch {
+    // /proc/<pid>/fd disappeared (cs2 died) or perms issue.
+  }
+  return false;
+}
 function estimateCurrentTick() {
   if (demoState.paused) return demoState.lastTickAtSeek;
   const elapsedSec = (Date.now() - demoState.lastSeekRealMs) / 1000;
@@ -369,7 +499,7 @@ const server = createServer(async (req, res) => {
   const method = req.method ?? "GET";
   const url = req.url ?? "/";
   const log = (line) => {
-    process.stdout.write(`[spec-server] ${method} ${url} ${line}\n`);
+    process.stderr.write(`[spec-server] ${method} ${url} ${line}\n`);
   };
 
   try {
@@ -393,6 +523,16 @@ const server = createServer(async (req, res) => {
     }
 
     if (method === "GET" && url === "/demo/state") {
+      // demo_loaded comes from GSI when we have a recent event;
+      // /proc/<pid>/fd is the fallback for the brief window before
+      // the first GSI tick lands.
+      const gsiFresh =
+        gsiState.lastReceivedMs > 0 &&
+        Date.now() - gsiState.lastReceivedMs < 30_000;
+      const demoLoaded =
+        gsiFresh && gsiState.mapPhase != null
+          ? true
+          : await demoLoadedInProc();
       sendJson(res, 200, {
         tick: estimateCurrentTick(),
         total_ticks: demoState.totalTicks,
@@ -400,6 +540,17 @@ const server = createServer(async (req, res) => {
         rate: demoState.rate,
         paused: demoState.paused,
         last_activity_ms_ago: Date.now() - demoState.lastActivityMs,
+        demo_loaded: demoLoaded,
+        gsi: gsiFresh
+          ? {
+              map_name: gsiState.mapName,
+              map_phase: gsiState.mapPhase,
+              round_phase: gsiState.roundPhase,
+              round_number: gsiState.roundNumber,
+              spectated_steam_id: gsiState.spectatedSteamId,
+              last_received_ms_ago: Date.now() - gsiState.lastReceivedMs,
+            }
+          : null,
       });
       return;
     }
@@ -634,6 +785,146 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url === "/demo/reload") {
+      // Type `playdemo $DEMO_FILE` via the dev console. The operator
+      // clicks "Toggle CS2 demo HUD" manually after reload if they
+      // want the panel hidden again — auto-toggle was racy against
+      // the post-reload panel re-render. Trade-off accepted.
+      const ok = await sendConsoleCommand(
+        `playdemo /tmp/game-streamer/demo.dem`,
+      );
+      if (ok) {
+        demoState.lastTickAtSeek = 0;
+        demoState.lastSeekRealMs = Date.now();
+        demoState.paused = false;
+        bumpActivity();
+      }
+      sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/reload`);
+      return;
+    }
+
+    if (url === "/demo/xray") {
+      // Bound to F12 → `toggle spec_show_xray 0 1`. We don't need to
+      // know cs2's current value — the bind cycles 0↔1 on each press.
+      // The web side tracks "should xray be on" locally; we emit a
+      // single keypress per intent change so the cycles stay in sync.
+      const ok = await sendKey(KEY_XRAY_TOGGLE);
+      if (ok) bumpActivity();
+      sendJson(
+        res,
+        ok ? 200 : 503,
+        ok ? { ok, enabled: Boolean(body.enabled) } : { error: "cs2 not running" },
+      );
+      log(`-> ${ok ? 200 : 503} demo/xray (key F12)`);
+      return;
+    }
+
+    if (url === "/gsi") {
+      // cs2 GSI POSTs land here — we parse out the bits we care about
+      // (map phase, round phase, currently-spectated steamid) and
+      // mirror them on demoState for the /demo/state consumer.
+      // No auth check: cs2 only POSTs to localhost from inside the
+      // pod, the listener binds to 0.0.0.0 but the K8s NetworkPolicy
+      // blocks external traffic.
+      const map = body?.map ?? {};
+      const round = body?.round ?? {};
+      const player = body?.player ?? {};
+      const prevMapPhase = gsiState.mapPhase;
+      const prevRoundPhase = gsiState.roundPhase;
+      const wasReceiving = gsiState.lastReceivedMs > 0;
+      gsiState.lastReceivedMs = Date.now();
+      gsiState.mapName = typeof map.name === "string" ? map.name : null;
+      gsiState.mapPhase = typeof map.phase === "string" ? map.phase : null;
+      gsiState.roundPhase =
+        typeof round.phase === "string" ? round.phase : null;
+      gsiState.roundNumber =
+        typeof map.round === "number" ? map.round : null;
+      gsiState.spectatedSteamId =
+        typeof player.steamid === "string" ? player.steamid : null;
+      bumpActivity();
+      sendJson(res, 200, { ok: true });
+      // Only fire the "playing" beacon once we have REAL game data.
+      // cs2's first GSI event sometimes lands with empty map/phase
+      // (just provider + spec steamid) — firing on that one would
+      // F11-toggle the demoui panel before it's actually rendered,
+      // and report status=playing while the demo is still loading.
+      // Wait for `map.name` AND `map.phase` to be populated; that's
+      // cs2 confirming a real demo context exists.
+      if (gsiState.mapName && gsiState.mapPhase) {
+        void reportDemoPlayingOnce();
+      }
+      // Log first event verbosely so we can confirm GSI is wired up,
+      // then transition-only after to keep the log readable at 10Hz.
+      if (!wasReceiving) {
+        log(
+          `-> 200 gsi FIRST EVENT received — map=${gsiState.mapName ?? "?"} ` +
+            `phase=${gsiState.mapPhase ?? "?"} round=${gsiState.roundNumber ?? "?"} ` +
+            `spec=${gsiState.spectatedSteamId ?? "?"}`,
+        );
+      } else if (
+        prevMapPhase !== gsiState.mapPhase ||
+        prevRoundPhase !== gsiState.roundPhase
+      ) {
+        log(
+          `-> 200 gsi map=${gsiState.mapName ?? "?"}/${gsiState.mapPhase ?? "?"} ` +
+            `round=${gsiState.roundNumber ?? "?"}/${gsiState.roundPhase ?? "?"}`,
+        );
+      }
+      return;
+    }
+
+    if (url === "/demo/demoui") {
+      // Manual demoui toggle — operator override for when the
+      // automatic post-load / post-reload F11 doesn't catch the
+      // panel render. F11 is bound to `demoui` in autoexec.
+      const ok = await sendKey("F11");
+      if (ok) bumpActivity();
+      sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/demoui (key F11)`);
+      return;
+    }
+
+    if (url === "/spec/hud") {
+      // Toggle the OpenHud BrowserWindow's visibility. Find the overlay
+      // window by WM_CLASS=openhud + a 1280x720+ size floor (matches
+      // openhud.sh:find_openhud_overlay_window). xdotool windowmap /
+      // windowunmap is the cheapest toggle that doesn't restack cs2.
+      const visible = Boolean(body.visible);
+      const tree = await run([
+        "xwininfo",
+        "-display",
+        DISPLAY,
+        "-root",
+        "-tree",
+      ]);
+      let overlayId = null;
+      if (tree.code === 0) {
+        for (const line of tree.stdout.split("\n")) {
+          const m = line.match(/^\s*(0x[0-9a-f]+)\s.*?(\d+)x(\d+)\+/);
+          if (!m) continue;
+          if (!/openhud/i.test(line)) continue;
+          const w = Number(m[2]);
+          const h = Number(m[3]);
+          if (w >= 1280 && h >= 720) {
+            overlayId = m[1];
+            break;
+          }
+        }
+      }
+      if (!overlayId) {
+        sendJson(res, 404, { error: "no openhud overlay window" });
+        log("-> 404 spec/hud (no overlay window)");
+        return;
+      }
+      const action = visible ? "windowmap" : "windowunmap";
+      await run(["xdotool", action, overlayId]);
+      bumpActivity();
+      sendJson(res, 200, { ok: true, visible, window: overlayId });
+      log(`-> 200 spec/hud visible=${visible} (${overlayId})`);
+      return;
+    }
+
     if (url === "/demo/round") {
       const round = Number.parseInt(body.round, 10);
       if (!Number.isFinite(round) || round < 1) {
@@ -675,13 +966,37 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, BIND, () => {
-  process.stdout.write(
+  process.stderr.write(
     `[spec-server] listening on ${BIND}:${PORT} (display=${DISPLAY})\n`,
   );
-  process.stdout.write(
+  process.stderr.write(
     `[spec-server] player bindings file: ${PLAYER_BINDINGS_PATH}\n`,
   );
+  process.stderr.write(
+    `[spec-server] routes: GET /, /health, /spec/health, /demo/state | ` +
+      `POST /spec/{click,jump,player,slot,autodirector,hud}, ` +
+      `/demo/{toggle,pause,resume,seek,skip,speed,round,reload,xray,demoui}, /gsi\n`,
+  );
 });
+
+// Watchdog: warn periodically if cs2 has been up for a while but no
+// GSI events have arrived. Helps catch misconfigured cfg files /
+// missing auth blocks / wrong port — instead of silently never
+// firing the demo-loaded signal.
+let gsiWatchdogTicks = 0;
+setInterval(async () => {
+  if (gsiState.lastReceivedMs > 0) return;
+  const wid = await findCs2Window();
+  if (!wid) return;
+  gsiWatchdogTicks++;
+  if (gsiWatchdogTicks === 1 || gsiWatchdogTicks % 6 === 0) {
+    process.stderr.write(
+      `[spec-server] WARN: cs2 has been up for ${gsiWatchdogTicks * 10}s but ` +
+        `no GSI events received yet on /gsi — check ` +
+        `cfg/gamestate_integration_5stack.cfg + spec-server port\n`,
+    );
+  }
+}, 10_000);
 
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {

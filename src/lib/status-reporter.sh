@@ -21,7 +21,11 @@
 # scheduled in the same cluster as the api Deployment, so the kube DNS
 # short-name resolves on the pod's search domain. Override with
 # STATUS_API_BASE for local testing outside the cluster.
+# Exported so child processes (e.g. spec-server.mjs) inherit it —
+# without `export`, the default only lives in this shell and Node
+# sees no STATUS_API_BASE / API_BASE.
 : "${STATUS_API_BASE:=http://api:5585}"
+export STATUS_API_BASE
 
 # Override path: when STATUS_REPORT_URL + STATUS_AUTH_TOKEN are set, the
 # reporter uses them directly and ignores MATCH_ID / MATCH_PASSWORD. Used

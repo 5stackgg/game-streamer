@@ -698,6 +698,7 @@ disable_cs2_overlay() {
       case "$steamid" in ''|*[!0-9]*) continue ;; esac
       log "disable_cs2_overlay: SteamID $steamid (under $root)"
       _vdf_disable_app_overlay "$user_dir/config/localconfig.vdf"
+      _vdf_disable_overlay_system "$user_dir/config/localconfig.vdf"
       edited=1
     done
     shopt -u nullglob
@@ -705,6 +706,63 @@ disable_cs2_overlay() {
 
   [ "$edited" = 0 ] && log "disable_cs2_overlay: no userdata SteamIDs found yet — skip"
   return 0
+}
+
+# The per-app `OverlayAppEnabled=0` only suppresses the overlay panel
+# inside cs2 — Steam still spawns GameOverlayUI and pops the "Press
+# Shift+Tab to begin" first-run toast over the captured stream. The
+# master switch is `system.EnableGameOverlay` in localconfig.vdf
+# (mirrors Settings → In-Game → "Enable the Steam Overlay while
+# in-game"). With this flipped to 0, GameOverlayUI never spawns and
+# the toast never appears.
+_vdf_disable_overlay_system() {
+  local cfg="$1"
+  [ -f "$cfg" ] || return 0
+  python3 - "$cfg" <<'PY'
+import re, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+src = p.read_text()
+
+# Find or create the top-level "system" block inside UserLocalConfigStore.
+sys_pat = re.compile(r'(^|\n)([ \t]*)"system"[ \t\r\n]*\{', re.MULTILINE)
+sm = sys_pat.search(src)
+if sm:
+    brace_open = sm.end() - 1
+    depth, i = 1, brace_open + 1
+    while i < len(src) and depth > 0:
+        if src[i] == '{': depth += 1
+        elif src[i] == '}': depth -= 1
+        i += 1
+    if depth != 0:
+        print(f"  {p}: unbalanced braces in system block — refusing to edit")
+        sys.exit(1)
+    brace_close = i - 1
+    block = src[brace_open + 1:brace_close]
+    indent = sm.group(2) + "\t"
+    eg = re.search(r'(^|\n)([ \t]*)"([Ee]nable[Gg]ame[Oo]verlay)"[ \t]+"([^"]*)"', block)
+    if eg:
+        if eg.group(4) == "0":
+            sys.exit(0)
+        new_block = block[:eg.start()] \
+            + f'{eg.group(1)}{eg.group(2)}"{eg.group(3)}"\t\t"0"' \
+            + block[eg.end():]
+        p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
+        print(f"  {p}: flipped system.{eg.group(3)} to 0")
+    else:
+        new_block = f'\n{indent}"EnableGameOverlay"\t\t"0"' + block
+        p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
+        print(f"  {p}: inserted system.EnableGameOverlay=0")
+    sys.exit(0)
+
+# No system block — synthesize one at the top-level.
+root = re.match(r'\s*"UserLocalConfigStore"[ \t\r\n]*\{', src)
+if not root:
+    print(f"  {p}: no UserLocalConfigStore root — leaving untouched")
+    sys.exit(0)
+insertion = '\n\t"system"\n\t{\n\t\t"EnableGameOverlay"\t\t"0"\n\t}'
+p.write_text(src[:root.end()] + insertion + src[root.end():])
+print(f"  {p}: synthesized system.EnableGameOverlay=0")
+PY
 }
 
 # Diagnostic: print the current Steam overlay state on disk.
@@ -734,18 +792,36 @@ print_overlay_state() {
 import re, sys, pathlib
 p = pathlib.Path(sys.argv[1]); appid = sys.argv[2]
 src = p.read_text()
+parts = []
+# Per-app
 pat = re.compile(r'"' + re.escape(appid) + r'"[ \t\r\n]*\{', re.MULTILINE)
 m = pat.search(src)
-if not m:
-    print("(no 730 block)"); sys.exit(0)
-i = m.end(); depth = 1
-while i < len(src) and depth > 0:
-    if src[i] == '{': depth += 1
-    elif src[i] == '}': depth -= 1
-    i += 1
-block = src[m.end():i-1]
-oe = re.search(r'"([Oo]verlay[Aa]pp[Ee]nabled)"[ \t]+"([^"]*)"', block)
-print(f'{oe.group(1)}="{oe.group(2)}"' if oe else "(no OverlayAppEnabled key)")
+if m:
+    i = m.end(); depth = 1
+    while i < len(src) and depth > 0:
+        if src[i] == '{': depth += 1
+        elif src[i] == '}': depth -= 1
+        i += 1
+    block = src[m.end():i-1]
+    oe = re.search(r'"([Oo]verlay[Aa]pp[Ee]nabled)"[ \t]+"([^"]*)"', block)
+    parts.append(f'{oe.group(1)}="{oe.group(2)}"' if oe else "(no OverlayAppEnabled key)")
+else:
+    parts.append("(no 730 block)")
+# System (master switch)
+sys_pat = re.compile(r'"system"[ \t\r\n]*\{', re.MULTILINE)
+sm = sys_pat.search(src)
+if sm:
+    i = sm.end(); depth = 1
+    while i < len(src) and depth > 0:
+        if src[i] == '{': depth += 1
+        elif src[i] == '}': depth -= 1
+        i += 1
+    block = src[sm.end():i-1]
+    eg = re.search(r'"([Ee]nable[Gg]ame[Oo]verlay)"[ \t]+"([^"]*)"', block)
+    parts.append(f'{eg.group(1)}="{eg.group(2)}"' if eg else "(no system.EnableGameOverlay key)")
+else:
+    parts.append("(no system block)")
+print(" | ".join(parts))
 PY
 )
       log "  $cfg: $m"
