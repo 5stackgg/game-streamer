@@ -682,7 +682,20 @@ const server = createServer(async (req, res) => {
 
     if (url === "/demo/resume") {
       let ok = true;
-      if (demoState.paused) {
+      if (body.force === true) {
+        // Bypass the demoState mirror — type the explicit cs2 command
+        // `demo_resume` so we end up playing regardless of what state
+        // we *think* cs2 is in. Used by inline clip-render where any
+        // mirror drift (e.g. cs2 auto-resumed after a demo_gototick)
+        // would catastrophically pause cs2 mid-capture and produce a
+        // still-frame mp4. Slower than the toggle (~150ms console
+        // typing vs ~30ms keystroke) but worth it.
+        ok = await sendConsoleCommand("demo_resume");
+        if (ok) {
+          demoState.paused = false;
+          demoState.lastSeekRealMs = Date.now();
+        }
+      } else if (demoState.paused) {
         ok = await sendKey(KEY_DEMO_TOGGLE);
         if (ok) {
           demoState.paused = false;
@@ -691,7 +704,7 @@ const server = createServer(async (req, res) => {
       }
       bumpActivity();
       sendJson(res, ok ? 200 : 503, ok ? { ok, paused: false } : { error: "cs2 not running" });
-      log(`-> ${ok ? 200 : 503} demo/resume`);
+      log(`-> ${ok ? 200 : 503} demo/resume${body.force === true ? " (force)" : ""}`);
       return;
     }
 
@@ -702,14 +715,35 @@ const server = createServer(async (req, res) => {
         log("-> 400 demo/seek bad tick");
         return;
       }
-      const ok = await sendConsoleCommand(`demo_gototick ${tick}`);
+      // `demo_gototick <tick> [relative=0|1] [pause=0|1]` — explicit
+      // form lets the caller pin cs2's play/paused state in a single
+      // command. Without the trailing args, cs2's behaviour after a
+      // seek is build-dependent (some versions resume, some stay
+      // paused) — the inline clip-render flow needs determinism.
+      let cmd = `demo_gototick ${tick}`;
+      let nextPaused = demoState.paused;
+      if (body.pause_after === true) {
+        cmd = `demo_gototick ${tick} 0 1`;
+        nextPaused = true;
+      } else if (body.pause_after === false) {
+        cmd = `demo_gototick ${tick} 0 0`;
+        nextPaused = false;
+      }
+      const ok = await sendConsoleCommand(cmd);
       if (ok) {
         demoState.lastTickAtSeek = tick;
         demoState.lastSeekRealMs = Date.now();
+        demoState.paused = nextPaused;
         bumpActivity();
       }
-      sendJson(res, ok ? 200 : 503, ok ? { ok, tick } : { error: "cs2 not running" });
-      log(`-> ${ok ? 200 : 503} demo/seek tick=${tick}`);
+      sendJson(
+        res,
+        ok ? 200 : 503,
+        ok
+          ? { ok, tick, paused: nextPaused }
+          : { error: "cs2 not running" },
+      );
+      log(`-> ${ok ? 200 : 503} demo/seek tick=${tick} cmd="${cmd}"`);
       return;
     }
 

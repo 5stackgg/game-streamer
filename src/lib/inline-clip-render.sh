@@ -106,11 +106,13 @@ SAVED_TICK=""
 SAVED_PAUSED=""
 restore_user_playback() {
   if [ -z "$SAVED_TICK" ]; then return 0; fi
-  spec_post /demo/pause '{}'
-  spec_post /demo/seek "{\"tick\": ${SAVED_TICK}}"
-  if [ "$SAVED_PAUSED" = "false" ]; then
-    spec_post /demo/resume '{}'
-  fi
+  # Single-shot seek that ALSO sets the play/pause state — uses cs2's
+  # `demo_gototick <tick> 0 <pause>` form via spec-server. Avoids the
+  # state-mirror dance entirely.
+  local pause_after="false"
+  [ "$SAVED_PAUSED" = "true" ] && pause_after="true"
+  spec_post /demo/seek \
+    "{\"tick\": ${SAVED_TICK}, \"pause_after\": ${pause_after}}"
 }
 trap 'restore_user_playback' EXIT
 
@@ -128,14 +130,18 @@ SAVED_TICK=$(printf '%s' "$STATE_JSON" | jq -r '.tick // 0')
 SAVED_PAUSED=$(printf '%s' "$STATE_JSON" | jq -r '.paused // false')
 say "snapshot: tick=$SAVED_TICK paused=$SAVED_PAUSED"
 
-# 2. Pause + seek to clip start. The order matters — seek while paused
-#    leaves cs2 frame-stepped to the exact tick, ready for a clean
-#    capture start.
-spec_post /demo/pause '{}'
-spec_post /demo/seek "{\"tick\": ${CLIP_START_TICK}}"
-# Lead-in: cs2 needs a moment after demo_gototick to render the seeked
-# frame cleanly. Without this the first ~500ms of the mp4 can look
-# stuttery.
+# 2. Seek to clip start AND pin cs2 paused there. We use the single
+#    `demo_gototick <tick> 0 1` form via spec-server's /demo/seek
+#    {pause_after: true} — that's deterministic regardless of whatever
+#    state cs2 was in before. Earlier flows that did pause-then-seek
+#    relied on the state-mirror lining up with cs2's actual state
+#    after the seek; some cs2 builds auto-resume on demo_gototick and
+#    the mirror would drift, leaving us paused mid-capture.
+spec_post /demo/seek \
+  "{\"tick\": ${CLIP_START_TICK}, \"pause_after\": true}"
+# Lead-in: cs2 needs a moment after demo_gototick to render the
+# seeked frame cleanly. Without this the first ~500ms of the mp4 can
+# look stuttery.
 sleep 2
 api_status "status=rendering" "progress=0.15"
 
@@ -152,11 +158,13 @@ if ! start_clip_capture "$CLIP_OUT_FILE" "${CLIP_OUTPUT_FPS:-60}" 8000 1; then
 fi
 api_status "status=rendering" "progress=0.25"
 
-# 4. Resume cs2 and wait for the clip's wallclock duration. We don't
-#    use demo_timescale > 1 — cs2 frame drops + the GPU encoder
-#    ringbuffer become unreliable at high rates, and 1.0x is real-time
-#    on the GPU pod.
-spec_post /demo/resume '{}'
+# 4. Re-seek to start_tick with `pause_after: false` — cs2 jumps back
+#    onto the same tick (no visible glitch) AND begins playing. This
+#    is the deterministic "press play" we couldn't get reliably out
+#    of /demo/resume across cs2 builds. The capture is already running
+#    so the file picks up the play state from frame ~1.
+spec_post /demo/seek \
+  "{\"tick\": ${CLIP_START_TICK}, \"pause_after\": false}"
 DURATION_TICKS=$((CLIP_END_TICK - CLIP_START_TICK))
 DURATION_MS=$(awk -v t="$DURATION_TICKS" -v r="${CLIP_TICK_RATE:-64}" \
   'BEGIN{printf "%d", t / r * 1000}')
