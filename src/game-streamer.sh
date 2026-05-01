@@ -284,6 +284,7 @@ case "$cmd" in
   setup-steam)  exec "$FLOWS_DIR/setup-steam.sh" "$@" ;;
   run-live)     exec "$FLOWS_DIR/run-live.sh"    "$@" ;;
   run-demo)     exec "$FLOWS_DIR/run-demo.sh"    "$@" ;;
+  run-clip)     exec "$FLOWS_DIR/render-clip.sh" "$@" ;;
   # `up` is the legacy name — kept as an alias of `live` so older
   # pod manifests and any scripts pinned to the previous arg keep
   # working without coordinated redeploys.
@@ -360,6 +361,59 @@ case "$cmd" in
     fi
     "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
     exec "$FLOWS_DIR/run-demo.sh" "$@"
+    ;;
+  # Clip render: same setup as the demo flow (Steam + parallel demo
+  # download), then render-clip.sh seeks the demo, captures one
+  # segment to mp4, uploads to the api, and exits — k8s reaps the pod.
+  # No spec-server, no openhud overlay, no live SRT publish.
+  render-clip)
+    mkdir -p /tmp/game-streamer
+    if [ -n "${DEMO_URL:-}" ]; then
+      DEMO_FILE_BG="${DEMO_FILE:-/tmp/game-streamer/demo.dem}"
+      rm -f "$DEMO_FILE_BG" "$DEMO_FILE_BG.failed" "$DEMO_FILE_BG.partial"
+      (
+        if curl --fail --silent --show-error --location \
+                --retry 5 --retry-delay 2 --retry-all-errors \
+                --max-time "${DEMO_DOWNLOAD_TIMEOUT:-300}" \
+                --output "$DEMO_FILE_BG.partial" \
+                "$DEMO_URL"; then
+          mv -f "$DEMO_FILE_BG.partial" "$DEMO_FILE_BG"
+        else
+          touch "$DEMO_FILE_BG.failed"
+        fi
+      ) > >(awk '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
+      echo $! > /tmp/game-streamer/demo-download.pid
+    fi
+    if [ -n "${WORKSHOP_ID:-}" ]; then
+      WORKSHOP_TARGET="${STEAM_LIBRARY:-/mnt/game-streamer}/steamapps/workshop/content/730/${WORKSHOP_ID}"
+      WORKSHOP_FAILED="/tmp/game-streamer/workshop-${WORKSHOP_ID}.failed"
+      CS2_MANIFEST="${STEAM_LIBRARY:-/mnt/game-streamer}/steamapps/appmanifest_730.acf"
+      rm -f "$WORKSHOP_FAILED"
+      (
+        # shellcheck disable=SC1091
+        . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
+        # shellcheck disable=SC1091
+        . "$LIB_DIR/steam.sh"
+        SCRIPT_TAG=workshop-bg
+        for _ in $(seq 1 600); do
+          [ -f "$CS2_MANIFEST" ] && break
+          sleep 2
+        done
+        if [ ! -f "$CS2_MANIFEST" ]; then
+          warn "cs2 manifest never appeared — skipping workshop download"
+          touch "$WORKSHOP_FAILED"
+          exit 0
+        fi
+        if download_workshop_map "$WORKSHOP_ID"; then
+          :
+        else
+          touch "$WORKSHOP_FAILED"
+        fi
+      ) > >(awk '{print "[workshop-download] " $0; fflush()}' >&2) 2>&1 &
+      echo $! > /tmp/game-streamer/workshop-download.pid
+    fi
+    "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
+    exec "$FLOWS_DIR/render-clip.sh" "$@"
     ;;
   debug-stream) cmd_debug_stream "$@" ;;
   status|state)   cmd_status ;;
