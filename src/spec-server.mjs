@@ -874,6 +874,78 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url === "/demo/render-clip") {
+      // User-initiated clip render. Runs INSIDE this pod so we don't
+      // pay the setup-steam + demo-download tax of a fresh render
+      // pod — cs2 is already up with the demo loaded. Trade-off: the
+      // user's playback gets briefly disrupted while we seek to the
+      // clip range, capture, and seek back. The orchestration lives in
+      // lib/inline-clip-render.sh — it talks back to this same daemon
+      // via /demo/{state,pause,resume,seek} for control, then uploads
+      // the rendered mp4 to the api.
+      const jobId = String(body.job_id ?? "");
+      const token = String(body.token ?? "");
+      const apiBase = String(body.api_base ?? "");
+      const startTick = Number.parseInt(body.start_tick, 10);
+      const endTick = Number.parseInt(body.end_tick, 10);
+      const outputDims = String(body.output_dims ?? "1920x1080");
+      const outputFps = Number.parseInt(body.output_fps, 10) || 60;
+      if (
+        !jobId ||
+        !token ||
+        !apiBase ||
+        !Number.isFinite(startTick) ||
+        !Number.isFinite(endTick) ||
+        endTick <= startTick
+      ) {
+        sendJson(res, 400, {
+          error:
+            "job_id, token, api_base, start_tick (int), end_tick (int > start_tick) required",
+        });
+        log("-> 400 demo/render-clip bad payload");
+        return;
+      }
+      const cs2Wid = await findCs2Window();
+      if (!cs2Wid) {
+        sendJson(res, 503, { error: "cs2 not running" });
+        log("-> 503 demo/render-clip cs2 down");
+        return;
+      }
+      const scriptPath = `${process.env.SRC_DIR ?? "/opt/game-streamer/src"}/lib/inline-clip-render.sh`;
+      const child = spawn(
+        "bash",
+        [scriptPath],
+        {
+          detached: true,
+          stdio: "ignore",
+          env: {
+            ...process.env,
+            CLIP_RENDER_JOB_ID: jobId,
+            CLIP_RENDER_TOKEN: token,
+            STATUS_API_BASE: apiBase,
+            CLIP_START_TICK: String(startTick),
+            CLIP_END_TICK: String(endTick),
+            CLIP_OUTPUT_DIMS: outputDims,
+            CLIP_OUTPUT_FPS: String(outputFps),
+            // Tick rate for the render's wallclock math. Falls back to
+            // demoState's tracked tickRate (default 64) — the demo's
+            // declared rate lives in the api row but we don't need
+            // perfect accuracy, the script just uses it to compute how
+            // long to keep the capture rolling.
+            CLIP_TICK_RATE: String(demoState.tickRate || 64),
+            // Spec-server URL the script uses for pause/seek/resume.
+            // Same host:port we're listening on right now.
+            SPEC_SERVER_URL: `http://127.0.0.1:${PORT}`,
+          },
+        },
+      );
+      child.unref();
+      bumpActivity();
+      sendJson(res, 202, { ok: true, job_id: jobId, pid: child.pid });
+      log(`-> 202 demo/render-clip job=${jobId} pid=${child.pid} ticks=${startTick}..${endTick}`);
+      return;
+    }
+
     if (url === "/demo/demoui") {
       // Manual demoui toggle — operator override for when the
       // automatic post-load / post-reload F11 doesn't catch the
@@ -975,7 +1047,7 @@ server.listen(PORT, BIND, () => {
   process.stderr.write(
     `[spec-server] routes: GET /, /health, /spec/health, /demo/state | ` +
       `POST /spec/{click,jump,player,slot,autodirector,hud}, ` +
-      `/demo/{toggle,pause,resume,seek,skip,speed,round,reload,xray,demoui}, /gsi\n`,
+      `/demo/{toggle,pause,resume,seek,skip,speed,round,reload,xray,demoui,render-clip}, /gsi\n`,
   );
 });
 
