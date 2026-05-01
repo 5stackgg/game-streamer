@@ -338,7 +338,9 @@ done
   die "no CS2 window after ${CS2_WINDOW_TIMEOUT}s"
 }
 
-say "5b. (re-)open + raise OpenHud overlay above cs2"
+say "5b. raise OpenHud overlay above cs2"
+# Overlay raise is the only step gating the capture — without it,
+# the HUD won't be on top when ximagesrc starts publishing. ~1s.
 if openhud_running; then
   log "  triggering /api/overlay/start so HUD reloads with fresh game state"
   if curl -fsS -m 5 -X POST -o /dev/null \
@@ -353,61 +355,66 @@ else
   log "OpenHud not running — skipping overlay positioning"
 fi
 
-# Idempotent demo trigger. We pass +playdemo on the launch line too
-# (which usually works), but in certain boot sequences it silently
-# no-ops the same way Steam +applaunch sometimes drops the first
-# invocation. The defensive console fallback only fires if cs2 hasn't
-# already started loading the demo on its own — otherwise we'd
-# load the demo twice and the user would see the first frame, then
-# a reload back to frame 0.
+# Start streaming AS SOON AS cs2 has its window + the OpenHud overlay
+# is on top. Previously we waited for the demo-load + demo-playing
+# log signals before starting the capture, which added ~60–90s of
+# the demo silently advancing while the operator watched a "booting"
+# UI. The .dem starts playing immediately on cs2 window-up, so any
+# delay between then and status=live is wasted demo time the user
+# can never get back.
 #
-# Detection: tail cs2.log for demo-load signals. cs2 prints lines
-# like `playdemo: requested...` / `Reading demo header` / `Demo
-# protocol N` very early in the demo-load path — if they show up
-# within 30s of cs2's window appearing, +playdemo took and we skip
-# the console command.
-say "5c. ensure demo playback (idempotent fallback)"
+# The demoui-hide + idempotent playdemo fallback now run in the
+# background — they don't gate going-live anymore. Worst case the
+# operator sees the cs2 demoui panel for a few extra seconds while
+# the stream catches up; that beats missing the first 60s of action.
 CS2_LOG_TAIL="${CS2_LOG_TAIL:-$STEAM_LIBRARY/steam/logs/console-linux.txt}"
-DEMO_LOAD_RE="playdemo[: ]|Reading demo|Demo protocol|Loading demo|Demo from"
 
-DEMO_LOADED=0
-for i in $(seq 1 30); do
-  if grep -qE "$DEMO_LOAD_RE" "$CS2_LOG_TAIL" 2>/dev/null; then
-    log "  cs2 is already loading demo from +playdemo (after ${i}s) — skip console fallback"
-    DEMO_LOADED=1
-    break
+say "5c. start match capture stream"
+start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
+  || die "capture failed to publish — see [gst-${MATCH_ID:0:8}] log lines above"
+
+report_status status=live \
+  "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
+  "playback_mode=demo"
+
+# Background: ensure demo playback + close demoui Panorama panel.
+# Both gated on cs2 log signals; both can fail/no-op safely. We don't
+# block status=live on either.
+(
+  DEMO_LOAD_RE="playdemo[: ]|Reading demo|Demo protocol|Loading demo|Demo from"
+  DEMO_LOADED=0
+  for i in $(seq 1 30); do
+    if grep -qE "$DEMO_LOAD_RE" "$CS2_LOG_TAIL" 2>/dev/null; then
+      log "  [bg] cs2 is loading demo from +playdemo (after ${i}s) — skip console fallback"
+      DEMO_LOADED=1
+      break
+    fi
+    if ! kill -0 "$CS2_PID" 2>/dev/null; then
+      warn "  [bg] cs2 (pid=$CS2_PID) died before demo load"
+      exit 0
+    fi
+    sleep 1
+  done
+  if [ "$DEMO_LOADED" = 0 ]; then
+    warn "  [bg] no demo-load signal in cs2.log after 30s — sending playdemo via console"
+    cs2_console_command "playdemo $DEMO_FILE" \
+      || warn "  [bg] playdemo console command failed too"
   fi
-  if ! kill -0 "$CS2_PID" 2>/dev/null; then
-    warn "cs2 (pid=$CS2_PID) died before demo load"
-    log "--- $CS2_LOG_TAIL (last 60) ---"
-    tail -60 "$CS2_LOG_TAIL" 2>/dev/null
-    die "cs2 died after window appeared but before demo started"
-  fi
+
+  # demoui hide. Toggle requires the panel to exist first.
+  DEMO_PLAYING_RE="Frame [0-9]+ of |playdemo:.*complete|demo playback started|Demo .* is playing"
+  for i in $(seq 1 30); do
+    if grep -qE "$DEMO_PLAYING_RE" "$CS2_LOG_TAIL" 2>/dev/null; then
+      log "  [bg] cs2 demo playing after ${i}s — sending F11"
+      break
+    fi
+    sleep 1
+  done
   sleep 1
-done
-
-if [ "$DEMO_LOADED" = 0 ]; then
-  warn "no demo-load signal in cs2.log after 30s — sending playdemo via console"
-  cs2_console_command "playdemo $DEMO_FILE" \
-    || warn "playdemo console command failed too — cs2 may be stuck at menu"
-fi
-
-# Toggle off cs2's auto-opened demoui panel. F11 is bound to `demoui`
-# in autoexec; we wait for a demo-playing log line so the panel exists
-# before toggling, since `demoui` is a toggle (firing it on a hidden
-# panel re-opens it).
-say "5d. close CS2 demoui Panorama panel"
-DEMO_PLAYING_RE="Frame [0-9]+ of |playdemo:.*complete|demo playback started|Demo .* is playing"
-for i in $(seq 1 30); do
-  if grep -qE "$DEMO_PLAYING_RE" "$CS2_LOG_TAIL" 2>/dev/null; then
-    log "  cs2 demo playing after ${i}s — sending F11"
-    break
-  fi
-  sleep 1
-done
-sleep 1
-xdotool key --clearmodifiers F11 2>/dev/null \
-  || warn "F11 (demoui toggle) failed — overlay may stay visible on the stream"
+  xdotool key --clearmodifiers F11 2>/dev/null \
+    || warn "  [bg] F11 (demoui toggle) failed — overlay may stay visible"
+) &
+log "  background demo-load + demoui-hide watcher started (pid $!)"
 
 # Liveness watchdog: if cs2 dies any time after we kicked playdemo,
 # surface it loudly. Without this, a silent crash leaves the pod in
@@ -422,14 +429,6 @@ xdotool key --clearmodifiers F11 2>/dev/null \
   fi
 ) &
 log "  cs2-alive watchdog started (pid $!)"
-
-say "6. start match capture stream"
-start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
-  || die "capture failed to publish — see [gst-${MATCH_ID:0:8}] log lines above"
-
-report_status status=live \
-  "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
-  "playback_mode=demo"
 
 say "done"
 log "watch:    https://hls.5stack.gg/${MATCH_ID}/"
