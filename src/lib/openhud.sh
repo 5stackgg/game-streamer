@@ -318,6 +318,10 @@ write_spec_gsi_cfg() {
   local dst="$cfg_dir/gamestate_integration_5stack.cfg"
   local port="${SPEC_SERVER_PORT:-1350}"
   log "writing GSI cfg to $dst (-> spec-server :$port/gsi)"
+  # `auth` block is required by some cs2 builds — without it cs2
+  # silently skips the cfg. Token value isn't checked server-side
+  # (it's included in the POST body so listeners CAN validate; we
+  # don't bother since the listener only binds to localhost).
   cat >"$dst" <<EOF
 "5Stack Spec-Server GSI"
 {
@@ -326,6 +330,7 @@ write_spec_gsi_cfg() {
   "buffer" "0.0"
   "throttle" "0.1"
   "heartbeat" "10.0"
+  "auth" { "token" "5stack-spec" }
   "data"
   {
     "provider" "1"

@@ -180,18 +180,38 @@ async function reportDemoPlayingOnce() {
   const sessionId = process.env.DEMO_SESSION_ID;
   const sessionToken = process.env.DEMO_SESSION_TOKEN;
   const apiBase = process.env.STATUS_API_BASE ?? process.env.API_BASE;
-  if (!sessionId || !sessionToken || !apiBase) return;
+  if (!sessionId || !sessionToken || !apiBase) {
+    process.stderr.write(
+      `[spec-server] reportDemoPlayingOnce: skipping api POST — env missing ` +
+        `(DEMO_SESSION_ID=${sessionId ? "set" : "MISSING"} ` +
+        `DEMO_SESSION_TOKEN=${sessionToken ? "set" : "MISSING"} ` +
+        `STATUS_API_BASE/API_BASE=${apiBase ?? "MISSING"})\n`,
+    );
+    return;
+  }
+  const url = `${apiBase}/demo-sessions/${sessionId}/status`;
   try {
-    await fetch(`${apiBase}/demo-sessions/${sessionId}/status`, {
+    process.stderr.write(`[spec-server] POSTing status=playing to ${url}\n`);
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${sessionId}:${sessionToken}`,
+        // The api validates `x-origin-auth: <id>:<token>` — same
+        // format status-reporter.sh uses (see lib/status-reporter.sh).
+        // Authorization: Bearer is NOT what this endpoint reads.
+        "x-origin-auth": `${sessionId}:${sessionToken}`,
       },
       body: JSON.stringify({ status: "playing" }),
       signal: AbortSignal.timeout(5_000),
     });
-    process.stdout.write(
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      process.stderr.write(
+        `[spec-server] api POST returned ${res.status}: ${body.slice(0, 200)}\n`,
+      );
+      return;
+    }
+    process.stderr.write(
       `[spec-server] reported status=playing + sent F11 for session ${sessionId}\n`,
     );
   } catch (err) {
@@ -467,7 +487,7 @@ const server = createServer(async (req, res) => {
   const method = req.method ?? "GET";
   const url = req.url ?? "/";
   const log = (line) => {
-    process.stdout.write(`[spec-server] ${method} ${url} ${line}\n`);
+    process.stderr.write(`[spec-server] ${method} ${url} ${line}\n`);
   };
 
   try {
@@ -814,11 +834,15 @@ const server = createServer(async (req, res) => {
       sendJson(res, 200, { ok: true });
       // Tell the api the demo is actually playing (one-shot).
       void reportDemoPlayingOnce();
-      // Log only on transitions so a 10Hz throttle doesn't flood
-      // the daemon log. First event ever, map phase change, and
-      // round phase change all surface; routine ticks stay silent.
-      if (
-        !wasReceiving ||
+      // Log first event verbosely so we can confirm GSI is wired up,
+      // then transition-only after to keep the log readable at 10Hz.
+      if (!wasReceiving) {
+        log(
+          `-> 200 gsi FIRST EVENT received — map=${gsiState.mapName ?? "?"} ` +
+            `phase=${gsiState.mapPhase ?? "?"} round=${gsiState.roundNumber ?? "?"} ` +
+            `spec=${gsiState.spectatedSteamId ?? "?"}`,
+        );
+      } else if (
         prevMapPhase !== gsiState.mapPhase ||
         prevRoundPhase !== gsiState.roundPhase
       ) {
@@ -922,13 +946,37 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, BIND, () => {
-  process.stdout.write(
+  process.stderr.write(
     `[spec-server] listening on ${BIND}:${PORT} (display=${DISPLAY})\n`,
   );
-  process.stdout.write(
+  process.stderr.write(
     `[spec-server] player bindings file: ${PLAYER_BINDINGS_PATH}\n`,
   );
+  process.stderr.write(
+    `[spec-server] routes: GET /, /health, /spec/health, /demo/state | ` +
+      `POST /spec/{click,jump,player,slot,autodirector,hud}, ` +
+      `/demo/{toggle,pause,resume,seek,skip,speed,round,reload,xray,demoui}, /gsi\n`,
+  );
 });
+
+// Watchdog: warn periodically if cs2 has been up for a while but no
+// GSI events have arrived. Helps catch misconfigured cfg files /
+// missing auth blocks / wrong port — instead of silently never
+// firing the demo-loaded signal.
+let gsiWatchdogTicks = 0;
+setInterval(async () => {
+  if (gsiState.lastReceivedMs > 0) return;
+  const wid = await findCs2Window();
+  if (!wid) return;
+  gsiWatchdogTicks++;
+  if (gsiWatchdogTicks === 1 || gsiWatchdogTicks % 6 === 0) {
+    process.stderr.write(
+      `[spec-server] WARN: cs2 has been up for ${gsiWatchdogTicks * 10}s but ` +
+        `no GSI events received yet on /gsi — check ` +
+        `cfg/gamestate_integration_5stack.cfg + spec-server port\n`,
+    );
+  }
+}, 10_000);
 
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {

@@ -28,8 +28,17 @@ start_spec_server() {
     return 0
   fi
   log "starting spec-server on :$SPEC_SERVER_PORT"
+  # Bypass spawn_logged's awk subprocess — it dies when setup-steam.sh
+  # exits, leaving spec-server's stdout pipe broken and its writes
+  # silently dropped (Node ignores SIGPIPE). Redirect straight to
+  # PID 1's stdout (the container init) which the k8s log collector
+  # tails — that handle survives every launcher script exiting.
+  # Lines are already prefixed with `[spec-server] ` from inside the
+  # daemon so no awk-side tagging is needed.
   SPEC_PORT="$SPEC_SERVER_PORT" \
-    spawn_logged spec-server node "$SPEC_SERVER_BIN"
+    nohup node "$SPEC_SERVER_BIN" \
+      >/proc/1/fd/1 2>/proc/1/fd/2 &
+  SPAWNED_PID=$!
   log "  spec-server pid=$SPAWNED_PID"
 }
 
