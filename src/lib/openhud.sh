@@ -355,6 +355,10 @@ EOF
 demo_static_binds_block() {
   cat <<'EOF'
 // === demo-playback keybinds (auto-generated; mirror in src/spec-server.mjs) ===
+// Every constant-arg console action lives here so the spec-server can
+// fire it via XTest keystroke instead of typing into the dev console
+// (which flashes briefly on the captured stream). Parameterized
+// actions (demo_gototick <tick>) still need typed console.
 bind "PAUSE" "demo_togglepause"
 bind "HOME" "demo_gototick -960"
 bind "END" "demo_gototick +960"
@@ -363,6 +367,9 @@ bind "SEMICOLON" "host_timescale 0.5"
 bind "APOSTROPHE" "host_timescale 2"
 bind "PGUP" "host_timescale 4"
 bind "PGDN" "host_timescale 0.25"
+bind "F11" "demoui"
+bind "F12" "toggle spec_show_xray 0 1"
+bind "F10" "playdemo /tmp/game-streamer/demo.dem"
 EOF
 }
 

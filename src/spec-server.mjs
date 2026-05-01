@@ -104,9 +104,14 @@ const KEY_AUTODIRECTOR_ON = "F4";
 const KEY_AUTODIRECTOR_OFF = "F5";
 
 // Demo-playback bound keys (run-demo.sh + lib/openhud.sh:demo_static_binds_block).
+// Goal: avoid typed-console commands wherever the action's args are
+// constant — typed console flashes briefly on the WHEP capture, bound
+// keys go through XTest with no UI side-effect.
 const KEY_DEMO_TOGGLE = "Pause";
 const KEY_DEMO_SKIP_BACK = "Home";    // bound to demo_gototick -960 (~ -15s)
 const KEY_DEMO_SKIP_FWD  = "End";     // bound to demo_gototick +960 (~ +15s)
+const KEY_DEMO_RELOAD = "F10";        // bound to playdemo /tmp/game-streamer/demo.dem
+const KEY_XRAY_TOGGLE = "F12";        // bound to toggle spec_show_xray 0 1
 const SPEED_KEY_BY_RATE = {
   "0.25": "Next",        // PageDown
   "0.5":  "semicolon",
@@ -120,6 +125,7 @@ const SPEED_KEY_BY_RATE = {
 const DEMO_ROUND_TICKS_PATH =
   process.env.DEMO_ROUND_TICKS_PATH ??
   path.join(process.env.LOG_DIR ?? "/tmp/game-streamer", "demo-round-ticks.json");
+
 
 // Demo session bookkeeping for tick estimation + idle-timeout. Held in
 // memory for the life of the daemon (which is the life of the pod).
@@ -631,6 +637,83 @@ const server = createServer(async (req, res) => {
         ok ? { ok, rate: clamped, via: presetKey ? "key" : "console" } : { error: "cs2 not running" },
       );
       log(`-> ${ok ? 200 : 503} demo/speed rate=${clamped} (${presetKey ? "key" : "console"})`);
+      return;
+    }
+
+    if (url === "/demo/reload") {
+      // Bound to F10 → `playdemo /tmp/game-streamer/demo.dem`. cs2
+      // re-opens the demoui panel on every playdemo, so we follow up
+      // with F11 (demoui toggle) once the demo has had time to load.
+      // 3s is generous for a same-file reload since the .vpk + map
+      // are already in cs2's process memory.
+      const ok = await sendKey(KEY_DEMO_RELOAD);
+      if (ok) {
+        demoState.lastTickAtSeek = 0;
+        demoState.lastSeekRealMs = Date.now();
+        demoState.paused = false;
+        bumpActivity();
+        setTimeout(() => {
+          void sendKey("F11").catch(() => undefined);
+        }, 3000);
+      }
+      sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/reload`);
+      return;
+    }
+
+    if (url === "/demo/xray") {
+      // Bound to F12 → `toggle spec_show_xray 0 1`. We don't need to
+      // know cs2's current value — the bind cycles 0↔1 on each press.
+      // The web side tracks "should xray be on" locally; we emit a
+      // single keypress per intent change so the cycles stay in sync.
+      const ok = await sendKey(KEY_XRAY_TOGGLE);
+      if (ok) bumpActivity();
+      sendJson(
+        res,
+        ok ? 200 : 503,
+        ok ? { ok, enabled: Boolean(body.enabled) } : { error: "cs2 not running" },
+      );
+      log(`-> ${ok ? 200 : 503} demo/xray (key F12)`);
+      return;
+    }
+
+    if (url === "/spec/hud") {
+      // Toggle the OpenHud BrowserWindow's visibility. Find the overlay
+      // window by WM_CLASS=openhud + a 1280x720+ size floor (matches
+      // openhud.sh:find_openhud_overlay_window). xdotool windowmap /
+      // windowunmap is the cheapest toggle that doesn't restack cs2.
+      const visible = Boolean(body.visible);
+      const tree = await run([
+        "xwininfo",
+        "-display",
+        DISPLAY,
+        "-root",
+        "-tree",
+      ]);
+      let overlayId = null;
+      if (tree.code === 0) {
+        for (const line of tree.stdout.split("\n")) {
+          const m = line.match(/^\s*(0x[0-9a-f]+)\s.*?(\d+)x(\d+)\+/);
+          if (!m) continue;
+          if (!/openhud/i.test(line)) continue;
+          const w = Number(m[2]);
+          const h = Number(m[3]);
+          if (w >= 1280 && h >= 720) {
+            overlayId = m[1];
+            break;
+          }
+        }
+      }
+      if (!overlayId) {
+        sendJson(res, 404, { error: "no openhud overlay window" });
+        log("-> 404 spec/hud (no overlay window)");
+        return;
+      }
+      const action = visible ? "windowmap" : "windowunmap";
+      await run(["xdotool", action, overlayId]);
+      bumpActivity();
+      sendJson(res, 200, { ok: true, visible, window: overlayId });
+      log(`-> 200 spec/hud visible=${visible} (${overlayId})`);
       return;
     }
 

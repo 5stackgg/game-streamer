@@ -392,16 +392,22 @@ if [ "$DEMO_LOADED" = 0 ]; then
     || warn "playdemo console command failed too — cs2 may be stuck at menu"
 fi
 
-# CS2 auto-opens its built-in demo overlay (demoui) on playdemo. We
-# drive everything from the web UI / spec-server keys, so the overlay
-# is just visual clutter on the WHEP stream — toggle it closed.
-# `demoui` is a TOGGLE so we only call it if the overlay is up; cs2.log
-# emits "Demo UI" lines when it appears. Brief sleep to let the panel
-# render before we toggle.
-say "5d. close CS2 demoui overlay"
-sleep 3
-cs2_console_command "demoui" \
-  || warn "demoui toggle failed — overlay may stay visible on the stream"
+# Toggle off cs2's auto-opened demoui panel. F11 is bound to `demoui`
+# in autoexec; we wait for a demo-playing log line so the panel exists
+# before toggling, since `demoui` is a toggle (firing it on a hidden
+# panel re-opens it).
+say "5d. close CS2 demoui Panorama panel"
+DEMO_PLAYING_RE="Frame [0-9]+ of |playdemo:.*complete|demo playback started|Demo .* is playing"
+for i in $(seq 1 30); do
+  if grep -qE "$DEMO_PLAYING_RE" "$CS2_LOG_TAIL" 2>/dev/null; then
+    log "  cs2 demo playing after ${i}s — sending F11"
+    break
+  fi
+  sleep 1
+done
+sleep 1
+xdotool key --clearmodifiers F11 2>/dev/null \
+  || warn "F11 (demoui toggle) failed — overlay may stay visible on the stream"
 
 # Liveness watchdog: if cs2 dies any time after we kicked playdemo,
 # surface it loudly. Without this, a silent crash leaves the pod in
