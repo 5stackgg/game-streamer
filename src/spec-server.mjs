@@ -172,10 +172,22 @@ let demoPlayingReported = false;
 async function reportDemoPlayingOnce() {
   if (demoPlayingReported) return;
   demoPlayingReported = true;
-  // Hide the demoui panel — runs in parallel with the api POST.
-  // F11 is bound to `demoui` in autoexec; one keystroke flips the
-  // visible panel off.
-  void sendKey("F11").catch(() => undefined);
+  // One console round-trip does both:
+  //   1. `demoui false` — hide cs2's auto-opened Panorama panel.
+  //   2. `demo_togglepause` — pause the demo at tick 0 so the
+  //      operator (not cs2's autoplay) drives playback. Lets the
+  //      web side render a known starting state and sync the
+  //      timeline scrubber with cs2's actual position from frame 1.
+  void sendConsoleCommand("demoui false; demo_togglepause").catch(
+    () => undefined,
+  );
+  // Mirror the pause locally so the tick estimator + scrubber
+  // freeze at tick 0 instead of advancing as if playback had
+  // started. The web's first /demo/state read after this will see
+  // paused=true.
+  demoState.paused = true;
+  demoState.lastTickAtSeek = 0;
+  demoState.lastSeekRealMs = Date.now();
 
   const sessionId = process.env.DEMO_SESSION_ID;
   const sessionToken = process.env.DEMO_SESSION_TOKEN;
@@ -832,8 +844,16 @@ const server = createServer(async (req, res) => {
         typeof player.steamid === "string" ? player.steamid : null;
       bumpActivity();
       sendJson(res, 200, { ok: true });
-      // Tell the api the demo is actually playing (one-shot).
-      void reportDemoPlayingOnce();
+      // Only fire the "playing" beacon once we have REAL game data.
+      // cs2's first GSI event sometimes lands with empty map/phase
+      // (just provider + spec steamid) — firing on that one would
+      // F11-toggle the demoui panel before it's actually rendered,
+      // and report status=playing while the demo is still loading.
+      // Wait for `map.name` AND `map.phase` to be populated; that's
+      // cs2 confirming a real demo context exists.
+      if (gsiState.mapName && gsiState.mapPhase) {
+        void reportDemoPlayingOnce();
+      }
       // Log first event verbosely so we can confirm GSI is wired up,
       // then transition-only after to keep the log readable at 10Hz.
       if (!wasReceiving) {
