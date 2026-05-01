@@ -126,6 +126,16 @@ read -r -d '' HIDE_UI_CMDS <<'EOF' || true
 snd_mute_losefocus 0
 engine_no_focus_sleep 0
 volume 1.0
+// Demo-mode HUD hiding. None of these are sv_cheats-gated for demo
+// playback (no server), so they stick at engine init and we don't
+// have to chase the demoui panel with a post-load F11 toggle. If
+// the operator wants any of these back on the manual demoui button
+// in the web UI fires F11 to toggle the panel.
+demoui 0
+cl_drawhud 0
+r_drawviewmodel 0
+cl_show_observer_crosshair 0
+spec_show_xray 0
 EOF
 
 SPEC_BINDS_BLOCK="$(spec_static_binds_block)"
@@ -377,17 +387,10 @@ report_status status=live \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
   "playback_mode=demo"
 
-# Background: hide cs2's auto-opened demoui Panorama panel. The
-# launch-arg +playdemo handles the demo load itself; we just need to
-# toggle F11 once the panel has had time to paint. If the operator
-# hits "Reload" later, /demo/reload owns retriggering playdemo via
-# console — we don't second-guess +playdemo here.
-(
-  sleep 5
-  xdotool key --clearmodifiers F11 2>/dev/null \
-    || warn "  [bg] F11 (demoui toggle) failed — overlay may stay visible"
-) &
-log "  background demoui-hide watcher started (pid $!)"
+# No background demoui-hide watcher needed — `demoui 0` in HIDE_UI_CMDS
+# stops cs2 from auto-opening the panel on playdemo. The manual
+# /demo/demoui endpoint (web "Toggle CS2 demo HUD" button) is still
+# wired for cases where the operator wants the panel visible.
 
 # Liveness watchdog: if cs2 dies any time after we kicked playdemo,
 # surface it loudly. Without this, a silent crash leaves the pod in

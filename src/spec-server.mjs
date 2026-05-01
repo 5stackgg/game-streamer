@@ -146,6 +146,40 @@ const demoState = {
   lastActivityMs: Date.now(),
 };
 function bumpActivity() { demoState.lastActivityMs = Date.now(); }
+
+// Probe whether cs2 currently has the .dem file open. cs2 keeps the
+// demo file open via fd for the entire playback duration, so its
+// presence in /proc/<cs2_pid>/fd/ is a reliable "demo is actually
+// loaded" signal — no log scraping, no timing guesses.
+async function demoLoadedInProc() {
+  const wid = await findCs2Window();
+  if (!wid) return false;
+  // findCs2Window doesn't give us the pid; pgrep does.
+  const r = await run(["pgrep", "-f", "/linuxsteamrt64/cs2"]);
+  if (r.code !== 0) return false;
+  const pid = r.stdout.trim().split("\n")[0];
+  if (!pid) return false;
+  const demoFile =
+    process.env.DEMO_FILE ?? "/tmp/game-streamer/demo.dem";
+  // Iterate fds via readdir-equivalent. fs/promises is already in
+  // node stdlib; cheaper than spawning ls.
+  try {
+    const fs = await import("node:fs/promises");
+    const fdDir = `/proc/${pid}/fd`;
+    const entries = await fs.readdir(fdDir);
+    for (const e of entries) {
+      try {
+        const target = await fs.readlink(`${fdDir}/${e}`);
+        if (target === demoFile) return true;
+      } catch {
+        // Race: fd closed between readdir and readlink. Skip.
+      }
+    }
+  } catch {
+    // /proc/<pid>/fd disappeared (cs2 died) or perms issue.
+  }
+  return false;
+}
 function estimateCurrentTick() {
   if (demoState.paused) return demoState.lastTickAtSeek;
   const elapsedSec = (Date.now() - demoState.lastSeekRealMs) / 1000;
@@ -407,6 +441,7 @@ const server = createServer(async (req, res) => {
         rate: demoState.rate,
         paused: demoState.paused,
         last_activity_ms_ago: Date.now() - demoState.lastActivityMs,
+        demo_loaded: await demoLoadedInProc(),
       });
       return;
     }
@@ -642,17 +677,9 @@ const server = createServer(async (req, res) => {
     }
 
     if (url === "/demo/reload") {
-      // Type `playdemo $DEMO_FILE` via the dev console. Same path as
-      // the initial demo load, deterministic regardless of autoexec
-      // bind state.
-      //
-      // demoui re-toggle: the Panorama panel re-renders on each
-      // playdemo. F11 is a TOGGLE so firing it before the panel
-      // re-paints flips internal state in the wrong direction and
-      // the panel ends up visible. Reload-with-flush is slower than
-      // initial-load, so use a 7s delay — past the panel's typical
-      // render ramp-up, before the operator notices the panel.
-      // Single F11 (toggling twice is worse than missing once).
+      // Type `playdemo $DEMO_FILE` via the dev console. autoexec sets
+      // `demoui 0` so the Panorama panel stays hidden across reloads
+      // — no F11 dance needed.
       const ok = await sendConsoleCommand(
         `playdemo /tmp/game-streamer/demo.dem`,
       );
@@ -661,9 +688,6 @@ const server = createServer(async (req, res) => {
         demoState.lastSeekRealMs = Date.now();
         demoState.paused = false;
         bumpActivity();
-        setTimeout(() => {
-          void sendKey("F11").catch(() => undefined);
-        }, 7000);
       }
       sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
       log(`-> ${ok ? 200 : 503} demo/reload`);
@@ -683,6 +707,17 @@ const server = createServer(async (req, res) => {
         ok ? { ok, enabled: Boolean(body.enabled) } : { error: "cs2 not running" },
       );
       log(`-> ${ok ? 200 : 503} demo/xray (key F12)`);
+      return;
+    }
+
+    if (url === "/demo/demoui") {
+      // Manual demoui toggle — operator override for when the
+      // automatic post-load / post-reload F11 doesn't catch the
+      // panel render. F11 is bound to `demoui` in autoexec.
+      const ok = await sendKey("F11");
+      if (ok) bumpActivity();
+      sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/demoui (key F11)`);
       return;
     }
 
