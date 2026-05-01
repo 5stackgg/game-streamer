@@ -378,14 +378,20 @@ report_status status=live \
   "playback_mode=demo"
 
 # Background: ensure demo playback + close demoui Panorama panel.
-# Both gated on cs2 log signals; both can fail/no-op safely. We don't
-# block status=live on either.
+# Detection is via /proc — cs2 mmap's the .dem file when playdemo
+# fires, so the path appears in /proc/$CS2_PID/maps. This is far more
+# reliable than scraping cs2.log (which has shifted phrasings across
+# Source 2 builds — our previous regex matched none of the actual
+# lines and we kept firing the console fallback, double-loading the
+# demo and resetting it to frame 0).
+demo_loaded_in_proc() {
+  grep -qF "$DEMO_FILE" "/proc/$CS2_PID/maps" 2>/dev/null
+}
 (
-  DEMO_LOAD_RE="playdemo[: ]|Reading demo|Demo protocol|Loading demo|Demo from"
   DEMO_LOADED=0
-  for i in $(seq 1 30); do
-    if grep -qE "$DEMO_LOAD_RE" "$CS2_LOG_TAIL" 2>/dev/null; then
-      log "  [bg] cs2 is loading demo from +playdemo (after ${i}s) — skip console fallback"
+  for i in $(seq 1 15); do
+    if demo_loaded_in_proc; then
+      log "  [bg] cs2 mmap'd demo after ${i}s — +playdemo took, skipping console fallback"
       DEMO_LOADED=1
       break
     fi
@@ -396,21 +402,16 @@ report_status status=live \
     sleep 1
   done
   if [ "$DEMO_LOADED" = 0 ]; then
-    warn "  [bg] no demo-load signal in cs2.log after 30s — sending playdemo via console"
+    warn "  [bg] cs2 didn't mmap the demo in 15s — sending playdemo via console"
     cs2_console_command "playdemo $DEMO_FILE" \
       || warn "  [bg] playdemo console command failed too"
   fi
 
-  # demoui hide. Toggle requires the panel to exist first.
-  DEMO_PLAYING_RE="Frame [0-9]+ of |playdemo:.*complete|demo playback started|Demo .* is playing"
-  for i in $(seq 1 30); do
-    if grep -qE "$DEMO_PLAYING_RE" "$CS2_LOG_TAIL" 2>/dev/null; then
-      log "  [bg] cs2 demo playing after ${i}s — sending F11"
-      break
-    fi
-    sleep 1
-  done
-  sleep 1
+  # demoui hide. The Panorama panel auto-opens on playdemo; sleep
+  # enough for it to paint, then F11 toggles it off. No log gate
+  # needed — by the time we get here the demo is mmap'd or the
+  # console fallback fired, so the panel exists.
+  sleep 3
   xdotool key --clearmodifiers F11 2>/dev/null \
     || warn "  [bg] F11 (demoui toggle) failed — overlay may stay visible"
 ) &

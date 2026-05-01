@@ -111,7 +111,9 @@ const KEY_DEMO_TOGGLE = "Pause";
 const KEY_DEMO_SKIP_BACK = "Home";    // bound to demo_gototick -960 (~ -15s)
 const KEY_DEMO_SKIP_FWD  = "End";     // bound to demo_gototick +960 (~ +15s)
 const KEY_DEMO_RELOAD = "F10";        // bound to playdemo /tmp/game-streamer/demo.dem
-const KEY_XRAY_TOGGLE = "F12";        // bound to toggle spec_show_xray 0 1
+// X is cs2's built-in spec-mode x-ray toggle — no autoexec bind
+// needed, no console flash, no Steam-hotkey collision.
+const KEY_XRAY_TOGGLE = "x";
 const SPEED_KEY_BY_RATE = {
   "0.25": "Next",        // PageDown
   "0.5":  "semicolon",

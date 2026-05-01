@@ -368,7 +368,6 @@ bind "APOSTROPHE" "host_timescale 2"
 bind "PGUP" "host_timescale 4"
 bind "PGDN" "host_timescale 0.25"
 bind "F11" "demoui"
-bind "F12" "toggle spec_show_xray 0 1"
 bind "F10" "playdemo /tmp/game-streamer/demo.dem"
 EOF
 }
@@ -399,10 +398,13 @@ import json, sys
 
 match_json_path, autoexec_path, map_path = sys.argv[1], sys.argv[2], sys.argv[3]
 
-# F6..F12 — 7 slots. Enough for 5v5 plus two subs in the lineup; if a
-# match exceeds this and the operator wants direct-switch on slot 8+,
-# extend the range here AND in spec-server.mjs's KEY_* constants.
-KEYS = [f"F{n}" for n in range(6, 13)]
+# F6..F11 — 6 slots. Enough for 5v5 plus one sub. F12 is intentionally
+# excluded: Steam captures it as the global screenshot hotkey even
+# with the overlay disabled, so binding cs2 actions to it triggers a
+# Steam screenshot instead. If the operator needs direct-switch keys
+# beyond 6 slots, pick non-F12 keysyms (e.g. KP_*, BRACKETLEFT) here
+# AND in spec-server.mjs's KEY_* constants.
+KEYS = [f"F{n}" for n in range(6, 12)]
 
 STEAMID64_BASE = 76561197960265728
 def to_accountid(s):
