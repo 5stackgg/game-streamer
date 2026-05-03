@@ -125,6 +125,49 @@ start_capture() {
   return 0
 }
 
+# pause_capture / resume_capture <stream-id> — SIGSTOP / SIGCONT the
+# gst process. Used by inline-clip-render to free the GPU encoder
+# during a clip render: two parallel nvenc sessions on the same
+# display fight for encoder slots and ximagesrc throughput, which
+# bogs the whole pod down. Pausing the live SRT publisher leaves
+# cs2 running (so demo state stays intact) and gives the file
+# capture full encoder bandwidth.
+#
+# Trade-off: the WHEP viewer stalls during the pause window. SRT may
+# also drop the publisher if paused too long (~30s+ in practice);
+# mediamtx will accept a fresh connection on resume but the WHEP
+# client may have to reconnect — covered by the existing HLS
+# fallback (web commit c5e717f).
+pause_capture() {
+  local stream_id="${1:?stream-id required}"
+  local pid
+  pid=$(stream_pid "$stream_id") || true
+  if [ -z "$pid" ]; then
+    log "no capture '${stream_id}' to pause"
+    return 0
+  fi
+  if kill -STOP "$pid" 2>/dev/null; then
+    log "paused capture '${stream_id}' (pid $pid)"
+  else
+    warn "failed to SIGSTOP capture '${stream_id}' (pid $pid)"
+  fi
+}
+
+resume_capture() {
+  local stream_id="${1:?stream-id required}"
+  local pid
+  pid=$(stream_pid "$stream_id") || true
+  if [ -z "$pid" ]; then
+    log "no capture '${stream_id}' to resume"
+    return 0
+  fi
+  if kill -CONT "$pid" 2>/dev/null; then
+    log "resumed capture '${stream_id}' (pid $pid)"
+  else
+    warn "failed to SIGCONT capture '${stream_id}' (pid $pid)"
+  fi
+}
+
 stop_capture() {
   local stream_id="${1:?stream-id required}"
   local pid

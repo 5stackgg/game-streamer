@@ -34,6 +34,8 @@ SCRIPT_TAG=inline-clip
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/common.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/clip-capture.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/stream.sh"
 
 require_env CLIP_RENDER_JOB_ID CLIP_RENDER_TOKEN STATUS_API_BASE \
             CLIP_START_TICK CLIP_END_TICK SPEC_SERVER_URL
@@ -126,7 +128,19 @@ restore_user_playback() {
   fi
   log_state "after RESTORE"
 }
-trap 'restore_user_playback' EXIT
+
+# On any exit, restore user playback AND make sure we never leave the
+# live SRT capture stuck in a SIGSTOP'd state. Idempotent — safe to
+# fire even if we never paused it.
+on_exit() {
+  if [ "${LIVE_CAPTURE_PAUSED:-0}" = "1" ] && [ -n "${MATCH_ID:-}" ]; then
+    say "EXIT: ensuring live capture is resumed (was paused for clip render)"
+    resume_capture "$MATCH_ID" || true
+    LIVE_CAPTURE_PAUSED=0
+  fi
+  restore_user_playback
+}
+trap 'on_exit' EXIT
 
 # Helper: dump cs2's state via spec-server /demo/state. Logs tick +
 # paused so we can SEE in the pod log whether each step actually moved
@@ -191,18 +205,34 @@ spec_post /demo/pause '{"force": true}'
 log_state "after lead-in + re-pause"
 api_status "status=rendering" "progress=0.08"
 
-# 5. Start the file-output GStreamer pipeline. Captures the same X
-#    display the user is watching, into a local mp4 (qtmux faststart).
-say "STEP 5: start GStreamer file capture"
+# 5a. Pause the live SRT capture so two nvenc sessions don't fight
+#     for GPU encoder slots + ximagesrc throughput. cs2 keeps running
+#     so the demo state is preserved; only the live publisher is
+#     SIGSTOP'd. The user's WHEP viewer stalls during the render
+#     window — they'll either reconnect on resume or fall back to
+#     HLS (web commit c5e717f). Resumed in step 8 below.
+LIVE_CAPTURE_PAUSED=0
+if [ -n "${MATCH_ID:-}" ]; then
+  say "STEP 5a: pause live capture for match=$MATCH_ID (frees GPU encoder)"
+  pause_capture "$MATCH_ID"
+  LIVE_CAPTURE_PAUSED=1
+fi
+
+# 5b. Start the file-output GStreamer pipeline. Captures the same X
+#     display the user is watching, into a local mp4 (qtmux faststart).
+say "STEP 5b: start GStreamer file capture"
 CLIP_OUT_DIR="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}"
 mkdir -p "$CLIP_OUT_DIR"
 CLIP_OUT_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.mp4"
 rm -f "$CLIP_OUT_FILE"
 
 if ! start_clip_capture "$CLIP_OUT_FILE" "${CLIP_OUTPUT_FPS:-60}" 8000 1; then
+  # Make sure we don't leave the live capture frozen forever if the
+  # clip capture failed to start.
+  [ "$LIVE_CAPTURE_PAUSED" = "1" ] && resume_capture "$MATCH_ID"
   die_failed "clip capture failed to start"
 fi
-say "STEP 5: capture pid=${CLIP_CAPTURE_PID:-?}"
+say "STEP 5b: capture pid=${CLIP_CAPTURE_PID:-?}"
 api_status "status=rendering" "progress=0.10"
 
 # 6. PRESS PLAY via the F-key toggle. We're guaranteed paused (step
@@ -254,6 +284,15 @@ done
 say "STEP 8: stop capture"
 log_state "before stop"
 stop_clip_capture
+
+# Resume live SRT publish so the user can keep watching after the
+# render. mediamtx may have dropped the publisher during the pause;
+# the WHEP viewer will reconnect (or stay on HLS fallback).
+if [ "$LIVE_CAPTURE_PAUSED" = "1" ] && [ -n "${MATCH_ID:-}" ]; then
+  say "STEP 8: resume live capture for match=$MATCH_ID"
+  resume_capture "$MATCH_ID"
+  LIVE_CAPTURE_PAUSED=0
+fi
 api_status "status=rendering" "progress=0.50"
 
 # 6. Restore user's playback BEFORE the upload — they've been waiting
