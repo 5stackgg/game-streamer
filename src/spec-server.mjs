@@ -173,14 +173,16 @@ async function reportDemoPlayingOnce() {
   if (demoPlayingReported) return;
   demoPlayingReported = true;
   // One console round-trip does both:
-  //   1. `demoui false` — hide cs2's auto-opened Panorama panel.
-  //   2. `demo_togglepause` — pause the demo at tick 0 so the
-  //      operator (not cs2's autoplay) drives playback. Lets the
-  //      web side render a known starting state and sync the
-  //      timeline scrubber with cs2's actual position from frame 1.
-  void sendConsoleCommand("demoui false; demo_togglepause").catch(
-    () => undefined,
-  );
+  //   1. `demoui` (no arg) — toggles the auto-opened Panorama panel
+  //      OFF. cs2's `demoui` cvar is a toggle and IGNORES any
+  //      argument — `demoui false` was a no-op (the HUD stayed
+  //      visible, which is the regression we hit). On first GSI the
+  //      panel is always visible (cs2 auto-opens it on +playdemo)
+  //      so a single toggle reliably hides it.
+  //   2. `demo_pause` — explicit pause (NOT togglepause). Tick is at
+  //      0 and we want it KNOWN paused; togglepause depends on cs2's
+  //      current state which has been racy in practice.
+  void sendConsoleCommand("demoui; demo_pause").catch(() => undefined);
   // Mirror the pause locally so the tick estimator + scrubber
   // freeze at tick 0 instead of advancing as if playback had
   // started. The web's first /demo/state read after this will see
@@ -224,7 +226,7 @@ async function reportDemoPlayingOnce() {
       return;
     }
     process.stderr.write(
-      `[spec-server] reported status=playing + sent F11 for session ${sessionId}\n`,
+      `[spec-server] reported status=playing + sent demoui+demo_pause for session ${sessionId}\n`,
     );
   } catch (err) {
     process.stderr.write(
@@ -663,10 +665,23 @@ const server = createServer(async (req, res) => {
     }
 
     if (url === "/demo/pause") {
-      // Idempotent — only send the key if we believe we're playing.
-      // Accidentally double-toggling would actually unpause.
       let ok = true;
-      if (!demoState.paused) {
+      if (body.force === true) {
+        // Bypass the demoState mirror — type the explicit cs2 command
+        // `demo_pause` so cs2 ends up paused regardless of mirror
+        // state. demo_pause is idempotent at cs2's level (no-op if
+        // already paused) so this is always safe to call. Used by the
+        // inline clip-render flow as the deterministic "lock cs2
+        // paused at this tick" primitive.
+        ok = await sendConsoleCommand("demo_pause");
+        if (ok) {
+          demoState.lastTickAtSeek = estimateCurrentTick();
+          demoState.paused = true;
+          demoState.lastSeekRealMs = Date.now();
+        }
+      } else if (!demoState.paused) {
+        // Idempotent — only send the key if we believe we're playing.
+        // Accidentally double-toggling would actually unpause.
         ok = await sendKey(KEY_DEMO_TOGGLE);
         if (ok) {
           demoState.lastTickAtSeek = estimateCurrentTick();
@@ -676,7 +691,7 @@ const server = createServer(async (req, res) => {
       }
       bumpActivity();
       sendJson(res, ok ? 200 : 503, ok ? { ok, paused: true } : { error: "cs2 not running" });
-      log(`-> ${ok ? 200 : 503} demo/pause`);
+      log(`-> ${ok ? 200 : 503} demo/pause${body.force === true ? " (force)" : ""}`);
       return;
     }
 
