@@ -330,10 +330,13 @@ if isinstance(sid, str) and sid.isdigit():
   # Re-pause AND re-seek back to SEG_START. The lead-in unpause +
   # GSI poll consumed real demo time (up to ~3s of ticks); capturing
   # from "wherever we ended up" would chop off the start of every
-  # segment and could push us past the first kill entirely.
+  # segment and could push us past the first kill entirely. The
+  # 0.2s settle is the minimum cs2 needs to land the new tick AND
+  # re-render the frame — anything less and we sometimes capture
+  # a stale frame from before the seek.
   spec_post /demo/pause '{"force": true}'
   spec_post /demo/seek "{\"tick\": ${SEG_START}}"
-  sleep 0.4
+  sleep 0.2
 
   # Re-press the slot key BEFORE starting capture. The re-seek
   # above commonly resets cs2's spec target on this build; firing

@@ -79,15 +79,22 @@ start_clip_capture() {
   fi
 
   local pid=$SPAWNED_PID
-  for i in 1 2 3; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      warn "clip capture died after ${i}s (see [$gst_tag] log lines above)"
-      return 1
-    fi
-    sleep 1
-  done
+  # Shortened from 3×1s to a single 0.3s probe. We previously held
+  # for 3s before returning, which meant the caller couldn't unpause
+  # the demo for those 3s — and gst was already in PLAYING state,
+  # so the captured mp4 opened with 3 full seconds of frozen frame
+  # before any motion. ximagesrc's spawn → PLAYING transition is
+  # typically <300ms, so the shorter probe still catches immediate
+  # failures (display lost, encoder unavailable). Mid-render deaths
+  # are caught by the segment loop's per-second `kill -0` poll, so
+  # we don't need a long wall here either.
+  sleep 0.3
+  if ! kill -0 "$pid" 2>/dev/null; then
+    warn "clip capture died on spawn (see [$gst_tag] log lines above)"
+    return 1
+  fi
   CLIP_CAPTURE_PID=$pid
-  log "  clip capture pid=$pid (alive after 3s)"
+  log "  clip capture pid=$pid (alive after 0.3s)"
   return 0
 }
 
