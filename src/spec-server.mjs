@@ -178,6 +178,14 @@ const gsiState = {
   // Shape: Array<{slot, steam_id, name, team: "T"|"CT", alive, health}>
   // Empty until the first GSI tick lands.
   specSlots: [],
+  // Team names from GSI's map.team_{ct,t}.name — set in cs2 by the
+  // demo file (mp_teamname_1/2). Source of truth for team labels;
+  // the api's lineup names can drift from the actual demo when a
+  // demo from a different match was loaded against a match_map row.
+  teamCtName: null,
+  teamTName: null,
+  teamCtScore: 0,
+  teamTScore: 0,
 };
 
 // One-shot "tell the api the demo is actually playing now" beacon
@@ -599,6 +607,10 @@ const server = createServer(async (req, res) => {
               spectated_steam_id: gsiState.spectatedSteamId,
               last_received_ms_ago: Date.now() - gsiState.lastReceivedMs,
               spec_slots: gsiState.specSlots,
+              team_ct_name: gsiState.teamCtName,
+              team_t_name: gsiState.teamTName,
+              team_ct_score: gsiState.teamCtScore,
+              team_t_score: gsiState.teamTScore,
             }
           : null,
       });
@@ -914,16 +926,29 @@ const server = createServer(async (req, res) => {
         typeof map.round === "number" ? map.round : null;
       gsiState.spectatedSteamId =
         typeof player.steamid === "string" ? player.steamid : null;
+      // Team names + scores ride along on `map`. cs2 sets these from
+      // the demo's mp_teamname_1/2 cvars, so they reflect the demo
+      // file rather than whatever the api thinks the match was.
+      gsiState.teamCtName =
+        typeof map?.team_ct?.name === "string" ? map.team_ct.name : null;
+      gsiState.teamTName =
+        typeof map?.team_t?.name === "string" ? map.team_t.name : null;
+      gsiState.teamCtScore = Number(map?.team_ct?.score ?? 0) || 0;
+      gsiState.teamTScore = Number(map?.team_t?.score ?? 0) || 0;
       // Build the slot snapshot. `allplayers` is keyed by steamid64 and
-      // each entry has `observer_slot` (cs2's 1..12 digit-bind index;
-      // null for the local client / GOTV broadcaster, who doesn't
-      // occupy a slot). Sort by slot so the array is render-ready.
+      // each entry has `observer_slot` — in CS2 GSI this is 0-indexed,
+      // i.e. the player on key "1" reports observer_slot=0, key "2"
+      // reports 1, ..., key "0" (the 10th player) reports 9. cs2's
+      // built-in digit keybinds drive `spec_player <slot+1>`, so we
+      // simply add 1 to land on the 1..10 numbering the buttons fire.
       if (allPlayers && typeof allPlayers === "object") {
         const slots = [];
         for (const [steamId, p] of Object.entries(allPlayers)) {
           if (!p || typeof p !== "object") continue;
-          const slot = p.observer_slot;
-          if (typeof slot !== "number" || slot < 1 || slot > 12) continue;
+          const raw = p.observer_slot;
+          if (typeof raw !== "number") continue;
+          const slot = raw + 1;
+          if (slot < 1 || slot > 12) continue;
           const team = p.team === "T" || p.team === "CT" ? p.team : null;
           const health = Number(p.state?.health ?? 0);
           slots.push({
