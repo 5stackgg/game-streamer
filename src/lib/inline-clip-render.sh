@@ -287,9 +287,38 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     mv -f "$SLOW_FILE" "$SEG_FILE"
   fi
 
-  printf "file '%s'\n" "$SEG_FILE" >>"$SEG_DIR/concat.txt"
+  # Sanity check: capture sometimes produces an mp4 with no
+  # decodable frames (cs2 mid-load, audio attach race, etc).
+  # Concat'ing an empty file silently drops everything after it,
+  # which is exactly the "got 1 kill instead of 2" bug. Probe the
+  # file and skip from concat if unusable — better to lose a beat
+  # than the rest of the highlight.
+  SEG_BYTES=$(stat -c '%s' "$SEG_FILE" 2>/dev/null \
+    || stat -f '%z' "$SEG_FILE" 2>/dev/null \
+    || echo 0)
+  SEG_REAL_DUR=$(ffprobe -v error -show_entries format=duration \
+    -of default=noprint_wrappers=1:nokey=1 "$SEG_FILE" 2>/dev/null \
+    | awk '{printf "%.2f", $1}')
+  [ -z "$SEG_REAL_DUR" ] && SEG_REAL_DUR=0
+  IS_VALID=$(awk -v d="$SEG_REAL_DUR" -v b="$SEG_BYTES" \
+    'BEGIN{print (d >= 0.5 && b > 1024) ? 1 : 0}')
+  if [ "$IS_VALID" = "1" ]; then
+    say "  segment $SEG_IDX OK (${SEG_BYTES}B, ${SEG_REAL_DUR}s)"
+    printf "file '%s'\n" "$SEG_FILE" >>"$SEG_DIR/concat.txt"
+  else
+    say "WARN segment $SEG_IDX is empty/short (${SEG_BYTES}B, ${SEG_REAL_DUR}s) — dropping from concat"
+    rm -f "$SEG_FILE"
+  fi
   ELAPSED_TICKS_TOTAL=$((ELAPSED_TICKS_TOTAL + SEG_TICKS))
 done
+
+# Recompute SEG_COUNT from what actually ended up in concat.txt —
+# downstream fade pass + concat decisions need the real count, not
+# the originally-requested count.
+SEG_COUNT=$(grep -c "^file " "$SEG_DIR/concat.txt" 2>/dev/null || echo 0)
+if [ "$SEG_COUNT" -lt 1 ]; then
+  die_failed "all segments produced empty captures — cs2 may be stalled"
+fi
 
 # Concat. With one segment we can copy streams; with multiple we
 # re-encode AND apply per-segment fades — gives a clean visual
