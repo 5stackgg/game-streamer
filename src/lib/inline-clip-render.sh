@@ -237,6 +237,31 @@ print(sum(max(0, s["end_tick"] - s["start_tick"]) for s in segs))')
 say "============================================================"
 say "SPEED=${CLIP_RENDER_SPEED}x  segments=${SEG_COUNT}  total_ticks=${TOTAL_DURATION_TICKS}  output=${CLIP_OUTPUT_DIMS:-?}@${CLIP_OUTPUT_FPS:-?}"
 say "============================================================"
+
+# Pre-render cancel check. The user (or admin) can hit cancel on a
+# queued/in-flight clip while we're still booting cs2 / processing
+# the previous batch entry; the api flips status='cancelled' and we
+# read it back here. Skipping cleanly with exit 0 keeps batch-mode
+# moving to the next clip without an error log.
+api_check_status() {
+  curl --fail --silent --show-error --max-time 5 \
+       --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
+       "${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/status" \
+    || echo ""
+}
+PRE_STATUS_RAW=$(api_check_status)
+PRE_STATUS=$(printf '%s' "$PRE_STATUS_RAW" | python3 -c \
+  'import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get("status",""))
+except Exception:
+    print("")' 2>/dev/null || echo "")
+if [ "$PRE_STATUS" = "cancelled" ]; then
+  say "job already cancelled by user — skipping (no work, no error)"
+  exit 0
+fi
+
 api_status "status=rendering" "progress=0.02"
 
 say "STEP 1: snapshot"
@@ -275,8 +300,16 @@ rm -f "$SEG_DIR"/*.mp4 "$SEG_DIR/concat.txt" 2>/dev/null || true
 # Capture phase = 0.10 → 0.85 of overall progress (the rest is
 # concat + upload). Per-segment slice of that band is proportional to
 # segment ticks.
-PROGRESS_BASE=0.10
-PROGRESS_SPAN=0.75
+# Progress is now reported as RENDER-PHASE 0..1 (not stitched into a
+# global 0..1 that smushed render + upload together). The web shows
+# render and upload as two independent bars now: render shows live %
+# while status='rendering', upload renders as an indeterminate spinner
+# while status='uploading'. We don't have real upload bytes-progress
+# (single curl POST, no streaming readback), so the upload bar is
+# intentionally pulse-only. Setup overhead before any segment plays
+# stays at the front of the render bar (BASE=0.05).
+PROGRESS_BASE=0.05
+PROGRESS_SPAN=0.95
 ELAPSED_TICKS_TOTAL=0
 
 for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
@@ -500,7 +533,7 @@ if [ "$LIVE_CAPTURE_STOPPED" = "1" ] && [ -n "${MATCH_ID:-}" ]; then
   restart_capture "$MATCH_ID"
   LIVE_CAPTURE_STOPPED=0
 fi
-api_status "status=rendering" "progress=0.90"
+api_status "status=rendering" "progress=1.0"
 
 restore_user_playback
 SAVED_TICK=""
@@ -518,7 +551,7 @@ if [ -z "$REAL_DURATION_MS" ]; then
     'BEGIN{printf "%d", t / r * 1000}')
 fi
 
-api_status "status=uploading" "progress=0.50"
+api_status "status=uploading" "progress=0.0"
 UPLOAD_URL="${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/upload"
 say "POST $UPLOAD_URL"
 if ! curl --fail --silent --show-error \

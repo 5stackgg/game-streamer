@@ -420,6 +420,19 @@ log "watch:    https://hls.5stack.gg/${MATCH_ID}/"
 log "demo:     $DEMO_FILE"
 log "stop:     src/game-streamer.sh stop-live"
 
+# Batch-highlights mode: instead of holding the pod open for a human
+# operator, process every queued clip_render_jobs row sequentially
+# against THIS cs2 instance, then exit so the k8s Job is reaped.
+# Avoids spinning up a fresh pod per clip — cs2 launch is the slow
+# step (~60-90s) and reusing the running instance turns 10 clips ×
+# 90s of overhead into a single launch.
+if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
+  # shellcheck disable=SC1091
+  . "$LIB_DIR/batch-highlights.sh"
+  process_batch_jobs
+  exit 0
+fi
+
 say "holding job alive — waiting for external stop"
 while :; do
   sleep 3600 &
