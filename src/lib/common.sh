@@ -32,11 +32,18 @@ export SRC_DIR LIB_DIR FLOWS_DIR
 # /etc/X11/, which Xorg searches. Anyone overriding this must put a file
 # named XORG_CONFIG into Xorg's search path themselves.
 : "${XORG_CONFIG:=xorg-dummy.conf}"
+# CS2 graphics preset — per-pod tunable. Picks resources/video/<preset>.txt,
+# copied to $CS2_DIR/game/csgo/cfg/cs2_video.txt before launch. Validated
+# by apply_cs2_video_preset in cs2-perf.sh. Orthogonal to the autoexec
+# convar block in cs2_perf_autoexec_block (which is the actual source of
+# truth for low quality today — the .txt files are stubs).
+: "${CS2_GRAPHICS_PRESET:=low}"
 mkdir -p "$LOG_DIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
 export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \
-       MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE LOG_DIR XORG_CONFIG
+       MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE LOG_DIR XORG_CONFIG \
+       CS2_GRAPHICS_PRESET
 
 
 say()  { printf '\n=== %s ===\n' "$*"; }
