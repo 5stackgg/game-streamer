@@ -69,7 +69,16 @@ start_spec_server
 # safe; run-live re-raises it after cs2's window appears anyway.
 say "1c. picom (compositor) + OpenHud server (background)"
 OPENHUD_DEFERRED=0
-if [ -x "$OPENHUD_BIN" ]; then
+# Auto-highlight batch renders skip OpenHud entirely. The batch pod's
+# job is to record per-player frag clips with a clean cs2 view —
+# OpenHud's spectator overlay was making the rendered mp4s carry the
+# scoreboard / killfeed widgets we don't want baked into the clip
+# (operators do their own overlays in post). This is the ONLY pod mode
+# we want stripped: live spec sessions, demo viewers, and one-off clip
+# renders all still want the HUD.
+if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
+  log "CLIP_BATCH_MODE=1 — skipping OpenHud (auto-highlights render without overlay)"
+elif [ -x "$OPENHUD_BIN" ]; then
   start_picom || warn "continuing without picom (HUD background won't be transparent)"
   start_openhud
   OPENHUD_DEFERRED=1
