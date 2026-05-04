@@ -169,6 +169,15 @@ const gsiState = {
   roundPhase: null,      // freezetime | live | over
   roundNumber: null,     // 0-indexed CS2 demo round counter
   spectatedSteamId: null,
+  // Slot → player snapshot derived from GSI's `allplayers` block.
+  // `observer_slot` is what cs2 binds to the number-row digit keys
+  // (1..9, 0, minus, equal). When the spec target dies and cs2
+  // auto-switches to a teammate, observer_slot of the survivors
+  // doesn't change — only `spectatedSteamId` updates. So slot 1
+  // is always the same player, but they may be dead/alive.
+  // Shape: Array<{slot, steam_id, name, team: "T"|"CT", alive, health}>
+  // Empty until the first GSI tick lands.
+  specSlots: [],
 };
 
 // One-shot "tell the api the demo is actually playing now" beacon
@@ -589,6 +598,7 @@ const server = createServer(async (req, res) => {
               round_number: gsiState.roundNumber,
               spectated_steam_id: gsiState.spectatedSteamId,
               last_received_ms_ago: Date.now() - gsiState.lastReceivedMs,
+              spec_slots: gsiState.specSlots,
             }
           : null,
       });
@@ -891,6 +901,7 @@ const server = createServer(async (req, res) => {
       const map = body?.map ?? {};
       const round = body?.round ?? {};
       const player = body?.player ?? {};
+      const allPlayers = body?.allplayers ?? null;
       const prevMapPhase = gsiState.mapPhase;
       const prevRoundPhase = gsiState.roundPhase;
       const wasReceiving = gsiState.lastReceivedMs > 0;
@@ -903,6 +914,30 @@ const server = createServer(async (req, res) => {
         typeof map.round === "number" ? map.round : null;
       gsiState.spectatedSteamId =
         typeof player.steamid === "string" ? player.steamid : null;
+      // Build the slot snapshot. `allplayers` is keyed by steamid64 and
+      // each entry has `observer_slot` (cs2's 1..12 digit-bind index;
+      // null for the local client / GOTV broadcaster, who doesn't
+      // occupy a slot). Sort by slot so the array is render-ready.
+      if (allPlayers && typeof allPlayers === "object") {
+        const slots = [];
+        for (const [steamId, p] of Object.entries(allPlayers)) {
+          if (!p || typeof p !== "object") continue;
+          const slot = p.observer_slot;
+          if (typeof slot !== "number" || slot < 1 || slot > 12) continue;
+          const team = p.team === "T" || p.team === "CT" ? p.team : null;
+          const health = Number(p.state?.health ?? 0);
+          slots.push({
+            slot,
+            steam_id: steamId,
+            name: typeof p.name === "string" ? p.name : null,
+            team,
+            alive: health > 0,
+            health,
+          });
+        }
+        slots.sort((a, b) => a.slot - b.slot);
+        gsiState.specSlots = slots;
+      }
       bumpActivity();
       sendJson(res, 200, { ok: true });
       // Only fire the "playing" beacon once we have REAL game data.
@@ -953,8 +988,6 @@ const server = createServer(async (req, res) => {
       const jobId = String(body.job_id ?? "");
       const token = String(body.token ?? "");
       const apiBase = String(body.api_base ?? "");
-      const startTick = Number.parseInt(body.start_tick, 10);
-      const endTick = Number.parseInt(body.end_tick, 10);
       const outputDims = String(body.output_dims ?? "1920x1080");
       const outputFps = Number.parseInt(body.output_fps, 10) || 60;
       const renderSpeedRaw = Number.parseInt(body.render_speed, 10);
@@ -962,17 +995,33 @@ const server = createServer(async (req, res) => {
         Number.isFinite(renderSpeedRaw) && renderSpeedRaw >= 1
           ? Math.min(renderSpeedRaw, 4)
           : 2;
-      if (
-        !jobId ||
-        !token ||
-        !apiBase ||
-        !Number.isFinite(startTick) ||
-        !Number.isFinite(endTick) ||
-        endTick <= startTick
-      ) {
+      // Accept either `segments: [{start_tick,end_tick}, ...]` (the
+      // multi-segment editor's payload) or the legacy
+      // start_tick/end_tick pair (older callers + scripts). Normalise
+      // to a clean array before serialising for the bash script.
+      let segments = Array.isArray(body.segments) ? body.segments : null;
+      if (!segments && body.start_tick != null && body.end_tick != null) {
+        segments = [{ start_tick: body.start_tick, end_tick: body.end_tick }];
+      }
+      const cleaned = (segments ?? [])
+        .map((s) => ({
+          start_tick: Number.parseInt(s?.start_tick, 10),
+          end_tick: Number.parseInt(s?.end_tick, 10),
+        }))
+        .filter(
+          (s) =>
+            Number.isFinite(s.start_tick) &&
+            Number.isFinite(s.end_tick) &&
+            s.end_tick > s.start_tick,
+        )
+        // Keep declared order — the editor emits already-sorted, but
+        // a preset generator might intentionally re-order (unlikely
+        // for v1, but cheap to preserve).
+        ;
+      if (!jobId || !token || !apiBase || cleaned.length === 0) {
         sendJson(res, 400, {
           error:
-            "job_id, token, api_base, start_tick (int), end_tick (int > start_tick) required",
+            "job_id, token, api_base, and at least one valid segment required",
         });
         log("-> 400 demo/render-clip bad payload");
         return;
@@ -995,8 +1044,7 @@ const server = createServer(async (req, res) => {
             CLIP_RENDER_JOB_ID: jobId,
             CLIP_RENDER_TOKEN: token,
             STATUS_API_BASE: apiBase,
-            CLIP_START_TICK: String(startTick),
-            CLIP_END_TICK: String(endTick),
+            CLIP_SEGMENTS: JSON.stringify(cleaned),
             CLIP_OUTPUT_DIMS: outputDims,
             CLIP_OUTPUT_FPS: String(outputFps),
             CLIP_TICK_RATE: String(demoState.tickRate || 64),
@@ -1008,9 +1056,13 @@ const server = createServer(async (req, res) => {
       child.unref();
       bumpActivity();
       sendJson(res, 202, { ok: true, job_id: jobId, pid: child.pid });
+      const totalTicks = cleaned.reduce(
+        (acc, s) => acc + (s.end_tick - s.start_tick),
+        0,
+      );
       log(
         `-> 202 demo/render-clip job=${jobId} pid=${child.pid} ` +
-          `ticks=${startTick}..${endTick} speed=${renderSpeed}x`,
+          `segments=${cleaned.length} total_ticks=${totalTicks} speed=${renderSpeed}x`,
       );
       return;
     }

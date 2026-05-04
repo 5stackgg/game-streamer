@@ -337,6 +337,9 @@ write_spec_gsi_cfg() {
     "map"      "1"
     "round"    "1"
     "player_id" "1"
+    "player_state" "1"
+    "allplayers_id"    "1"
+    "allplayers_state" "1"
   }
 }
 EOF
