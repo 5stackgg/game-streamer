@@ -391,11 +391,9 @@ EOF
 #   PageUp      = host_timescale 4   (/demo/speed rate=4)
 demo_static_binds_block() {
   cat <<'EOF'
-// === demo-playback keybinds (auto-generated; mirror in src/spec-server.mjs) ===
-// Every constant-arg console action lives here so the spec-server can
-// fire it via XTest keystroke instead of typing into the dev console
-// (which flashes briefly on the captured stream). Parameterized
-// actions (demo_gototick <tick>) still need typed console.
+// demo-playback keybinds (auto-generated; mirror in src/spec-server.mjs).
+// BACKSPACE → exec 5stack_exec is the exec-cfg path spec-server uses for
+// arbitrary commands; spec-server's execCfgCommand hard-codes that key.
 bind "PAUSE" "demo_togglepause"
 bind "HOME" "demo_gototick -960"
 bind "END" "demo_gototick +960"
@@ -405,6 +403,7 @@ bind "APOSTROPHE" "host_timescale 2"
 bind "PGUP" "host_timescale 4"
 bind "PGDN" "host_timescale 0.25"
 bind "F11" "demoui"
+bind "BACKSPACE" "exec 5stack_exec"
 EOF
 }
 

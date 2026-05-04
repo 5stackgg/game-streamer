@@ -86,7 +86,7 @@
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
@@ -126,6 +126,15 @@ const SPEED_KEY_BY_RATE = {
 const DEMO_ROUND_TICKS_PATH =
   process.env.DEMO_ROUND_TICKS_PATH ??
   path.join(process.env.LOG_DIR ?? "/tmp/game-streamer", "demo-round-ticks.json");
+
+// autoexec binds BACKSPACE → `exec 5stack_exec`. execCfgCommand
+// writes the cmd to this file then sends BACKSPACE. Pre-created empty
+// by run-demo.sh.
+const CS2_CFG_DIR =
+  process.env.CS2_CFG_DIR ??
+  (process.env.CS2_DIR ? `${process.env.CS2_DIR}/game/csgo/cfg` : null);
+const EXEC_CFG_PATH = CS2_CFG_DIR ? `${CS2_CFG_DIR}/5stack_exec.cfg` : null;
+const EXEC_CFG_KEY = "BackSpace";
 
 
 // Demo session bookkeeping for tick estimation + idle-timeout. Held in
@@ -172,17 +181,13 @@ let demoPlayingReported = false;
 async function reportDemoPlayingOnce() {
   if (demoPlayingReported) return;
   demoPlayingReported = true;
-  // One console round-trip does both:
-  //   1. `demoui` (no arg) — toggles the auto-opened Panorama panel
-  //      OFF. cs2's `demoui` cvar is a toggle and IGNORES any
-  //      argument — `demoui false` was a no-op (the HUD stayed
-  //      visible, which is the regression we hit). On first GSI the
-  //      panel is always visible (cs2 auto-opens it on +playdemo)
-  //      so a single toggle reliably hides it.
-  //   2. `demo_pause` — explicit pause (NOT togglepause). Tick is at
-  //      0 and we want it KNOWN paused; togglepause depends on cs2's
-  //      current state which has been racy in practice.
-  void sendConsoleCommand("demoui; demo_pause").catch(() => undefined);
+  // Pause immediately so the user lands on a known frame; defer the
+  // demoui hide so the panel has time to actually render before we
+  // toggle it (toggling before paint is a no-op).
+  void execCfgCommand("demo_pause").catch(() => undefined);
+  setTimeout(() => {
+    void execCfgCommand("demoui").catch(() => undefined);
+  }, 3000);
   // Mirror the pause locally so the tick estimator + scrubber
   // freeze at tick 0 instead of advancing as if playback had
   // started. The web's first /demo/state read after this will see
@@ -430,6 +435,39 @@ async function sendConsoleCommand(cmd) {
   return true;
 }
 
+// Fire any console command by writing it to 5stack_exec.cfg + sending
+// BACKSPACE (autoexec binds it to `exec 5stack_exec`). One cmd per
+// line — `;`-joined lines were being mis-parsed across cs2 builds.
+async function execCfgCommand(cmd) {
+  if (!EXEC_CFG_PATH) {
+    process.stderr.write(
+      `[spec-server] execCfgCommand: CS2_CFG_DIR not set — falling back to sendConsoleCommand\n`,
+    );
+    return sendConsoleCommand(cmd);
+  }
+  if ((await findCs2Window()) === null) return false;
+  const lines = cmd
+    .split(";")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const body = lines.join("\n") + "\n";
+  try {
+    const tmp = `${EXEC_CFG_PATH}.tmp`;
+    writeFileSync(tmp, body, "utf8");
+    renameSync(tmp, EXEC_CFG_PATH);
+  } catch (err) {
+    process.stderr.write(
+      `[spec-server] execCfgCommand: write failed (${(err && err.message) || err}) — falling back to typed console\n`,
+    );
+    return sendConsoleCommand(cmd);
+  }
+  process.stderr.write(
+    `[spec-server] execCfgCommand wrote ${lines.length} cmd(s): ${lines.map((l) => `\`${l}\``).join(" ")}\n`,
+  );
+  await run(["xdotool", "key", "--clearmodifiers", EXEC_CFG_KEY]);
+  return true;
+}
+
 /**
  * Read the round_ticks sidecar (written by run-demo.sh from $ROUND_TICKS).
  * @returns {Array<{round: number, start_tick: number, end_tick: number}>}
@@ -667,21 +705,13 @@ const server = createServer(async (req, res) => {
     if (url === "/demo/pause") {
       let ok = true;
       if (body.force === true) {
-        // Bypass the demoState mirror — type the explicit cs2 command
-        // `demo_pause` so cs2 ends up paused regardless of mirror
-        // state. demo_pause is idempotent at cs2's level (no-op if
-        // already paused) so this is always safe to call. Used by the
-        // inline clip-render flow as the deterministic "lock cs2
-        // paused at this tick" primitive.
-        ok = await sendConsoleCommand("demo_pause");
+        ok = await execCfgCommand("demo_pause");
         if (ok) {
           demoState.lastTickAtSeek = estimateCurrentTick();
           demoState.paused = true;
           demoState.lastSeekRealMs = Date.now();
         }
       } else if (!demoState.paused) {
-        // Idempotent — only send the key if we believe we're playing.
-        // Accidentally double-toggling would actually unpause.
         ok = await sendKey(KEY_DEMO_TOGGLE);
         if (ok) {
           demoState.lastTickAtSeek = estimateCurrentTick();
@@ -698,14 +728,7 @@ const server = createServer(async (req, res) => {
     if (url === "/demo/resume") {
       let ok = true;
       if (body.force === true) {
-        // Bypass the demoState mirror — type the explicit cs2 command
-        // `demo_resume` so we end up playing regardless of what state
-        // we *think* cs2 is in. Used by inline clip-render where any
-        // mirror drift (e.g. cs2 auto-resumed after a demo_gototick)
-        // would catastrophically pause cs2 mid-capture and produce a
-        // still-frame mp4. Slower than the toggle (~150ms console
-        // typing vs ~30ms keystroke) but worth it.
-        ok = await sendConsoleCommand("demo_resume");
+        ok = await execCfgCommand("demo_resume");
         if (ok) {
           demoState.paused = false;
           demoState.lastSeekRealMs = Date.now();
@@ -730,11 +753,6 @@ const server = createServer(async (req, res) => {
         log("-> 400 demo/seek bad tick");
         return;
       }
-      // `demo_gototick <tick> [relative=0|1] [pause=0|1]` — explicit
-      // form lets the caller pin cs2's play/paused state in a single
-      // command. Without the trailing args, cs2's behaviour after a
-      // seek is build-dependent (some versions resume, some stay
-      // paused) — the inline clip-render flow needs determinism.
       let cmd = `demo_gototick ${tick}`;
       let nextPaused = demoState.paused;
       if (body.pause_after === true) {
@@ -744,7 +762,7 @@ const server = createServer(async (req, res) => {
         cmd = `demo_gototick ${tick} 0 0`;
         nextPaused = false;
       }
-      const ok = await sendConsoleCommand(cmd);
+      const ok = await execCfgCommand(cmd);
       if (ok) {
         demoState.lastTickAtSeek = tick;
         demoState.lastSeekRealMs = Date.now();
@@ -782,8 +800,8 @@ const server = createServer(async (req, res) => {
           0,
           estimateCurrentTick() + Math.round(secs * demoState.tickRate),
         );
-        ok = await sendConsoleCommand(`demo_gototick ${target}`);
-        via = "console";
+        ok = await execCfgCommand(`demo_gototick ${target}`);
+        via = "exec-cfg";
       }
       if (ok) {
         // Estimator drift: bump tick by approximation. Real tick will
@@ -815,12 +833,10 @@ const server = createServer(async (req, res) => {
       // continuous across the transition.
       demoState.lastTickAtSeek = estimateCurrentTick();
       demoState.lastSeekRealMs = Date.now();
-      // Prefer the bound F-key for a known preset (no console flash);
-      // fall back to typed `host_timescale <rate>` for arbitrary values.
       const presetKey = SPEED_KEY_BY_RATE[String(clamped)];
       const ok = presetKey
         ? await sendKey(presetKey)
-        : await sendConsoleCommand(`host_timescale ${clamped}`);
+        : await execCfgCommand(`host_timescale ${clamped}`);
       if (ok) {
         demoState.rate = clamped;
         bumpActivity();
@@ -835,11 +851,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url === "/demo/reload") {
-      // Type `playdemo $DEMO_FILE` via the dev console. The operator
-      // clicks "Toggle CS2 demo HUD" manually after reload if they
-      // want the panel hidden again — auto-toggle was racy against
-      // the post-reload panel re-render. Trade-off accepted.
-      const ok = await sendConsoleCommand(
+      const ok = await execCfgCommand(
         `playdemo /tmp/game-streamer/demo.dem`,
       );
       if (ok) {
@@ -923,15 +935,21 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (url === "/demo/exec") {
+      const cmd = typeof body.cmd === "string" ? body.cmd : "";
+      if (!cmd.trim()) {
+        sendJson(res, 400, { error: "cmd (string) required" });
+        log("-> 400 demo/exec missing cmd");
+        return;
+      }
+      const ok = await execCfgCommand(cmd);
+      bumpActivity();
+      sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/exec (${cmd.length} chars)`);
+      return;
+    }
+
     if (url === "/demo/render-clip") {
-      // User-initiated clip render. Runs INSIDE this pod so we don't
-      // pay the setup-steam + demo-download tax of a fresh render
-      // pod — cs2 is already up with the demo loaded. Trade-off: the
-      // user's playback gets briefly disrupted while we seek to the
-      // clip range, capture, and seek back. The orchestration lives in
-      // lib/inline-clip-render.sh — it talks back to this same daemon
-      // via /demo/{state,pause,resume,seek} for control, then uploads
-      // the rendered mp4 to the api.
       const jobId = String(body.job_id ?? "");
       const token = String(body.token ?? "");
       const apiBase = String(body.api_base ?? "");
@@ -939,6 +957,11 @@ const server = createServer(async (req, res) => {
       const endTick = Number.parseInt(body.end_tick, 10);
       const outputDims = String(body.output_dims ?? "1920x1080");
       const outputFps = Number.parseInt(body.output_fps, 10) || 60;
+      const renderSpeedRaw = Number.parseInt(body.render_speed, 10);
+      const renderSpeed =
+        Number.isFinite(renderSpeedRaw) && renderSpeedRaw >= 1
+          ? Math.min(renderSpeedRaw, 4)
+          : 2;
       if (
         !jobId ||
         !token ||
@@ -966,7 +989,7 @@ const server = createServer(async (req, res) => {
         [scriptPath],
         {
           detached: true,
-          stdio: "ignore",
+          stdio: ["ignore", "inherit", "inherit"],
           env: {
             ...process.env,
             CLIP_RENDER_JOB_ID: jobId,
@@ -976,22 +999,19 @@ const server = createServer(async (req, res) => {
             CLIP_END_TICK: String(endTick),
             CLIP_OUTPUT_DIMS: outputDims,
             CLIP_OUTPUT_FPS: String(outputFps),
-            // Tick rate for the render's wallclock math. Falls back to
-            // demoState's tracked tickRate (default 64) — the demo's
-            // declared rate lives in the api row but we don't need
-            // perfect accuracy, the script just uses it to compute how
-            // long to keep the capture rolling.
             CLIP_TICK_RATE: String(demoState.tickRate || 64),
-            // Spec-server URL the script uses for pause/seek/resume.
-            // Same host:port we're listening on right now.
             SPEC_SERVER_URL: `http://127.0.0.1:${PORT}`,
+            CLIP_RENDER_SPEED: String(renderSpeed),
           },
         },
       );
       child.unref();
       bumpActivity();
       sendJson(res, 202, { ok: true, job_id: jobId, pid: child.pid });
-      log(`-> 202 demo/render-clip job=${jobId} pid=${child.pid} ticks=${startTick}..${endTick}`);
+      log(
+        `-> 202 demo/render-clip job=${jobId} pid=${child.pid} ` +
+          `ticks=${startTick}..${endTick} speed=${renderSpeed}x`,
+      );
       return;
     }
 
@@ -1063,7 +1083,7 @@ const server = createServer(async (req, res) => {
         log(`-> 404 demo/round ${round} (not in ticks map; have ${map.length})`);
         return;
       }
-      const ok = await sendConsoleCommand(`demo_gototick ${entry.start_tick}`);
+      const ok = await execCfgCommand(`demo_gototick ${entry.start_tick}`);
       if (ok) {
         demoState.lastTickAtSeek = entry.start_tick;
         demoState.lastSeekRealMs = Date.now();
@@ -1096,7 +1116,7 @@ server.listen(PORT, BIND, () => {
   process.stderr.write(
     `[spec-server] routes: GET /, /health, /spec/health, /demo/state | ` +
       `POST /spec/{click,jump,player,slot,autodirector,hud}, ` +
-      `/demo/{toggle,pause,resume,seek,skip,speed,round,reload,xray,demoui,render-clip}, /gsi\n`,
+      `/demo/{toggle,pause,resume,seek,skip,speed,round,reload,xray,demoui,render-clip,exec}, /gsi\n`,
   );
 });
 

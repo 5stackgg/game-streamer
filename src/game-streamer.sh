@@ -303,6 +303,19 @@ case "$cmd" in
       DEMO_FILE_BG="${DEMO_FILE:-/tmp/game-streamer/demo.dem}"
       rm -f "$DEMO_FILE_BG" "$DEMO_FILE_BG.failed" "$DEMO_FILE_BG.partial"
       (
+        # shellcheck disable=SC1091
+        . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
+        # shellcheck disable=SC1091
+        . "$LIB_DIR/status-reporter.sh"
+        SCRIPT_TAG=demo-download
+        # Report downloading_demo HERE — the parallel curl is the
+        # actual download. Without this the only `downloading_demo`
+        # report comes from run-demo.sh AFTER the file is already on
+        # disk, gets coalesced into the next status by the 2s daemon
+        # poll, and the web stepper marks the stage SKIPPED. Same
+        # fix-pattern applies to workshop-bg below and to anywhere
+        # else a backgrounded subshell is doing user-visible work.
+        report_status status=downloading_demo
         if curl --fail --silent --show-error --location \
                 --retry 5 --retry-delay 2 --retry-all-errors \
                 --max-time "${DEMO_DOWNLOAD_TIMEOUT:-300}" \
@@ -337,6 +350,8 @@ case "$cmd" in
         . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
         # shellcheck disable=SC1091
         . "$LIB_DIR/steam.sh"
+        # shellcheck disable=SC1091
+        . "$LIB_DIR/status-reporter.sh"
         SCRIPT_TAG=workshop-bg
         # Wait for cs2 install (own steamcmd run) to finish before
         # starting our own. Caps at the same timeout used elsewhere
@@ -350,6 +365,10 @@ case "$cmd" in
           touch "$WORKSHOP_FAILED"
           exit 0
         fi
+        # Same coalescing-fix as the demo-download branch above —
+        # report the status from the actual worker so the web stepper
+        # doesn't mark this stage SKIPPED when it really did run.
+        report_status status=downloading_workshop_map "workshop_id=${WORKSHOP_ID}"
         if download_workshop_map "$WORKSHOP_ID"; then
           : # download_workshop_map already left the .vpk in place
         else

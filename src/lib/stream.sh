@@ -37,6 +37,12 @@ start_capture() {
   log "starting capture '${stream_id}' (fps=$fps kbps=$kbps pointer=$pointer audio=$audio)"
   log "  -> $url"
 
+  local args_dir="${LOG_DIR:-/tmp/game-streamer}"
+  mkdir -p "$args_dir"
+  printf '%s\n%s\n%s\n%s\n%s\n' \
+    "$stream_id" "$fps" "$kbps" "$pointer" "$audio" \
+    > "${args_dir}/capture-${stream_id}.args"
+
   if [ "$audio" = 1 ]; then
     # Pin capture to OUR null sink's monitor. We deliberately don't trust
     # `pactl info`'s Default Source here — once OpenHud's Electron started
@@ -125,47 +131,24 @@ start_capture() {
   return 0
 }
 
-# pause_capture / resume_capture <stream-id> — SIGSTOP / SIGCONT the
-# gst process. Used by inline-clip-render to free the GPU encoder
-# during a clip render: two parallel nvenc sessions on the same
-# display fight for encoder slots and ximagesrc throughput, which
-# bogs the whole pod down. Pausing the live SRT publisher leaves
-# cs2 running (so demo state stays intact) and gives the file
-# capture full encoder bandwidth.
-#
-# Trade-off: the WHEP viewer stalls during the pause window. SRT may
-# also drop the publisher if paused too long (~30s+ in practice);
-# mediamtx will accept a fresh connection on resume but the WHEP
-# client may have to reconnect — covered by the existing HLS
-# fallback (web commit c5e717f).
-pause_capture() {
+# Stop the publisher (if running) + start fresh with the same args the
+# original start_capture was called with. Args are read from the file
+# start_capture persists.
+restart_capture() {
   local stream_id="${1:?stream-id required}"
-  local pid
-  pid=$(stream_pid "$stream_id") || true
-  if [ -z "$pid" ]; then
-    log "no capture '${stream_id}' to pause"
-    return 0
+  local args_dir="${LOG_DIR:-/tmp/game-streamer}"
+  local args_file="${args_dir}/capture-${stream_id}.args"
+  if [ ! -f "$args_file" ]; then
+    warn "restart_capture: no saved args at $args_file — cannot restart '${stream_id}'"
+    return 1
   fi
-  if kill -STOP "$pid" 2>/dev/null; then
-    log "paused capture '${stream_id}' (pid $pid)"
-  else
-    warn "failed to SIGSTOP capture '${stream_id}' (pid $pid)"
-  fi
-}
+  local sid fps kbps pointer audio
+  { read -r sid; read -r fps; read -r kbps; read -r pointer; read -r audio; } < "$args_file"
 
-resume_capture() {
-  local stream_id="${1:?stream-id required}"
-  local pid
-  pid=$(stream_pid "$stream_id") || true
-  if [ -z "$pid" ]; then
-    log "no capture '${stream_id}' to resume"
-    return 0
-  fi
-  if kill -CONT "$pid" 2>/dev/null; then
-    log "resumed capture '${stream_id}' (pid $pid)"
-  else
-    warn "failed to SIGCONT capture '${stream_id}' (pid $pid)"
-  fi
+  stop_capture "$stream_id"
+  # Let mediamtx clear the stale publisher record before reconnecting.
+  sleep 1
+  start_capture "$sid" "$fps" "$kbps" "$pointer" "$audio"
 }
 
 stop_capture() {

@@ -157,6 +157,10 @@ $SPEC_BINDS_BLOCK
 $DEMO_BINDS_BLOCK
 EOF
 
+# Pre-create empty so cs2's `exec 5stack_exec` doesn't error before
+# spec-server writes to it.
+: > "$CS2_CFG_DIR/5stack_exec.cfg"
+
 # Keep OpenHud running for visual parity with live streams. GSI fires
 # during demo playback too (CS2 emits gamestate from the recorded
 # match), so the lineup HUD will populate the same way.
@@ -282,9 +286,11 @@ do_applaunch() {
   # shows the cs2 main menu. demoui is hidden by the spec-server's
   # GSI handler the moment cs2 fires its first game-state event —
   # deterministic timing, no race vs. when the panel paints.
+  # -condebug tees cs2's in-game console to csgo/console.log.
   local cs2_args=(
     -windowed -noborder -width 1920 -height 1080 -novid -nojoy -console
     -insecure
+    -condebug
     +exec live_autoexec
     +playdemo "$DEMO_FILE")
 
