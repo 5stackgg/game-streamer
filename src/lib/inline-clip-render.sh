@@ -292,14 +292,69 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
 done
 
 # Concat. With one segment we can copy streams; with multiple we
-# re-encode to avoid edge-case PTS / SAR mismatches between captures
-# (e.g. an i-frame that landed at a different offset between segments
-# would hard-cut on copy).
+# re-encode AND apply per-segment fades — gives a clean visual
+# beat when jumping between kill clusters instead of a hard cut.
+# Fade is 0.4s in/out, applied to every segment's edges; consecutive
+# fades blend so the "join" between two segments reads as a brief
+# dip-to-black rather than a jump-cut. Single-segment clips skip the
+# fade since there's no transition to smooth over.
 if [ "$SEG_COUNT" = "1" ]; then
   ONLY_SEG=$(awk -F"'" '/^file/{print $2}' "$SEG_DIR/concat.txt" | head -1)
   mv -f "$ONLY_SEG" "$CLIP_OUT_FILE"
 else
-  say "STEP 9: ffmpeg concat ${SEG_COUNT} segments"
+  say "STEP 9a: applying 0.4s fade transitions to ${SEG_COUNT} segments"
+  FADE_DUR=0.4
+  # Per-segment fade pass. Every segment except the first gets a
+  # fade-in at t=0; every segment except the last gets a fade-out
+  # ending at its end. Audio gets the same shape via afade.
+  i=0
+  while IFS= read -r line; do
+    SEG_PATH=$(printf '%s\n' "$line" | awk -F"'" '{print $2}')
+    [ -z "$SEG_PATH" ] && continue
+    SEG_DUR=$(ffprobe -v error -show_entries format=duration \
+      -of default=noprint_wrappers=1:nokey=1 "$SEG_PATH" 2>/dev/null)
+    [ -z "$SEG_DUR" ] && SEG_DUR=0
+    # Build per-segment filter chain. Skip fade-in on segment 0 (we
+    # want the highlight to open with action, not dip); skip fade-out
+    # on the final segment (no transition to follow it).
+    VF=""
+    AF=""
+    if [ "$i" -gt 0 ]; then
+      VF="fade=t=in:st=0:d=${FADE_DUR}"
+      AF="afade=t=in:st=0:d=${FADE_DUR}"
+    fi
+    if [ "$i" -lt "$((SEG_COUNT - 1))" ]; then
+      FADE_OUT_START=$(awk -v d="$SEG_DUR" -v f="$FADE_DUR" 'BEGIN{printf "%.3f", d - f}')
+      [ -n "$VF" ] && VF="${VF},"
+      VF="${VF}fade=t=out:st=${FADE_OUT_START}:d=${FADE_DUR}"
+      [ -n "$AF" ] && AF="${AF},"
+      AF="${AF}afade=t=out:st=${FADE_OUT_START}:d=${FADE_DUR}"
+    fi
+    if [ -z "$VF" ]; then
+      i=$((i + 1))
+      continue
+    fi
+    FADED="${SEG_PATH}.faded.mp4"
+    AUDIO_OPTS=(-an)
+    if has_audio_stream "$SEG_PATH"; then
+      AUDIO_OPTS=(-af "$AF" -c:a aac -b:a 192k)
+    fi
+    if ffmpeg -y -hide_banner -loglevel warning \
+         -i "$SEG_PATH" \
+         -vf "$VF" \
+         "${AUDIO_OPTS[@]}" \
+         -c:v libx264 -preset veryfast -crf 22 \
+         -movflags +faststart \
+         "$FADED"; then
+      mv -f "$FADED" "$SEG_PATH"
+    else
+      rm -f "$FADED"
+      say "WARN fade pass failed for segment $i — using raw segment"
+    fi
+    i=$((i + 1))
+  done <"$SEG_DIR/concat.txt"
+
+  say "STEP 9b: ffmpeg concat ${SEG_COUNT} segments"
   if ! ffmpeg -y -hide_banner -loglevel warning \
        -f concat -safe 0 -i "$SEG_DIR/concat.txt" \
        -c:v libx264 -preset veryfast -crf 22 \
