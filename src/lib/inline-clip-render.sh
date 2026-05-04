@@ -123,6 +123,99 @@ log_state() {
   say "STATE [$label]: tick=$tick paused=$paused"
 }
 
+# Read GSI's currently-spectated steamid64 from /demo/state. Returns
+# empty string when GSI hasn't fired yet or the field isn't set.
+gsi_spectated_steamid() {
+  local s
+  s=$(spec_get_state || true)
+  [ -z "$s" ] && { echo ""; return; }
+  printf '%s' "$s" \
+    | python3 -c \
+      'import json,sys
+try:
+    d = json.load(sys.stdin)
+    print(d.get("gsi", {}).get("spectated_steam_id", "") or "")
+except Exception:
+    print("")'
+}
+
+# Look up the target's CURRENT slot number (1..10) from GSI's
+# spec_slots block. cs2 reassigns observer_slot per round, so we
+# can't compute this once — must read fresh each segment.
+gsi_slot_for_steamid() {
+  local target_sid="$1"
+  local s
+  s=$(spec_get_state || true)
+  [ -z "$s" ] && { echo ""; return; }
+  printf '%s' "$s" \
+    | python3 -c \
+      "import json,sys
+try:
+    d = json.load(sys.stdin)
+    target = '$target_sid'
+    for s in d.get('gsi', {}).get('spec_slots', []):
+        if s.get('steam_id') == target:
+            print(s['slot'])
+            sys.exit(0)
+except Exception:
+    pass
+print('')"
+}
+
+# Force cs2 onto a specific player and confirm via GSI before
+# returning.
+#
+# Why slot-key instead of spec_player_by_accountid: in practice cs2
+# silently no-ops the by_accountid command for demo playback (we
+# verified this from logs — the command runs, GSI never updates).
+# The digit-key path is what the live stream-deck slot buttons use,
+# and it actually drives cs2's spec switcher. We look up the
+# target's CURRENT observer_slot in GSI, press that digit, then
+# poll until GSI confirms.
+#
+# Args: <expected-steamid64>
+# Returns 0 on confirmed lock, 1 if it never confirmed.
+verify_spec_lock() {
+  local target_sid="$1"
+  local slot=""
+  # Find slot — retry briefly in case GSI is between snapshots.
+  local try
+  for try in 1 2 3 4 5; do
+    slot=$(gsi_slot_for_steamid "$target_sid")
+    if [ -n "$slot" ]; then break; fi
+    sleep 0.2
+  done
+  if [ -z "$slot" ]; then
+    say "WARN target ${target_sid} is not in GSI spec_slots — POV lock skipped"
+    return 1
+  fi
+  say "  pressing digit key for slot ${slot} -> ${target_sid}"
+  spec_post /spec/slot "{\"slot\": ${slot}}"
+  # Up to 2s of polling at ~7Hz. cs2 GSI fires at ~10Hz so 150ms
+  # gives the next tick a chance to land between polls.
+  local i current
+  for i in $(seq 1 14); do
+    sleep 0.15
+    current=$(gsi_spectated_steamid)
+    if [ "$current" = "$target_sid" ]; then
+      say "  POV verified via GSI: spectated=${current}"
+      return 0
+    fi
+  done
+  say "WARN POV did not verify after 2s — wanted=${target_sid} got='${current}' — re-pressing slot ${slot}"
+  spec_post /spec/slot "{\"slot\": ${slot}}"
+  for i in $(seq 1 14); do
+    sleep 0.15
+    current=$(gsi_spectated_steamid)
+    if [ "$current" = "$target_sid" ]; then
+      say "  POV verified after retry: spectated=${current}"
+      return 0
+    fi
+  done
+  say "WARN POV still not locked to ${target_sid} (got '${current}') — proceeding anyway"
+  return 1
+}
+
 # True if the captured mp4 has an audio stream that ffmpeg can read.
 has_audio_stream() {
   local f="$1"
@@ -191,6 +284,22 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     "import json,sys; print(json.load(sys.stdin)[$SEG_IDX]['start_tick'])")
   SEG_END=$(printf '%s' "$CLIP_SEGMENTS" | python3 -c \
     "import json,sys; print(json.load(sys.stdin)[$SEG_IDX]['end_tick'])")
+  # POV target. cs2's spec_player_by_accountid takes the 32-bit
+  # accountid (steamid64 - 76561197960265728). We send the lock
+  # AFTER seeking + lead-in so cs2's freshly-seeked spec target
+  # gets overridden onto the player whose kills we're rendering.
+  # Without this, the demo opens with whoever cs2 was last
+  # spectating, which produces a clip from the wrong POV.
+  SEG_POV_ACCOUNTID=$(printf '%s' "$CLIP_SEGMENTS" | python3 -c \
+    "
+import json,sys
+seg = json.load(sys.stdin)[$SEG_IDX]
+sid = seg.get('pov_steam_id')
+if isinstance(sid, str) and sid.isdigit():
+    aid = int(sid) - 76561197960265728
+    if aid > 0:
+        print(aid)
+")
   SEG_TICKS=$((SEG_END - SEG_START))
   SEG_DURATION_MS=$(awk -v t="$SEG_TICKS" -v r="${CLIP_TICK_RATE:-64}" \
     'BEGIN{printf "%d", t / r * 1000}')
@@ -201,20 +310,61 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   spec_post /demo/pause '{"force": true}'
   say "STEP 3: seek to $SEG_START"
   spec_post /demo/seek "{\"tick\": ${SEG_START}}"
-  # cs2 sometimes auto-resumes on demo_gototick; lead-in lets the
-  # frame land + lets us re-pause cleanly before rolling capture.
-  say "STEP 4: lead-in 2s + re-pause"
-  sleep 2
-  spec_post /demo/pause '{"force": true}'
 
-  say "STEP 5b: start GStreamer file capture -> $SEG_FILE"
+  # Lead-in: unpause briefly so cs2 actually processes the seek AND
+  # the upcoming spec command. Spec commands no-op while paused on
+  # most cs2 builds — that's why the previous "lock then play" order
+  # was capturing the wrong POV. Now the order is:
+  #   seek → unpause → spec lock + GSI verify → re-pause → start
+  #   capture → unpause → GO.
+  say "STEP 4: lead-in (unpaused) — seek settle"
+  spec_post /demo/toggle '{}'
+  sleep 0.6
+
+  if [ -n "$SEG_POV_ACCOUNTID" ]; then
+    SEG_POV_STEAMID=$((SEG_POV_ACCOUNTID + 76561197960265728))
+    say "STEP 4b: lock POV to steamid=${SEG_POV_STEAMID}"
+    verify_spec_lock "$SEG_POV_STEAMID" || true
+  fi
+
+  # Re-pause AND re-seek back to SEG_START. The lead-in unpause +
+  # GSI poll consumed real demo time (up to ~3s of ticks); capturing
+  # from "wherever we ended up" would chop off the start of every
+  # segment and could push us past the first kill entirely.
+  spec_post /demo/pause '{"force": true}'
+  spec_post /demo/seek "{\"tick\": ${SEG_START}}"
+  sleep 0.4
+
+  # Re-press the slot key BEFORE starting capture. The re-seek
+  # above commonly resets cs2's spec target on this build; firing
+  # the digit key here queues the next press for when play resumes
+  # so the first captured frame is the right POV.
+  if [ -n "${SEG_POV_STEAMID:-}" ]; then
+    POV_SLOT_AFTER_SEEK=$(gsi_slot_for_steamid "$SEG_POV_STEAMID")
+    if [ -n "$POV_SLOT_AFTER_SEEK" ]; then
+      spec_post /spec/slot "{\"slot\": ${POV_SLOT_AFTER_SEEK}}"
+    fi
+  fi
+
+  say "STEP 5: start GStreamer file capture -> $SEG_FILE"
   if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" 8000 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
-  say "STEP 5b: pid=${CLIP_CAPTURE_PID:-?}"
+  say "STEP 5: pid=${CLIP_CAPTURE_PID:-?}"
 
   say "STEP 6: PRESS PLAY"
   spec_post /demo/toggle '{}'
+
+  # Belt-and-suspenders: press the slot digit one more time right
+  # after play resumes. The freshest GSI snapshot may have moved
+  # the player to a different observer_slot since the round started
+  # rolling, so re-look it up rather than cache.
+  if [ -n "${SEG_POV_STEAMID:-}" ]; then
+    POV_SLOT_AFTER_PLAY=$(gsi_slot_for_steamid "$SEG_POV_STEAMID")
+    if [ -n "$POV_SLOT_AFTER_PLAY" ]; then
+      spec_post /spec/slot "{\"slot\": ${POV_SLOT_AFTER_PLAY}}"
+    fi
+  fi
 
   if [ "$CLIP_RENDER_SPEED" != "1" ]; then
     spec_post /demo/exec "{\"cmd\": \"demo_timescale ${CLIP_RENDER_SPEED}\"}"
@@ -320,70 +470,17 @@ if [ "$SEG_COUNT" -lt 1 ]; then
   die_failed "all segments produced empty captures — cs2 may be stalled"
 fi
 
-# Concat. With one segment we can copy streams; with multiple we
-# re-encode AND apply per-segment fades — gives a clean visual
-# beat when jumping between kill clusters instead of a hard cut.
-# Fade is 0.4s in/out, applied to every segment's edges; consecutive
-# fades blend so the "join" between two segments reads as a brief
-# dip-to-black rather than a jump-cut. Single-segment clips skip the
-# fade since there's no transition to smooth over.
+# Concat — direct cuts between segments. We tried 0.4s fade
+# transitions earlier and the result was a longer-than-expected dip
+# to black at every join (cs2's seek-loading frames at the head of
+# each segment compound with the fade-in, producing 0.5-1s of dead
+# air per cut). For a frag montage the harder pace of direct cuts
+# reads better and the action stays continuous.
 if [ "$SEG_COUNT" = "1" ]; then
   ONLY_SEG=$(awk -F"'" '/^file/{print $2}' "$SEG_DIR/concat.txt" | head -1)
   mv -f "$ONLY_SEG" "$CLIP_OUT_FILE"
 else
-  say "STEP 9a: applying 0.4s fade transitions to ${SEG_COUNT} segments"
-  FADE_DUR=0.4
-  # Per-segment fade pass. Every segment except the first gets a
-  # fade-in at t=0; every segment except the last gets a fade-out
-  # ending at its end. Audio gets the same shape via afade.
-  i=0
-  while IFS= read -r line; do
-    SEG_PATH=$(printf '%s\n' "$line" | awk -F"'" '{print $2}')
-    [ -z "$SEG_PATH" ] && continue
-    SEG_DUR=$(ffprobe -v error -show_entries format=duration \
-      -of default=noprint_wrappers=1:nokey=1 "$SEG_PATH" 2>/dev/null)
-    [ -z "$SEG_DUR" ] && SEG_DUR=0
-    # Build per-segment filter chain. Skip fade-in on segment 0 (we
-    # want the highlight to open with action, not dip); skip fade-out
-    # on the final segment (no transition to follow it).
-    VF=""
-    AF=""
-    if [ "$i" -gt 0 ]; then
-      VF="fade=t=in:st=0:d=${FADE_DUR}"
-      AF="afade=t=in:st=0:d=${FADE_DUR}"
-    fi
-    if [ "$i" -lt "$((SEG_COUNT - 1))" ]; then
-      FADE_OUT_START=$(awk -v d="$SEG_DUR" -v f="$FADE_DUR" 'BEGIN{printf "%.3f", d - f}')
-      [ -n "$VF" ] && VF="${VF},"
-      VF="${VF}fade=t=out:st=${FADE_OUT_START}:d=${FADE_DUR}"
-      [ -n "$AF" ] && AF="${AF},"
-      AF="${AF}afade=t=out:st=${FADE_OUT_START}:d=${FADE_DUR}"
-    fi
-    if [ -z "$VF" ]; then
-      i=$((i + 1))
-      continue
-    fi
-    FADED="${SEG_PATH}.faded.mp4"
-    AUDIO_OPTS=(-an)
-    if has_audio_stream "$SEG_PATH"; then
-      AUDIO_OPTS=(-af "$AF" -c:a aac -b:a 192k)
-    fi
-    if ffmpeg -y -hide_banner -loglevel warning \
-         -i "$SEG_PATH" \
-         -vf "$VF" \
-         "${AUDIO_OPTS[@]}" \
-         -c:v libx264 -preset veryfast -crf 22 \
-         -movflags +faststart \
-         "$FADED"; then
-      mv -f "$FADED" "$SEG_PATH"
-    else
-      rm -f "$FADED"
-      say "WARN fade pass failed for segment $i — using raw segment"
-    fi
-    i=$((i + 1))
-  done <"$SEG_DIR/concat.txt"
-
-  say "STEP 9b: ffmpeg concat ${SEG_COUNT} segments"
+  say "STEP 9: ffmpeg concat ${SEG_COUNT} segments (direct cuts)"
   if ! ffmpeg -y -hide_banner -loglevel warning \
        -f concat -safe 0 -i "$SEG_DIR/concat.txt" \
        -c:v libx264 -preset veryfast -crf 22 \

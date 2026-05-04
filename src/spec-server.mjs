@@ -1032,6 +1032,8 @@ const server = createServer(async (req, res) => {
         .map((s) => ({
           start_tick: Number.parseInt(s?.start_tick, 10),
           end_tick: Number.parseInt(s?.end_tick, 10),
+          pov_steam_id:
+            typeof s?.pov_steam_id === "string" ? s.pov_steam_id : null,
         }))
         .filter(
           (s) =>
