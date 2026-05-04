@@ -14,20 +14,6 @@ require_env CLIP_RENDER_JOB_ID CLIP_RENDER_TOKEN STATUS_API_BASE \
 
 CLIP_RENDER_SPEED="${CLIP_RENDER_SPEED:-1}"
 
-# Multi-segment input. CLIP_SEGMENTS is a JSON array of
-# {start_tick,end_tick} from the api; each one is captured separately
-# and the results are concatenated by ffmpeg into the final mp4.
-# Falls back to the legacy single-segment env vars when unset so
-# operators / tests that still pass CLIP_START_TICK / CLIP_END_TICK
-# keep working.
-if [ -z "${CLIP_SEGMENTS:-}" ]; then
-  if [ -z "${CLIP_START_TICK:-}" ] || [ -z "${CLIP_END_TICK:-}" ]; then
-    echo "[clip] CLIP_SEGMENTS or CLIP_START_TICK/CLIP_END_TICK required" >&2
-    exit 1
-  fi
-  CLIP_SEGMENTS="[{\"start_tick\":${CLIP_START_TICK},\"end_tick\":${CLIP_END_TICK}}]"
-fi
-
 LOG_PREFIX="[clip ${CLIP_RENDER_JOB_ID:0:8}]"
 say() { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
 
@@ -85,8 +71,21 @@ die_failed() {
   local msg="$1"
   say "ERROR: $msg"
   api_status "status=error" "error=${msg}"
+  CLIP_REACHED_TERMINAL=1
   exit 1
 }
+
+# Flag flipped to 1 once we've POSTed a terminal status (done / error /
+# cancelled). The on_exit trap inspects it: if the script exits without
+# having reached terminal — `set -u` tripped on an unset var,
+# inline-clip-render.sh got SIGTERM mid-render, etc — the trap POSTs a
+# best-effort status=error so the watchdog isn't left staring at a row
+# stuck in "rendering" while the pod has already moved on / exited.
+# Without this, batch-highlights pods could finish all 10 jobs in
+# subshells that died early and exit 0 with every row still in-flight,
+# producing the "pod exited cleanly but N job(s) never reached terminal
+# state" warning in the api log.
+CLIP_REACHED_TERMINAL=0
 
 SAVED_TICK=""
 SAVED_PAUSED=""
@@ -100,13 +99,37 @@ restore_user_playback() {
 }
 
 on_exit() {
+  local rc=$?
   if [ "${LIVE_CAPTURE_STOPPED:-0}" = "1" ] && [ -n "${MATCH_ID:-}" ]; then
     restart_capture "$MATCH_ID" || true
     LIVE_CAPTURE_STOPPED=0
   fi
   restore_user_playback
+  # Belt-and-suspenders status report. If we exited without having
+  # POSTed a terminal status (set -u trip, SIGTERM, early exit before
+  # die_failed was reachable), best-effort mark the row error so the
+  # batch-highlights watchdog doesn't leave it stuck in-flight.
+  if [ "$rc" -ne 0 ] && [ "${CLIP_REACHED_TERMINAL:-0}" != "1" ]; then
+    api_status "status=error" "error=render exited rc=${rc} before reaching terminal status" \
+      || true
+  fi
 }
 trap 'on_exit' EXIT
+
+# Multi-segment input. CLIP_SEGMENTS is a JSON array of
+# {start_tick,end_tick} from the api; each one is captured separately
+# and the results are concatenated by ffmpeg into the final mp4.
+# Falls back to the legacy single-segment env vars when unset so
+# operators / tests that still pass CLIP_START_TICK / CLIP_END_TICK
+# keep working. Resolved AFTER die_failed + the EXIT trap are in place
+# so a misconfigured invocation marks the row error instead of leaving
+# it stuck in "queued" while the pod exits cleanly.
+if [ -z "${CLIP_SEGMENTS:-}" ]; then
+  if [ -z "${CLIP_START_TICK:-}" ] || [ -z "${CLIP_END_TICK:-}" ]; then
+    die_failed "CLIP_SEGMENTS or CLIP_START_TICK/CLIP_END_TICK required"
+  fi
+  CLIP_SEGMENTS="[{\"start_tick\":${CLIP_START_TICK},\"end_tick\":${CLIP_END_TICK}}]"
+fi
 
 log_state() {
   local label="$1"
@@ -259,6 +282,7 @@ except Exception:
     print("")' 2>/dev/null || echo "")
 if [ "$PRE_STATUS" = "cancelled" ]; then
   say "job already cancelled by user — skipping (no work, no error)"
+  CLIP_REACHED_TERMINAL=1
   exit 0
 fi
 
@@ -566,5 +590,6 @@ if ! curl --fail --silent --show-error \
 fi
 
 api_status "status=done" "progress=1.0"
+CLIP_REACHED_TERMINAL=1
 rm -f "$CLIP_OUT_FILE"
 say "done"
