@@ -195,6 +195,12 @@ const gsiState = {
 // we don't have to time anything: GSI lands AFTER the demo panel
 // has rendered, so F11 reliably toggles it from visible → hidden.
 let demoPlayingReported = false;
+// Flips true once the demoui-hide setTimeout has fired AND the
+// keystroke has been delivered to cs2. Surfaced in /demo/state.gsi
+// as `demoui_hidden`, which the batch-highlights pod polls before
+// kicking off the first render — the previous "wait for GSI then
+// sleep 4s" was flaky under lag, this is the deterministic signal.
+let demouiHidden = false;
 async function reportDemoPlayingOnce() {
   if (demoPlayingReported) return;
   demoPlayingReported = true;
@@ -203,7 +209,11 @@ async function reportDemoPlayingOnce() {
   // toggle it (toggling before paint is a no-op).
   void execCfgCommand("demo_pause").catch(() => undefined);
   setTimeout(() => {
-    void execCfgCommand("demoui").catch(() => undefined);
+    void execCfgCommand("demoui")
+      .catch(() => undefined)
+      .finally(() => {
+        demouiHidden = true;
+      });
   }, 3000);
   // Mirror the pause locally so the tick estimator + scrubber
   // freeze at tick 0 instead of advancing as if playback had
@@ -611,6 +621,11 @@ const server = createServer(async (req, res) => {
               team_t_name: gsiState.teamTName,
               team_ct_score: gsiState.teamCtScore,
               team_t_score: gsiState.teamTScore,
+              // True once the post-GSI demoui-toggle has been
+              // delivered to cs2. The batch-highlights pod waits on
+              // this before starting its first capture so we don't
+              // record the demo panorama panel.
+              demoui_hidden: demouiHidden,
             }
           : null,
       });
