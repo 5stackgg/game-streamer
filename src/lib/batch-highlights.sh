@@ -1,37 +1,12 @@
 # shellcheck shell=bash
-# batch-highlights.sh — drains a queue of clip_render_jobs against a
-# single, already-running cs2 demo session.
-#
-# Sourced by run-demo.sh when CLIP_BATCH_MODE=1. The contract:
-#
-#   IN (env, set by api dispatchBatchHighlights):
-#     CLIP_BATCH_JOBS  - JSON array of {job_id, token, spec}
-#     STATUS_API_BASE  - api base url (in-cluster, e.g. http://api:5585)
-#     SPEC_SERVER_URL  - already running on this pod (default 1350)
-#     DEMO_TICK_RATE   - parsed tickrate (defaults to 64)
-#
-#   FLOW:
-#     For each job in CLIP_BATCH_JOBS:
-#       - Translate spec.segments + spec.output into the env vars
-#         inline-clip-render.sh expects.
-#       - Invoke inline-clip-render.sh.
-#       - The render script handles status reporting, segment
-#         capture, fade trim, and upload itself.
-#     After the loop completes (success or per-job failures), exit
-#     so the k8s Job ttlSecondsAfterFinished reaps the pod.
-#
-# Per-job failures DO NOT halt the batch — one player's render
-# crashing shouldn't lose the rest of the team's highlights. The
-# render script already POSTs status=error to the api on failure,
-# so the failed jobs are visible in /manage-clips for an admin to
-# retry or clean up.
+# Drain a queue of clip_render_jobs (CLIP_BATCH_JOBS, set by api
+# dispatchBatchHighlights) against the already-running cs2 demo session.
+# Sourced by run-demo.sh when CLIP_BATCH_MODE=1. Per-job failures don't
+# halt the batch — the render script POSTs status=error itself.
 
-# Resolve a player's GSI-reported name for a target steamid. cs2 GSI
-# carries the actual in-game player name; the api couldn't get this
-# at enqueue time (only steam_id from the parsed kills jsonb), so
-# titles defaulted to "Player NNNN". Now that the pod has cs2 + GSI
-# loaded, we look up the real name and tell the api to patch the
-# title before this render starts.
+# Resolve the GSI-reported player name for a target steamid and patch
+# the api job title. The api only had steam_id at enqueue time, so
+# titles default to "Player NNNN" until this lookup runs.
 patch_title_from_gsi() {
   local job_id="$1"
   local token="$2"

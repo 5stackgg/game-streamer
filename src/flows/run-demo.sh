@@ -64,7 +64,6 @@ if [ "${DEBUG_CAPTURE:-0}" = "1" ]; then
   log "watch debug: https://hls.5stack.gg/${DEBUG_STREAM_ID}/"
 fi
 
-# ---------------------------------------------------------------------------
 say "1. preflight"
 steam_pipe_up || die "Steam isn't running. Run flow 1 (setup-steam) first."
 log "  steam pipe up (pid $(cat "$HOME/.steam/steam.pid"))"
@@ -73,7 +72,6 @@ log "  xorg up on $DISPLAY"
 
 restore_real_steamclient
 
-# ---------------------------------------------------------------------------
 say "2. clean up stale CS2 / capture for this match"
 pkill -9 -f '/linuxsteamrt64/cs2' 2>/dev/null || true
 stop_capture "$MATCH_ID"
@@ -82,7 +80,6 @@ rm -f /tmp/source_engine_*.lock
 rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
       "$CS2_DIR/game/bin/linuxsteamrt64/steam_appid.txt" 2>/dev/null || true
 
-# ---------------------------------------------------------------------------
 say "2b. download demo"
 report_status status=downloading_demo \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
@@ -119,7 +116,6 @@ fi
 DEMO_BYTES=$(stat -c '%s' "$DEMO_FILE" 2>/dev/null || stat -f '%z' "$DEMO_FILE")
 log "  saved $DEMO_FILE (${DEMO_BYTES} bytes)"
 
-# ---------------------------------------------------------------------------
 say "3. write CS2 autoexec"
 CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
 mkdir -p "$CS2_CFG_DIR"
@@ -235,7 +231,6 @@ CS2_BIN="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
 [ -x "$CS2_BIN" ] || die "CS2 binary missing at $CS2_BIN"
 cd "$(dirname "$CS2_BIN")"
 
-# ---------------------------------------------------------------------------
 # Wait for the workshop map prefetch (started in parallel with
 # setup-steam by game-streamer.sh's `demo` flow). For stock-map demos
 # this block is a no-op — WORKSHOP_ID is empty.
@@ -271,7 +266,6 @@ if [ -n "${WORKSHOP_ID:-}" ]; then
   fi
 fi
 
-# ---------------------------------------------------------------------------
 say "4. launch CS2 (demo mode)"
 report_status status=launching_cs2
 # Use Steam's +applaunch handoff (the proven path used by live
@@ -339,7 +333,6 @@ log "  cs2 pid=$CS2_PID"
 
 minimize_steam_windows
 
-# ---------------------------------------------------------------------------
 say "5. wait for CS2 window"
 report_status status=connecting_to_game
 WIN=""

@@ -185,18 +185,9 @@ except Exception:
 print('')"
 }
 
-# Force cs2 onto a specific player and confirm via GSI before
-# returning.
-#
-# Why slot-key instead of spec_player_by_accountid: in practice cs2
-# silently no-ops the by_accountid command for demo playback (we
-# verified this from logs — the command runs, GSI never updates).
-# The digit-key path is what the live stream-deck slot buttons use,
-# and it actually drives cs2's spec switcher. We look up the
-# target's CURRENT observer_slot in GSI, press that digit, then
-# poll until GSI confirms.
-#
-# Args: <expected-steamid64>
+# Lock cs2 onto a specific player and confirm via GSI. Uses the
+# digit-key (slot) path because spec_player_by_accountid silently
+# no-ops on demo playback (verified — command runs, GSI never updates).
 # Returns 0 on confirmed lock, 1 if it never confirmed.
 verify_spec_lock() {
   local target_sid="$1"
@@ -321,17 +312,9 @@ mkdir -p "$SEG_DIR"
 rm -f "$SEG_DIR"/*.mp4 "$SEG_DIR/concat.txt" 2>/dev/null || true
 : >"$SEG_DIR/concat.txt"
 
-# Capture phase = 0.10 → 0.85 of overall progress (the rest is
-# concat + upload). Per-segment slice of that band is proportional to
-# segment ticks.
-# Progress is now reported as RENDER-PHASE 0..1 (not stitched into a
-# global 0..1 that smushed render + upload together). The web shows
-# render and upload as two independent bars now: render shows live %
-# while status='rendering', upload renders as an indeterminate spinner
-# while status='uploading'. We don't have real upload bytes-progress
-# (single curl POST, no streaming readback), so the upload bar is
-# intentionally pulse-only. Setup overhead before any segment plays
-# stays at the front of the render bar (BASE=0.05).
+# Render-phase progress 0..1 (web shows render + upload as separate
+# bars; upload is pulse-only since the curl POST has no readback).
+# BASE=0.05 covers setup overhead before any segment plays.
 PROGRESS_BASE=0.05
 PROGRESS_SPAN=0.95
 ELAPSED_TICKS_TOTAL=0
@@ -341,12 +324,10 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     "import json,sys; print(json.load(sys.stdin)[$SEG_IDX]['start_tick'])")
   SEG_END=$(printf '%s' "$CLIP_SEGMENTS" | python3 -c \
     "import json,sys; print(json.load(sys.stdin)[$SEG_IDX]['end_tick'])")
-  # POV target. cs2's spec_player_by_accountid takes the 32-bit
-  # accountid (steamid64 - 76561197960265728). We send the lock
-  # AFTER seeking + lead-in so cs2's freshly-seeked spec target
-  # gets overridden onto the player whose kills we're rendering.
-  # Without this, the demo opens with whoever cs2 was last
-  # spectating, which produces a clip from the wrong POV.
+  # POV target. accountid = steamid64 - 76561197960265728. The lock
+  # is applied AFTER seeking + lead-in so the freshly-seeked target
+  # gets overridden — otherwise the clip opens on whoever cs2 was
+  # last spectating, producing the wrong POV.
   SEG_POV_ACCOUNTID=$(printf '%s' "$CLIP_SEGMENTS" | python3 -c \
     "
 import json,sys

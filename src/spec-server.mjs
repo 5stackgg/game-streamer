@@ -1,88 +1,17 @@
 #!/usr/bin/env node
-// Tiny HTTP control daemon for cs2 spectator actions.
+// HTTP control daemon for cs2 spectator + demo-playback actions.
+// Routes are defined inline with the handlers below.
 //
-// Exposes the small set of inputs an operator (or the 5stack web UI)
-// needs to drive a spectator slot inside the headless game-streamer
-// container — without giving anyone a full remote desktop. All actions
-// are routed via xdotool against the live cs2 window on $DISPLAY.
+// Why bound keys instead of xdotool-typing the dev console: the OpenHud
+// overlay is raised above cs2 so ximagesrc captures both composited.
+// `windowactivate` would restack cs2 above the overlay (Openbox can
+// destroy the overlay window in the process). Instead, every action is
+// pre-bound to a key in cs2's autoexec, and the overlay BrowserWindow
+// is built `focusable: false` so cs2 always holds focus — `xdotool key`
+// (XTest) reaches it directly with no restacking.
 //
-// Routes (all POST, JSON body):
-//
-//   /spec/click          {"button": "left"|"right"}
-//       left = next observer target, right = previous.
-//
-//   /spec/jump           (no body)
-//       Toggles between locked-on a player and free-roam.
-//
-//   /spec/player         {"accountid": <number>}
-//       Switch directly to the spectator target with this accountid
-//       (32-bit Steam ID — steamid64 minus 76561197960265728).
-//
-//   /spec/slot           {"slot": 1..12}
-//       Switch by spectator-slot number using cs2's default digit
-//       binds (1..9, 0, minus, equal — set by resources/observer.cfg).
-//
-//   /spec/autodirector   {"enabled": true|false}
-//       true  -> spec_autodirector 1; spec_mode 5  (cinematic auto-cam)
-//       false -> spec_autodirector 0               (operator drives)
-//
-// Demo-playback routes (only meaningful when run-demo.sh launched cs2):
-//
-//   /demo/toggle               demo_togglepause (cs2-bound key)
-//   /demo/pause                idempotent — only fires the toggle if currently playing
-//   /demo/resume               idempotent — only fires the toggle if currently paused
-//   /demo/seek    {"tick": n}  demo_gototick n  (typed into dev console)
-//   /demo/skip    {"secs": n}  shifts current estimate by n seconds (negative ok)
-//   /demo/speed   {"rate": n}  host_timescale n; uses bound F-keys for the
-//                              presets {0.25,0.5,1,2,4} and typed console
-//                              commands for arbitrary values
-//   /demo/round   {"round": n} demo_gototick <round_n_start_tick>; tick map
-//                              comes from $LOG_DIR/demo-round-ticks.json
-//                              (written by run-demo.sh from $ROUND_TICKS)
-//   GET /demo/state            best-effort {tick, paused, rate, total_ticks,
-//                              tick_rate, last_activity_ms_ago} for the api's
-//                              idle-reaper + the web scrubber's animation
-//
-// How it works (and why it isn't xdotool-typing the dev console):
-//
-// The OpenHud overlay is raised above cs2 in the X stack so ximagesrc
-// captures cs2 + HUD composited together. If we ever `windowactivate`
-// cs2 to make it the keystroke target — the obvious naive way — Openbox
-// restacks cs2 above the overlay, and on this WM can outright destroy
-// the overlay window (the "Overlay" button in the OpenHud admin UI then
-// has to recreate it). With the operator switching players many times
-// per round, that's catastrophic.
-//
-// Instead, every action above is pre-bound to a dedicated key in cs2's
-// autoexec.cfg (written by run-live.sh from the match metadata) and
-// the OpenHud overlay BrowserWindow is built with `focusable: false`
-// (see the sed step in openhud/Dockerfile). Because the overlay can
-// never take keyboard focus, cs2 holds focus continuously from the
-// moment it launches — even though the overlay is stacked above it
-// for compositing. We deliver the key with plain `xdotool key` (XTest)
-// which goes to the focused window, i.e. cs2. No windowactivate, no
-// windowfocus, no restacking, no flicker, no Electron alpha loss.
-//
-// Static binds (mirror the lines in lib/openhud.sh:spec_static_binds_block):
-//   F1 = spec_next        (/spec/click button=left)
-//   F2 = spec_prev        (/spec/click button=right)
-//   F3 = +jump            (/spec/jump)
-//   F4 = autodirector ON  (/spec/autodirector enabled=true)
-//   F5 = autodirector OFF (/spec/autodirector enabled=false)
-//   F6-F12 = per-player slots, written by write_spec_player_binds
-//            from the seeded match metadata (up to 7 lineup players).
-//
-// /spec/slot uses the digit binds set up by resources/observer.cfg
-// (spec_player_<n> slot binds), which are also in cs2 directly — so it
-// only needs windowfocus + key, no autoexec changes.
-//
-// Why a separate daemon (not in OpenHud's Express): OpenHud is the HUD
-// app — keeping cs2 input control out of it preserves the boundary and
-// keeps blast radius small if either side has a bug. The daemon is
-// tiny, stdlib-only (Node http + child_process), no deps to manage.
-//
-// Started by src/flows/setup-steam.sh after Xorg comes up. Logs to
-// $LOG_DIR/spec-server.log via redirect from the start command.
+// Static binds mirror lib/openhud.sh:spec_static_binds_block — change
+// both together. Started by src/flows/setup-steam.sh after Xorg.
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";

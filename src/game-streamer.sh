@@ -1,30 +1,6 @@
 #!/usr/bin/env bash
-# game-streamer — production entry point.
-#
-# Self-contained: only references files under src/. Two flows are kept
-# deliberately separate so we can validate each step against the debug
-# stream before chaining them.
-#
-#   1.  setup-steam            — flow 1: launch Steam (with login),
-#                                register the steam library, disable
-#                                CS2 cloud sync, wait for the IPC pipe.
-#                                Pass --debug to also publish a screen
-#                                capture so you can watch the login.
-#   2.  run-live               — flow 2: -applaunch CS2 (Steam will
-#                                update if needed) and start the match
-#                                capture stream.
-#   2'. run-demo               — flow 2 variant: download a .dem from
-#                                DEMO_URL and play it back via +playdemo.
-#                                Same capture pipeline as run-live.
-#
-# Pass --debug as a top-level flag to publish an on-screen capture to
-# publish:debug for the duration of the flow (watch at
-# https://hls.5stack.gg/debug/). The debug-stream subcommand is also
-# available for ad-hoc start/stop.
-#
-# Required env (load via src/.env, or export beforehand):
-#   STEAM_USER, STEAM_PASSWORD               (setup-steam)
-#   MATCH_ID + (PLAYCAST_URL | CONNECT_ADDR & CONNECT_PASSWORD) (run-live)
+# game-streamer — production entry point. Subcommand list + required
+# env are documented in usage() below.
 
 set -uo pipefail
 SCRIPT_TAG=game-streamer
