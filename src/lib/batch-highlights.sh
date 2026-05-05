@@ -131,9 +131,16 @@ process_batch_jobs() {
   # the api's status='playing' transition fires from spec-server's
   # reportDemoPlayingOnce which schedules the demoui hide and the
   # `demoui_hidden` flag is what tells us "actually toggled".
-  say "waiting for demo-ready signal (GSI + demoui_hidden)"
+  # Sized for the actual signal latency: spec-server hides the demoui
+  # 3s after the first GSI tick, and GSI lands ~5-10s after cs2's
+  # window appears. 45s is comfortably past that with headroom for
+  # slow-pod startup; the first-render capture path tolerates a missed
+  # signal (drops the loading frame in the post-segment validity
+  # check), so the older 90s ceiling just delayed the batch start
+  # under any of the rare misses.
+  say "waiting for demo-ready signal (GSI + demoui_hidden, up to 45s)"
   local i demo_ready=0
-  for i in $(seq 1 90); do
+  for i in $(seq 1 45); do
     local s
     s=$(curl --fail --silent --show-error --max-time 5 \
             "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/state" \
@@ -149,9 +156,9 @@ process_batch_jobs() {
     sleep 1
   done
   if [ "$demo_ready" != "1" ]; then
-    say "WARN demo-ready signal never arrived after 90s — proceeding; first render may capture loading frames"
+    say "WARN demo-ready signal never arrived after 45s — proceeding; first render may capture loading frames"
   else
-    say "demo ready — first render will capture clean frames"
+    say "demo ready (after ${i}s) — first render will capture clean frames"
   fi
 
   local idx

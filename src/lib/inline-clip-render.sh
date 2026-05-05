@@ -480,18 +480,36 @@ fi
 # each segment compound with the fade-in, producing 0.5-1s of dead
 # air per cut). For a frag montage the harder pace of direct cuts
 # reads better and the action stays continuous.
+#
+# Encoder strategy: try `-c copy` first — every segment is already
+# h264/aac (from gst at speed=1, or from the libx264 slowdown pass at
+# speed>1), so a stream copy is bit-perfect and finishes near disk-IO
+# speed instead of a second full 1080p60 encode. Concat-demuxer copy
+# only works when timebase + codec params line up across inputs, and
+# nvh264enc vs x264enc + the slowdown pass can produce mismatched
+# params on some pods. Re-encode is the fallback for that case.
 if [ "$SEG_COUNT" = "1" ]; then
   ONLY_SEG=$(awk -F"'" '/^file/{print $2}' "$SEG_DIR/concat.txt" | head -1)
   mv -f "$ONLY_SEG" "$CLIP_OUT_FILE"
 else
   say "STEP 9: ffmpeg concat ${SEG_COUNT} segments (direct cuts)"
-  if ! ffmpeg -y -hide_banner -loglevel warning \
+  if ffmpeg -y -hide_banner -loglevel warning \
        -f concat -safe 0 -i "$SEG_DIR/concat.txt" \
-       -c:v libx264 -preset veryfast -crf 22 \
-       -c:a aac -b:a 192k \
+       -c copy \
        -movflags +faststart \
-       "$CLIP_OUT_FILE"; then
-    die_failed "ffmpeg concat failed"
+       "$CLIP_OUT_FILE" 2>/dev/null; then
+    say "  concat: stream-copy succeeded (no re-encode)"
+  else
+    rm -f "$CLIP_OUT_FILE"
+    say "  concat: stream-copy refused — falling back to re-encode"
+    if ! ffmpeg -y -hide_banner -loglevel warning \
+         -f concat -safe 0 -i "$SEG_DIR/concat.txt" \
+         -c:v libx264 -preset veryfast -crf 22 \
+         -c:a aac -b:a 192k \
+         -movflags +faststart \
+         "$CLIP_OUT_FILE"; then
+      die_failed "ffmpeg concat failed"
+    fi
   fi
 fi
 rm -rf "$SEG_DIR"

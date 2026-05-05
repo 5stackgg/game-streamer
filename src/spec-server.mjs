@@ -21,13 +21,13 @@ import process from "node:process";
 
 const DISPLAY = process.env.DISPLAY ?? ":0";
 const PORT = parseInt(process.env.SPEC_PORT ?? "1350", 10);
-// Default to loopback only — `/demo/exec` and `/demo/render-clip` can
-// drive arbitrary cs2 console commands and spawn render subprocesses,
-// so reaching this daemon implies full control of the pod's cs2.
-// In-pod callers (run-*.sh, batch-highlights, inline-clip-render) all
-// hit 127.0.0.1; override via SPEC_BIND only when something off-host
-// genuinely needs in (and add auth if so).
-const BIND = process.env.SPEC_BIND ?? "127.0.0.1";
+// Bind to all interfaces. The api reaches us cross-pod via k8s service
+// DNS (`<svc>.<ns>.svc.cluster.local:1350`), which resolves to the pod
+// IP — loopback-only would break that. The cluster network is the
+// trust boundary: only in-cluster pods can route to this port.
+// Sensitive routes (`/demo/exec`, `/demo/render-clip`) are reachable
+// from any in-cluster source by design.
+const BIND = process.env.SPEC_BIND ?? "0.0.0.0";
 
 // Static action -> cs2-bound F-key. Mirror of the binds written by
 // run-live.sh into autoexec.cfg via lib/openhud.sh:spec_static_binds_block.
