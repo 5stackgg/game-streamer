@@ -1,11 +1,10 @@
-name: Build, Push, and Release Plugin
+name: Build
 
 on:
   push:
     branches:
       - "main"
   workflow_dispatch:
-    description: 'build'
 
 jobs:
   build-push-and-release:
