@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-# Flow 2 (demo variant) — launch CS2 against a downloaded .dem file and
-# start the match-capture stream. Mirrors run-live.sh; the only differences
-# are: (a) pull the demo from DEMO_URL, (b) `+playdemo` instead of
-# `+connect`/`+playcast`, (c) demo-control keybinds in autoexec.
-#
-# Prerequisite: Steam must already be logged in (run flow 1 first).
-#
-# Required env:
-#   MATCH_ID
-#   MATCH_MAP_ID    — for telemetry / job naming; cosmetic in this script
-#   DEMO_URL        — pre-signed S3 GET for the .dem (api/src/demos issues this)
-#
-# Optional env:
-#   ROUND_TICKS     — JSON [{round,start_tick,end_tick},...] from the
-#                     demo-parser. Not consumed here directly — passed
-#                     through env so spec-server can read it for
-#                     /demo/round routing without an extra round-trip.
-#   DEMO_FORMAT     — "auto" (default) | "dem" — leave at auto.
+# Flow 2 (demo variant) — download DEMO_URL and launch cs2 with
+# +playdemo. Mirrors run-live.sh otherwise. Prerequisite: flow 1.
+# Required env: MATCH_ID, DEMO_URL.
 
 set -uo pipefail
 SCRIPT_TAG=run-demo
@@ -371,18 +356,10 @@ else
   log "OpenHud not running — skipping overlay positioning"
 fi
 
-# Start streaming AS SOON AS cs2 has its window + the OpenHud overlay
-# is on top. Previously we waited for the demo-load + demo-playing
-# log signals before starting the capture, which added ~60–90s of
-# the demo silently advancing while the operator watched a "booting"
-# UI. The .dem starts playing immediately on cs2 window-up, so any
-# delay between then and status=live is wasted demo time the user
-# can never get back.
-#
-# The demoui-hide + idempotent playdemo fallback now run in the
-# background — they don't gate going-live anymore. Worst case the
-# operator sees the cs2 demoui panel for a few extra seconds while
-# the stream catches up; that beats missing the first 60s of action.
+# Start streaming as soon as cs2 has a window + overlay is on top.
+# Demo plays from cs2 window-up; any wait here is wasted demo time
+# the operator can't recover. demoui-hide + playdemo fallback are
+# backgrounded so they don't gate going-live.
 CS2_LOG_TAIL="${CS2_LOG_TAIL:-$STEAM_LIBRARY/steam/logs/console-linux.txt}"
 
 say "5c. start match capture stream"
@@ -393,14 +370,8 @@ report_status status=live \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
   "playback_mode=demo"
 
-# No background demoui-hide watcher needed — `demoui 0` in HIDE_UI_CMDS
-# stops cs2 from auto-opening the panel on playdemo. The manual
-# /demo/demoui endpoint (web "Toggle CS2 demo HUD" button) is still
-# wired for cases where the operator wants the panel visible.
-
-# Liveness watchdog: if cs2 dies any time after we kicked playdemo,
-# surface it loudly. Without this, a silent crash leaves the pod in
-# a "status=live but no frames" state until the operator notices.
+# Liveness watchdog: surface a silent cs2 crash loudly so the pod
+# doesn't sit in "status=live but no frames".
 (
   while kill -0 "$CS2_PID" 2>/dev/null; do
     sleep 5
