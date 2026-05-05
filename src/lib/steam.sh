@@ -177,6 +177,15 @@ install_cs2_via_steamcmd() {
   log "  this is a ~57 GB download on a fresh install"
   mkdir -p "$CS2_DIR"
 
+  # Capture the steamcmd transcript so we can pattern-match failures
+  # below — auth errors come out on stdout (e.g. "ERROR (Invalid
+  # Password)") and we want to surface them as a specific operator-
+  # actionable message via report_status, not the generic "no
+  # appmanifest" fallthrough. `tee` keeps the live log in k8s stdout
+  # so behaviour for healthy runs is unchanged.
+  local steamcmd_log="$LOG_DIR/steamcmd-cs2-install.log"
+  : > "$steamcmd_log"
+
   # Call steamcmd.sh directly — the /usr/local/bin/steamcmd shim resolves
   # its own dir wrong via symlink and can't find linux32/.
   /opt/steamcmd/steamcmd.sh \
@@ -184,7 +193,7 @@ install_cs2_via_steamcmd() {
     +force_install_dir "$CS2_DIR" \
     +login "$STEAM_USER" "$STEAM_PASSWORD" \
     +app_update 730 validate \
-    +quit
+    +quit 2>&1 | tee -a "$steamcmd_log"
 
   if [ ! -f "$manifest" ] && [ -f "$CS2_DIR/steamapps/appmanifest_730.acf" ]; then
     # steamcmd put the manifest inside the install dir; lift it to the
@@ -200,9 +209,25 @@ install_cs2_via_steamcmd() {
     local bid
     bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
     log "CS2 install OK — ${bid:-buildid unknown}"
-  else
-    die "steamcmd finished but no $manifest — install failed"
+    return 0
   fi
+
+  # No manifest. Walk the captured transcript for known auth failures
+  # so the match_streams row gets a message the operator can act on
+  # ("verify steam username and password") rather than the generic
+  # "install failed". Pattern list mirrors the EResult strings
+  # steamcmd prints — extend as new failure modes show up in the wild.
+  if grep -qE 'ERROR \(Invalid Password\)|FAILED login.*Invalid Password|FAILED \(Invalid Password\)' "$steamcmd_log"; then
+    die "Steam login rejected — verify STEAM_USER and STEAM_PASSWORD on the API are correct for the streamer Steam account."
+  fi
+  if grep -qE 'Account Logon Denied|Account Login Denied Need Two Factor|RateLimitExceeded|Rate Limit Exceeded' "$steamcmd_log"; then
+    die "Steam login blocked by Steam Guard / rate limit — disable Steam Guard on the streamer Steam account or wait a few minutes and retry."
+  fi
+  if grep -qE 'No subscription|No license' "$steamcmd_log"; then
+    die "Steam account lacks a CS2 license — the streamer Steam account must own (or have a free license for) CS2 (appid 730)."
+  fi
+
+  die "steamcmd finished but no $manifest — install failed (see steamcmd-cs2-install.log in pod logs)"
 }
 
 # Pre-download a CS2 workshop map via steamcmd. Without this, +playdemo
