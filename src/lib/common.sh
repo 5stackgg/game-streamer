@@ -38,12 +38,16 @@ export SRC_DIR LIB_DIR FLOWS_DIR
 # convar block in cs2_perf_autoexec_block (which is the actual source of
 # truth for low quality today — the .txt files are stubs).
 : "${CS2_GRAPHICS_PRESET:=low}"
+# CS2 fps cap — used by cs2-perf.sh in the autoexec fps_max convar and
+# surfaced in the apply_cs2_video_preset log line. 60 keeps the encoder
+# pipeline steady; bump per-pod via env if a higher cap is needed.
+: "${CS2_FPS_MAX:=60}"
 mkdir -p "$LOG_DIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
 export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \
        MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE LOG_DIR XORG_CONFIG \
-       CS2_GRAPHICS_PRESET
+       CS2_GRAPHICS_PRESET CS2_FPS_MAX
 
 
 say()  { printf '\n=== %s ===\n' "$*"; }
