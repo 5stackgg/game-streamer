@@ -1,20 +1,6 @@
 #!/usr/bin/env bash
 # Flow 1 — bring up Steam in a state where CS2 can be launched/updated.
-#
-# What it does (idempotent, safe to re-run):
-#   * Ensures Xorg + openbox are up
-#   * Symlinks $STEAM_HOME into the cache mount so Steam state persists
-#   * Fixes ownership/perms + nukes stale package cache
-#   * Registers $STEAM_LIBRARY as a Steam library folder
-#   * Installs/updates CS2 via steamcmd directly
-#   * Disables Steam Cloud sync at every known location
-#   * Launches the Steam UI with login prefilled
-#   * Waits for the Steam IPC pipe + main UI window
-#
-# After this, watch https://hls.5stack.gg/${DEBUG_STREAM_ID:-debug}/ until
-# you see the friends list / main Steam window — then run flow 2 (run-live).
-#
-# Required env: STEAM_USER, STEAM_PASSWORD
+# Idempotent. Required env: STEAM_USER, STEAM_PASSWORD.
 
 set -uo pipefail
 SCRIPT_TAG=setup-steam
@@ -69,7 +55,16 @@ start_spec_server
 # safe; run-live re-raises it after cs2's window appears anyway.
 say "1c. picom (compositor) + OpenHud server (background)"
 OPENHUD_DEFERRED=0
-if [ -x "$OPENHUD_BIN" ]; then
+# Auto-highlight batch renders skip OpenHud entirely. The batch pod's
+# job is to record per-player frag clips with a clean cs2 view —
+# OpenHud's spectator overlay was making the rendered mp4s carry the
+# scoreboard / killfeed widgets we don't want baked into the clip
+# (operators do their own overlays in post). This is the ONLY pod mode
+# we want stripped: live spec sessions, demo viewers, and one-off clip
+# renders all still want the HUD.
+if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
+  log "CLIP_BATCH_MODE=1 — skipping OpenHud (auto-highlights render without overlay)"
+elif [ -x "$OPENHUD_BIN" ]; then
   start_picom || warn "continuing without picom (HUD background won't be transparent)"
   start_openhud
   OPENHUD_DEFERRED=1
@@ -177,18 +172,10 @@ if [ "$OPENHUD_DEFERRED" = "1" ]; then
   fi
 fi
 
-# Kick off the match-cfg prep (OpenHud GSI cfg + api DB seed) in the
-# background so it overlaps the 30-50s Steam UI wait. None of this
-# work depends on Steam.
-#
-# Three outcomes — run-live picks one of these markers:
-#   match-cfgs-prepared  — full prep ran (GSI + seed)
-#   match-cfgs-failed    — prep started but errored, retry inline
-#   match-cfgs-skipped   — we deliberately didn't spawn (no MATCH_ID
-#                          or no API_BASE). The skipped marker is
-#                          critical: without it run-live used to
-#                          wait 10s for a marker that would never
-#                          come, then fall through anyway.
+# Background match-cfg prep (OpenHud GSI cfg + api DB seed) overlaps
+# the 30-50s Steam UI wait. Marker files signal run-live: -prepared
+# (full run), -failed (retry inline), -skipped (no MATCH_ID/API_BASE —
+# critical so run-live doesn't wait for a marker that never comes).
 rm -f "$LOG_DIR/match-cfgs-prepared" \
       "$LOG_DIR/match-cfgs-failed" \
       "$LOG_DIR/match-cfgs-skipped"

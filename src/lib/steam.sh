@@ -271,9 +271,7 @@ cfg_path, appid = sys.argv[1], sys.argv[2]
 p = pathlib.Path(cfg_path)
 src = p.read_text()
 
-# ---------------------------------------------------------------------
 # Case 1: existing <appid> block — flip or insert cloudenabled inside.
-# ---------------------------------------------------------------------
 pat = re.compile(r'(^|\n)([ \t]*)"' + re.escape(appid) + r'"[ \t\r\n]*\{', re.MULTILINE)
 m = pat.search(src)
 if m:
@@ -306,9 +304,7 @@ if m:
         print(f"  {cfg_path}: inserted CloudEnabled=0 in existing {appid} block")
     sys.exit(0)
 
-# ---------------------------------------------------------------------
 # Case 2: existing "apps" block — insert <appid> block inside.
-# ---------------------------------------------------------------------
 apps = re.search(r'(\n[ \t]*)"apps"[ \t\r\n]*\{', src)
 if apps:
     indent = apps.group(1).rstrip("\n")
@@ -320,11 +316,9 @@ if apps:
     print(f"  {cfg_path}: inserted new {appid} block with CloudEnabled=0")
     sys.exit(0)
 
-# ---------------------------------------------------------------------
 # Case 3: no "apps" block at all — synthesize the whole structure under
 # the Steam block. sharedconfig.vdf is nearly empty before the first
-# CS2 launch, so this is the case that hit you.
-# ---------------------------------------------------------------------
+# CS2 launch.
 def find_block_open(src, key, start=0):
     """Return offset right after the `{` of `"key" {` (or -1)."""
     pat = re.compile(r'"' + re.escape(key) + r'"[ \t\r\n]*\{')
@@ -1177,33 +1171,12 @@ print_full_debug() {
   df -h /mnt/game-streamer / "$STEAM_HOME" 2>/dev/null | sed 's/^/  /' || true
 }
 
-# Fix the persisted-state ownership/permissions bug that prevents Steam
-# from creating its update cache.
-#
-# Symptom: bootstrap_log.txt repeats:
-#   Error: Couldn't create cache directory /root/.local/share/Steam/package, got error 13
-#   Shutdown
-# Steam shuts down before webhelper spawns → no UI ever appears.
-#
-# Root cause: $STEAM_HOME is host-mounted, and at some point a process
-# running as a different uid (we saw 1000:1000 on the leftover .crash
-# file) wrote to it. Steam's pressure-vessel sandbox now can't write
-# the package dir under whatever effective uid bwrap maps it to.
-#
-# The package dir is Steam's update cache — safe to nuke; Steam
-# recreates it on next start.
-# Make $STEAM_HOME a symlink into the cache mount so Steam's state
-# persists across pod restarts WITHOUT a second bind mount on
-# $STEAM_HOME (which would create EXDEV on Steam self-update — see
-# fix_steam_perms for the failure mode). After this:
-#   /root/.local/share/Steam   ->   /mnt/game-streamer/steam
-# Steam reads/writes via the canonical $HOME path; everything resolves
-# to one filesystem (the cache mount), so rename(2) always succeeds.
-#
-# On first ever run we migrate any pre-existing $STEAM_HOME content
-# into the target. If both have content (e.g. a prior pod populated
-# the cache and a new pod's image dropped a fresh empty Steam dir),
-# the persisted cache wins.
+# Make $STEAM_HOME a symlink into the cache mount so state persists
+# across pod restarts without a second bind mount (which causes EXDEV
+# on Steam self-update — see fix_steam_perms). Single filesystem means
+# rename(2) always succeeds. On first run we migrate any pre-existing
+# $STEAM_HOME content; if both sides have content, the persisted cache
+# wins.
 ensure_steam_home_persist() {
   local target="$STEAM_LIBRARY/steam"
   mkdir -p "$target"

@@ -1,97 +1,32 @@
 #!/usr/bin/env node
-// Tiny HTTP control daemon for cs2 spectator actions.
+// HTTP control daemon for cs2 spectator + demo-playback actions.
+// Routes are defined inline with the handlers below.
 //
-// Exposes the small set of inputs an operator (or the 5stack web UI)
-// needs to drive a spectator slot inside the headless game-streamer
-// container — without giving anyone a full remote desktop. All actions
-// are routed via xdotool against the live cs2 window on $DISPLAY.
+// Why bound keys instead of xdotool-typing the dev console: the OpenHud
+// overlay is raised above cs2 so ximagesrc captures both composited.
+// `windowactivate` would restack cs2 above the overlay (Openbox can
+// destroy the overlay window in the process). Instead, every action is
+// pre-bound to a key in cs2's autoexec, and the overlay BrowserWindow
+// is built `focusable: false` so cs2 always holds focus — `xdotool key`
+// (XTest) reaches it directly with no restacking.
 //
-// Routes (all POST, JSON body):
-//
-//   /spec/click          {"button": "left"|"right"}
-//       left = next observer target, right = previous.
-//
-//   /spec/jump           (no body)
-//       Toggles between locked-on a player and free-roam.
-//
-//   /spec/player         {"accountid": <number>}
-//       Switch directly to the spectator target with this accountid
-//       (32-bit Steam ID — steamid64 minus 76561197960265728).
-//
-//   /spec/slot           {"slot": 1..12}
-//       Switch by spectator-slot number using cs2's default digit
-//       binds (1..9, 0, minus, equal — set by resources/observer.cfg).
-//
-//   /spec/autodirector   {"enabled": true|false}
-//       true  -> spec_autodirector 1; spec_mode 5  (cinematic auto-cam)
-//       false -> spec_autodirector 0               (operator drives)
-//
-// Demo-playback routes (only meaningful when run-demo.sh launched cs2):
-//
-//   /demo/toggle               demo_togglepause (cs2-bound key)
-//   /demo/pause                idempotent — only fires the toggle if currently playing
-//   /demo/resume               idempotent — only fires the toggle if currently paused
-//   /demo/seek    {"tick": n}  demo_gototick n  (typed into dev console)
-//   /demo/skip    {"secs": n}  shifts current estimate by n seconds (negative ok)
-//   /demo/speed   {"rate": n}  host_timescale n; uses bound F-keys for the
-//                              presets {0.25,0.5,1,2,4} and typed console
-//                              commands for arbitrary values
-//   /demo/round   {"round": n} demo_gototick <round_n_start_tick>; tick map
-//                              comes from $LOG_DIR/demo-round-ticks.json
-//                              (written by run-demo.sh from $ROUND_TICKS)
-//   GET /demo/state            best-effort {tick, paused, rate, total_ticks,
-//                              tick_rate, last_activity_ms_ago} for the api's
-//                              idle-reaper + the web scrubber's animation
-//
-// How it works (and why it isn't xdotool-typing the dev console):
-//
-// The OpenHud overlay is raised above cs2 in the X stack so ximagesrc
-// captures cs2 + HUD composited together. If we ever `windowactivate`
-// cs2 to make it the keystroke target — the obvious naive way — Openbox
-// restacks cs2 above the overlay, and on this WM can outright destroy
-// the overlay window (the "Overlay" button in the OpenHud admin UI then
-// has to recreate it). With the operator switching players many times
-// per round, that's catastrophic.
-//
-// Instead, every action above is pre-bound to a dedicated key in cs2's
-// autoexec.cfg (written by run-live.sh from the match metadata) and
-// the OpenHud overlay BrowserWindow is built with `focusable: false`
-// (see the sed step in openhud/Dockerfile). Because the overlay can
-// never take keyboard focus, cs2 holds focus continuously from the
-// moment it launches — even though the overlay is stacked above it
-// for compositing. We deliver the key with plain `xdotool key` (XTest)
-// which goes to the focused window, i.e. cs2. No windowactivate, no
-// windowfocus, no restacking, no flicker, no Electron alpha loss.
-//
-// Static binds (mirror the lines in lib/openhud.sh:spec_static_binds_block):
-//   F1 = spec_next        (/spec/click button=left)
-//   F2 = spec_prev        (/spec/click button=right)
-//   F3 = +jump            (/spec/jump)
-//   F4 = autodirector ON  (/spec/autodirector enabled=true)
-//   F5 = autodirector OFF (/spec/autodirector enabled=false)
-//   F6-F12 = per-player slots, written by write_spec_player_binds
-//            from the seeded match metadata (up to 7 lineup players).
-//
-// /spec/slot uses the digit binds set up by resources/observer.cfg
-// (spec_player_<n> slot binds), which are also in cs2 directly — so it
-// only needs windowfocus + key, no autoexec changes.
-//
-// Why a separate daemon (not in OpenHud's Express): OpenHud is the HUD
-// app — keeping cs2 input control out of it preserves the boundary and
-// keeps blast radius small if either side has a bug. The daemon is
-// tiny, stdlib-only (Node http + child_process), no deps to manage.
-//
-// Started by src/flows/setup-steam.sh after Xorg comes up. Logs to
-// $LOG_DIR/spec-server.log via redirect from the start command.
+// Static binds mirror lib/openhud.sh:spec_static_binds_block — change
+// both together. Started by src/flows/setup-steam.sh after Xorg.
 
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
 const DISPLAY = process.env.DISPLAY ?? ":0";
 const PORT = parseInt(process.env.SPEC_PORT ?? "1350", 10);
+// Bind to all interfaces. The api reaches us cross-pod via k8s service
+// DNS (`<svc>.<ns>.svc.cluster.local:1350`), which resolves to the pod
+// IP — loopback-only would break that. The cluster network is the
+// trust boundary: only in-cluster pods can route to this port.
+// Sensitive routes (`/demo/exec`, `/demo/render-clip`) are reachable
+// from any in-cluster source by design.
 const BIND = process.env.SPEC_BIND ?? "0.0.0.0";
 
 // Static action -> cs2-bound F-key. Mirror of the binds written by
@@ -127,6 +62,15 @@ const DEMO_ROUND_TICKS_PATH =
   process.env.DEMO_ROUND_TICKS_PATH ??
   path.join(process.env.LOG_DIR ?? "/tmp/game-streamer", "demo-round-ticks.json");
 
+// autoexec binds BACKSPACE → `exec 5stack_exec`. execCfgCommand
+// writes the cmd to this file then sends BACKSPACE. Pre-created empty
+// by run-demo.sh.
+const CS2_CFG_DIR =
+  process.env.CS2_CFG_DIR ??
+  (process.env.CS2_DIR ? `${process.env.CS2_DIR}/game/csgo/cfg` : null);
+const EXEC_CFG_PATH = CS2_CFG_DIR ? `${CS2_CFG_DIR}/5stack_exec.cfg` : null;
+const EXEC_CFG_KEY = "BackSpace";
+
 
 // Demo session bookkeeping for tick estimation + idle-timeout. Held in
 // memory for the life of the daemon (which is the life of the pod).
@@ -160,6 +104,23 @@ const gsiState = {
   roundPhase: null,      // freezetime | live | over
   roundNumber: null,     // 0-indexed CS2 demo round counter
   spectatedSteamId: null,
+  // Slot → player snapshot derived from GSI's `allplayers` block.
+  // `observer_slot` is what cs2 binds to the number-row digit keys
+  // (1..9, 0, minus, equal). When the spec target dies and cs2
+  // auto-switches to a teammate, observer_slot of the survivors
+  // doesn't change — only `spectatedSteamId` updates. So slot 1
+  // is always the same player, but they may be dead/alive.
+  // Shape: Array<{slot, steam_id, name, team: "T"|"CT", alive, health}>
+  // Empty until the first GSI tick lands.
+  specSlots: [],
+  // Team names from GSI's map.team_{ct,t}.name — set in cs2 by the
+  // demo file (mp_teamname_1/2). Source of truth for team labels;
+  // the api's lineup names can drift from the actual demo when a
+  // demo from a different match was loaded against a match_map row.
+  teamCtName: null,
+  teamTName: null,
+  teamCtScore: 0,
+  teamTScore: 0,
 };
 
 // One-shot "tell the api the demo is actually playing now" beacon
@@ -169,18 +130,26 @@ const gsiState = {
 // we don't have to time anything: GSI lands AFTER the demo panel
 // has rendered, so F11 reliably toggles it from visible → hidden.
 let demoPlayingReported = false;
+// Flips true once the demoui-hide setTimeout has fired AND the
+// keystroke has been delivered to cs2. Surfaced in /demo/state.gsi
+// as `demoui_hidden`, which the batch-highlights pod polls before
+// kicking off the first render — the previous "wait for GSI then
+// sleep 4s" was flaky under lag, this is the deterministic signal.
+let demouiHidden = false;
 async function reportDemoPlayingOnce() {
   if (demoPlayingReported) return;
   demoPlayingReported = true;
-  // One console round-trip does both:
-  //   1. `demoui false` — hide cs2's auto-opened Panorama panel.
-  //   2. `demo_togglepause` — pause the demo at tick 0 so the
-  //      operator (not cs2's autoplay) drives playback. Lets the
-  //      web side render a known starting state and sync the
-  //      timeline scrubber with cs2's actual position from frame 1.
-  void sendConsoleCommand("demoui false; demo_togglepause").catch(
-    () => undefined,
-  );
+  // Pause immediately so the user lands on a known frame; defer the
+  // demoui hide so the panel has time to actually render before we
+  // toggle it (toggling before paint is a no-op).
+  void execCfgCommand("demo_pause").catch(() => undefined);
+  setTimeout(() => {
+    void execCfgCommand("demoui")
+      .catch(() => undefined)
+      .finally(() => {
+        demouiHidden = true;
+      });
+  }, 3000);
   // Mirror the pause locally so the tick estimator + scrubber
   // freeze at tick 0 instead of advancing as if playback had
   // started. The web's first /demo/state read after this will see
@@ -224,7 +193,7 @@ async function reportDemoPlayingOnce() {
       return;
     }
     process.stderr.write(
-      `[spec-server] reported status=playing + sent F11 for session ${sessionId}\n`,
+      `[spec-server] reported status=playing + sent demoui+demo_pause for session ${sessionId}\n`,
     );
   } catch (err) {
     process.stderr.write(
@@ -428,6 +397,61 @@ async function sendConsoleCommand(cmd) {
   return true;
 }
 
+// Fire any console command by writing it to 5stack_exec.cfg + sending
+// BACKSPACE (autoexec binds it to `exec 5stack_exec`). One cmd per
+// line — `;`-joined lines were being mis-parsed across cs2 builds.
+//
+// Concurrent calls are serialised through `execCfgChain`. Without the
+// mutex, two in-flight calls can interleave: call A renames its file
+// in, call B renames its (different) file in, call A's BACKSPACE fires
+// → cs2 reads B's contents. The 30ms tail delay holds the lock just
+// past the xdotool return so cs2 has time to actually read the cfg
+// before the next writer races in.
+let execCfgChain = Promise.resolve();
+async function execCfgCommand(cmd) {
+  const prev = execCfgChain;
+  let release;
+  execCfgChain = new Promise((r) => {
+    release = r;
+  });
+  try {
+    await prev.catch(() => undefined);
+    return await execCfgCommandImpl(cmd);
+  } finally {
+    setTimeout(release, 30);
+  }
+}
+
+async function execCfgCommandImpl(cmd) {
+  if (!EXEC_CFG_PATH) {
+    process.stderr.write(
+      `[spec-server] execCfgCommand: CS2_CFG_DIR not set — falling back to sendConsoleCommand\n`,
+    );
+    return sendConsoleCommand(cmd);
+  }
+  if ((await findCs2Window()) === null) return false;
+  const lines = cmd
+    .split(";")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const body = lines.join("\n") + "\n";
+  try {
+    const tmp = `${EXEC_CFG_PATH}.tmp`;
+    writeFileSync(tmp, body, "utf8");
+    renameSync(tmp, EXEC_CFG_PATH);
+  } catch (err) {
+    process.stderr.write(
+      `[spec-server] execCfgCommand: write failed (${(err && err.message) || err}) — falling back to typed console\n`,
+    );
+    return sendConsoleCommand(cmd);
+  }
+  process.stderr.write(
+    `[spec-server] execCfgCommand wrote ${lines.length} cmd(s): ${lines.map((l) => `\`${l}\``).join(" ")}\n`,
+  );
+  await run(["xdotool", "key", "--clearmodifiers", EXEC_CFG_KEY]);
+  return true;
+}
+
 /**
  * Read the round_ticks sidecar (written by run-demo.sh from $ROUND_TICKS).
  * @returns {Array<{round: number, start_tick: number, end_tick: number}>}
@@ -549,6 +573,16 @@ const server = createServer(async (req, res) => {
               round_number: gsiState.roundNumber,
               spectated_steam_id: gsiState.spectatedSteamId,
               last_received_ms_ago: Date.now() - gsiState.lastReceivedMs,
+              spec_slots: gsiState.specSlots,
+              team_ct_name: gsiState.teamCtName,
+              team_t_name: gsiState.teamTName,
+              team_ct_score: gsiState.teamCtScore,
+              team_t_score: gsiState.teamTScore,
+              // True once the post-GSI demoui-toggle has been
+              // delivered to cs2. The batch-highlights pod waits on
+              // this before starting its first capture so we don't
+              // record the demo panorama panel.
+              demoui_hidden: demouiHidden,
             }
           : null,
       });
@@ -663,10 +697,15 @@ const server = createServer(async (req, res) => {
     }
 
     if (url === "/demo/pause") {
-      // Idempotent — only send the key if we believe we're playing.
-      // Accidentally double-toggling would actually unpause.
       let ok = true;
-      if (!demoState.paused) {
+      if (body.force === true) {
+        ok = await execCfgCommand("demo_pause");
+        if (ok) {
+          demoState.lastTickAtSeek = estimateCurrentTick();
+          demoState.paused = true;
+          demoState.lastSeekRealMs = Date.now();
+        }
+      } else if (!demoState.paused) {
         ok = await sendKey(KEY_DEMO_TOGGLE);
         if (ok) {
           demoState.lastTickAtSeek = estimateCurrentTick();
@@ -676,13 +715,19 @@ const server = createServer(async (req, res) => {
       }
       bumpActivity();
       sendJson(res, ok ? 200 : 503, ok ? { ok, paused: true } : { error: "cs2 not running" });
-      log(`-> ${ok ? 200 : 503} demo/pause`);
+      log(`-> ${ok ? 200 : 503} demo/pause${body.force === true ? " (force)" : ""}`);
       return;
     }
 
     if (url === "/demo/resume") {
       let ok = true;
-      if (demoState.paused) {
+      if (body.force === true) {
+        ok = await execCfgCommand("demo_resume");
+        if (ok) {
+          demoState.paused = false;
+          demoState.lastSeekRealMs = Date.now();
+        }
+      } else if (demoState.paused) {
         ok = await sendKey(KEY_DEMO_TOGGLE);
         if (ok) {
           demoState.paused = false;
@@ -691,7 +736,7 @@ const server = createServer(async (req, res) => {
       }
       bumpActivity();
       sendJson(res, ok ? 200 : 503, ok ? { ok, paused: false } : { error: "cs2 not running" });
-      log(`-> ${ok ? 200 : 503} demo/resume`);
+      log(`-> ${ok ? 200 : 503} demo/resume${body.force === true ? " (force)" : ""}`);
       return;
     }
 
@@ -702,14 +747,30 @@ const server = createServer(async (req, res) => {
         log("-> 400 demo/seek bad tick");
         return;
       }
-      const ok = await sendConsoleCommand(`demo_gototick ${tick}`);
+      let cmd = `demo_gototick ${tick}`;
+      let nextPaused = demoState.paused;
+      if (body.pause_after === true) {
+        cmd = `demo_gototick ${tick} 0 1`;
+        nextPaused = true;
+      } else if (body.pause_after === false) {
+        cmd = `demo_gototick ${tick} 0 0`;
+        nextPaused = false;
+      }
+      const ok = await execCfgCommand(cmd);
       if (ok) {
         demoState.lastTickAtSeek = tick;
         demoState.lastSeekRealMs = Date.now();
+        demoState.paused = nextPaused;
         bumpActivity();
       }
-      sendJson(res, ok ? 200 : 503, ok ? { ok, tick } : { error: "cs2 not running" });
-      log(`-> ${ok ? 200 : 503} demo/seek tick=${tick}`);
+      sendJson(
+        res,
+        ok ? 200 : 503,
+        ok
+          ? { ok, tick, paused: nextPaused }
+          : { error: "cs2 not running" },
+      );
+      log(`-> ${ok ? 200 : 503} demo/seek tick=${tick} cmd="${cmd}"`);
       return;
     }
 
@@ -733,8 +794,8 @@ const server = createServer(async (req, res) => {
           0,
           estimateCurrentTick() + Math.round(secs * demoState.tickRate),
         );
-        ok = await sendConsoleCommand(`demo_gototick ${target}`);
-        via = "console";
+        ok = await execCfgCommand(`demo_gototick ${target}`);
+        via = "exec-cfg";
       }
       if (ok) {
         // Estimator drift: bump tick by approximation. Real tick will
@@ -766,12 +827,10 @@ const server = createServer(async (req, res) => {
       // continuous across the transition.
       demoState.lastTickAtSeek = estimateCurrentTick();
       demoState.lastSeekRealMs = Date.now();
-      // Prefer the bound F-key for a known preset (no console flash);
-      // fall back to typed `host_timescale <rate>` for arbitrary values.
       const presetKey = SPEED_KEY_BY_RATE[String(clamped)];
       const ok = presetKey
         ? await sendKey(presetKey)
-        : await sendConsoleCommand(`host_timescale ${clamped}`);
+        : await execCfgCommand(`host_timescale ${clamped}`);
       if (ok) {
         demoState.rate = clamped;
         bumpActivity();
@@ -786,17 +845,21 @@ const server = createServer(async (req, res) => {
     }
 
     if (url === "/demo/reload") {
-      // Type `playdemo $DEMO_FILE` via the dev console. The operator
-      // clicks "Toggle CS2 demo HUD" manually after reload if they
-      // want the panel hidden again — auto-toggle was racy against
-      // the post-reload panel re-render. Trade-off accepted.
-      const ok = await sendConsoleCommand(
+      const ok = await execCfgCommand(
         `playdemo /tmp/game-streamer/demo.dem`,
       );
       if (ok) {
         demoState.lastTickAtSeek = 0;
         demoState.lastSeekRealMs = Date.now();
         demoState.paused = false;
+        // Re-arm the post-GSI demoui-hide path. cs2 re-shows the
+        // panorama panel on `playdemo`, and the next GSI tick is what
+        // tells us the demo is loaded again — without resetting these
+        // we'd answer `demoui_hidden=true` against a panel that's now
+        // back on screen, and the batch-highlights pod would record
+        // the panel into its first capture.
+        demoPlayingReported = false;
+        demouiHidden = false;
         bumpActivity();
       }
       sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
@@ -830,6 +893,7 @@ const server = createServer(async (req, res) => {
       const map = body?.map ?? {};
       const round = body?.round ?? {};
       const player = body?.player ?? {};
+      const allPlayers = body?.allplayers ?? null;
       const prevMapPhase = gsiState.mapPhase;
       const prevRoundPhase = gsiState.roundPhase;
       const wasReceiving = gsiState.lastReceivedMs > 0;
@@ -842,6 +906,43 @@ const server = createServer(async (req, res) => {
         typeof map.round === "number" ? map.round : null;
       gsiState.spectatedSteamId =
         typeof player.steamid === "string" ? player.steamid : null;
+      // Team names + scores ride along on `map`. cs2 sets these from
+      // the demo's mp_teamname_1/2 cvars, so they reflect the demo
+      // file rather than whatever the api thinks the match was.
+      gsiState.teamCtName =
+        typeof map?.team_ct?.name === "string" ? map.team_ct.name : null;
+      gsiState.teamTName =
+        typeof map?.team_t?.name === "string" ? map.team_t.name : null;
+      gsiState.teamCtScore = Number(map?.team_ct?.score ?? 0) || 0;
+      gsiState.teamTScore = Number(map?.team_t?.score ?? 0) || 0;
+      // Build the slot snapshot. `allplayers` is keyed by steamid64 and
+      // each entry has `observer_slot` — in CS2 GSI this is 0-indexed,
+      // i.e. the player on key "1" reports observer_slot=0, key "2"
+      // reports 1, ..., key "0" (the 10th player) reports 9. cs2's
+      // built-in digit keybinds drive `spec_player <slot+1>`, so we
+      // simply add 1 to land on the 1..10 numbering the buttons fire.
+      if (allPlayers && typeof allPlayers === "object") {
+        const slots = [];
+        for (const [steamId, p] of Object.entries(allPlayers)) {
+          if (!p || typeof p !== "object") continue;
+          const raw = p.observer_slot;
+          if (typeof raw !== "number") continue;
+          const slot = raw + 1;
+          if (slot < 1 || slot > 12) continue;
+          const team = p.team === "T" || p.team === "CT" ? p.team : null;
+          const health = Number(p.state?.health ?? 0);
+          slots.push({
+            slot,
+            steam_id: steamId,
+            name: typeof p.name === "string" ? p.name : null,
+            team,
+            alive: health > 0,
+            health,
+          });
+        }
+        slots.sort((a, b) => a.slot - b.slot);
+        gsiState.specSlots = slots;
+      }
       bumpActivity();
       sendJson(res, 200, { ok: true });
       // Only fire the "playing" beacon once we have REAL game data.
@@ -871,6 +972,105 @@ const server = createServer(async (req, res) => {
             `round=${gsiState.roundNumber ?? "?"}/${gsiState.roundPhase ?? "?"}`,
         );
       }
+      return;
+    }
+
+    if (url === "/demo/exec") {
+      const cmd = typeof body.cmd === "string" ? body.cmd : "";
+      if (!cmd.trim()) {
+        sendJson(res, 400, { error: "cmd (string) required" });
+        log("-> 400 demo/exec missing cmd");
+        return;
+      }
+      const ok = await execCfgCommand(cmd);
+      bumpActivity();
+      sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
+      log(`-> ${ok ? 200 : 503} demo/exec (${cmd.length} chars)`);
+      return;
+    }
+
+    if (url === "/demo/render-clip") {
+      const jobId = String(body.job_id ?? "");
+      const token = String(body.token ?? "");
+      const apiBase = String(body.api_base ?? "");
+      const outputDims = String(body.output_dims ?? "1920x1080");
+      const outputFps = Number.parseInt(body.output_fps, 10) || 60;
+      const renderSpeedRaw = Number.parseInt(body.render_speed, 10);
+      const renderSpeed =
+        Number.isFinite(renderSpeedRaw) && renderSpeedRaw >= 1
+          ? Math.min(renderSpeedRaw, 4)
+          : 2;
+      // Accept either `segments: [{start_tick,end_tick}, ...]` (the
+      // multi-segment editor's payload) or the legacy
+      // start_tick/end_tick pair (older callers + scripts). Normalise
+      // to a clean array before serialising for the bash script.
+      let segments = Array.isArray(body.segments) ? body.segments : null;
+      if (!segments && body.start_tick != null && body.end_tick != null) {
+        segments = [{ start_tick: body.start_tick, end_tick: body.end_tick }];
+      }
+      const cleaned = (segments ?? [])
+        .map((s) => ({
+          start_tick: Number.parseInt(s?.start_tick, 10),
+          end_tick: Number.parseInt(s?.end_tick, 10),
+          pov_steam_id:
+            typeof s?.pov_steam_id === "string" ? s.pov_steam_id : null,
+        }))
+        .filter(
+          (s) =>
+            Number.isFinite(s.start_tick) &&
+            Number.isFinite(s.end_tick) &&
+            s.end_tick > s.start_tick,
+        )
+        // Keep declared order — the editor emits already-sorted, but
+        // a preset generator might intentionally re-order (unlikely
+        // for v1, but cheap to preserve).
+        ;
+      if (!jobId || !token || !apiBase || cleaned.length === 0) {
+        sendJson(res, 400, {
+          error:
+            "job_id, token, api_base, and at least one valid segment required",
+        });
+        log("-> 400 demo/render-clip bad payload");
+        return;
+      }
+      const cs2Wid = await findCs2Window();
+      if (!cs2Wid) {
+        sendJson(res, 503, { error: "cs2 not running" });
+        log("-> 503 demo/render-clip cs2 down");
+        return;
+      }
+      const scriptPath = `${process.env.SRC_DIR ?? "/opt/game-streamer/src"}/lib/inline-clip-render.sh`;
+      const child = spawn(
+        "bash",
+        [scriptPath],
+        {
+          detached: true,
+          stdio: ["ignore", "inherit", "inherit"],
+          env: {
+            ...process.env,
+            CLIP_RENDER_JOB_ID: jobId,
+            CLIP_RENDER_TOKEN: token,
+            STATUS_API_BASE: apiBase,
+            CLIP_SEGMENTS: JSON.stringify(cleaned),
+            CLIP_OUTPUT_DIMS: outputDims,
+            CLIP_OUTPUT_FPS: String(outputFps),
+            CLIP_TICK_RATE: String(demoState.tickRate || 64),
+            SPEC_SERVER_URL: `http://127.0.0.1:${PORT}`,
+            CLIP_RENDER_SPEED: String(renderSpeed),
+          },
+        },
+      );
+      child.unref();
+      bumpActivity();
+      sendJson(res, 202, { ok: true, job_id: jobId, pid: child.pid });
+      const totalTicks = cleaned.reduce(
+        (acc, s) => acc + (s.end_tick - s.start_tick),
+        0,
+      );
+      log(
+        `-> 202 demo/render-clip job=${jobId} pid=${child.pid} ` +
+          `segments=${cleaned.length} total_ticks=${totalTicks} speed=${renderSpeed}x`,
+      );
       return;
     }
 
@@ -942,7 +1142,7 @@ const server = createServer(async (req, res) => {
         log(`-> 404 demo/round ${round} (not in ticks map; have ${map.length})`);
         return;
       }
-      const ok = await sendConsoleCommand(`demo_gototick ${entry.start_tick}`);
+      const ok = await execCfgCommand(`demo_gototick ${entry.start_tick}`);
       if (ok) {
         demoState.lastTickAtSeek = entry.start_tick;
         demoState.lastSeekRealMs = Date.now();
@@ -975,7 +1175,7 @@ server.listen(PORT, BIND, () => {
   process.stderr.write(
     `[spec-server] routes: GET /, /health, /spec/health, /demo/state | ` +
       `POST /spec/{click,jump,player,slot,autodirector,hud}, ` +
-      `/demo/{toggle,pause,resume,seek,skip,speed,round,reload,xray,demoui}, /gsi\n`,
+      `/demo/{toggle,pause,resume,seek,skip,speed,round,reload,xray,demoui,render-clip,exec}, /gsi\n`,
   );
 });
 

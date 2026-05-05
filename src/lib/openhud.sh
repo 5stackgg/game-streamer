@@ -33,7 +33,6 @@
 export OPENHUD_BIN OPENHUD_PORT OPENHUD_HOST OPENHUD_USERDATA \
        OPENHUD_GSI_TOKEN OPENHUD_OVERLAY_W OPENHUD_OVERLAY_H
 
-# ---- picom ---------------------------------------------------------------
 picom_running() { pgrep -x picom >/dev/null 2>&1; }
 
 # Start picom in --daemon mode using the xrender backend. xrender works on
@@ -58,7 +57,6 @@ start_picom() {
 
 stop_picom() { pkill -x picom 2>/dev/null || true; }
 
-# ---- openhud server ------------------------------------------------------
 openhud_running() { pgrep -f "$OPENHUD_BIN" >/dev/null 2>&1; }
 
 openhud_server_up() {
@@ -87,21 +85,10 @@ start_openhud() {
   fi
   mkdir -p "$OPENHUD_USERDATA"
   log "starting openhud ($OPENHUD_BIN)"
-  # --no-sandbox is required for Electron-as-root in the container; CS2
-  # itself also runs as root here so the security delta is zero.
-  # PORT honored by src/electron/index.ts (PORT || 1349).
-  # OPENHUD_AUTO_OVERLAY=1 is honored by our patch in
-  # openhud/auto-overlay.patch — opens the fullscreen, transparent,
-  # alwaysOnTop spectator HUD BrowserWindow on app-ready instead of
-  # waiting for an admin's UI click. Without this only the admin panel
-  # window exists and there's no HUD to capture.
-  # --mute-audio: Chromium flag that silences all renderer audio.
-  # OpenHud's HUD pages can include sound effects (round end, kill,
-  # bomb plant); without muting, Electron writes those samples into
-  # whatever Pulse considers the default sink — which is our cs2 null
-  # sink — and they leak into the captured stream alongside (or in
-  # place of) the real game audio. The HUD is purely visual for our
-  # use case, so muting here is free.
+  # OPENHUD_AUTO_OVERLAY=1 (openhud/auto-overlay.patch) opens the
+  # fullscreen transparent HUD on app-ready — without it only the admin
+  # panel exists. --mute-audio: HUD pages emit SFX that Electron would
+  # write to the cs2 null sink, leaking into the captured stream.
   PORT="$OPENHUD_PORT" \
   OPENHUD_AUTO_OVERLAY=1 \
     spawn_logged openhud "$OPENHUD_BIN" --no-sandbox --disable-gpu-sandbox --mute-audio
@@ -136,28 +123,13 @@ stop_openhud() {
   pkill -f "$OPENHUD_BIN" 2>/dev/null || true
 }
 
-# ---- window helpers ------------------------------------------------------
-# OpenHud opens TWO BrowserWindows:
-#   * the admin/control panel (titled "OpenHud", default 1024x768) — we
-#     don't want this on screen at all, capture would pick it up.
-#   * the HUD overlay (loads /api/hud, transparent + frameless) — this is
-#     what we want raised on top of CS2.
-#
-# We tell them apart by title: the admin panel has a non-empty WM_NAME
-# starting with "OpenHud"; the overlay window is borderless and typically
-# has either an empty title or one matching the page <title>. If upstream
-# changes title strings these matchers will need updating.
+# OpenHud opens two BrowserWindows: the admin panel (WM_NAME exactly
+# "OpenHud") and the spectator HUD overlay (WM_NAME varies per HUD).
+# We match both by WM_CLASS=openhud + exact WM_NAME, since several
+# Electron utility windows also share the class.
 
-# Hide the admin panel by moving it offscreen + unmapping. xdotool's
-# windowunmap alone is sometimes ignored by Electron windows that re-show
-# themselves on focus; the offscreen move is a fallback.
-#
-# Picking the right window matters: Electron creates several utility
-# windows with WM_NAME="openhud" (lowercase) — `xdotool search --name`
-# is case-insensitive and would grab one of those. We match
-# WM_CLASS=openhud (Electron's app id) AND WM_NAME EXACTLY "OpenHud"
-# — the spectator HUD's name is "OpenHud Default HUD" or whatever the
-# active HUD's index.html sets, only the admin keeps the bare title.
+# windowunmap alone is sometimes ignored by Electron windows that
+# re-show on focus; the offscreen move is a fallback.
 hide_openhud_admin_window() {
   local id name target=""
   for id in $(xdotool search --classname '^openhud' 2>/dev/null); do
@@ -177,25 +149,17 @@ hide_openhud_admin_window() {
   xdotool windowmove "$target" -3000 -3000    2>/dev/null || true
 }
 
-# Find the HUD overlay window. Heuristic: largest WM_CLASS=openhud
-# window at least 1280x720. Size is the only reliable discriminator:
-# the active HUD sets its own page <title> (e.g. "OpenHud Default HUD"),
-# which can collide with the admin window's title prefix "OpenHud".
-# The admin window defaults to 1200x700, so a 1280x720 floor cleanly
-# separates admin from the fullscreen spectator HUD.
-#
-# Without the size floor, xdotool returns Electron's invisible utility
-# windows (16x16, 200x200, 10x10) and we'd "position" one of those at
-# 1920x1080, capturing a blank window instead of the real HUD.
+# Heuristic: largest WM_CLASS=openhud window at least 1280x720. Size is
+# the only reliable discriminator since HUD page titles can collide with
+# "OpenHud", and the admin window defaults to 1200x700. Without the size
+# floor, Electron's invisible utility windows (16x16, etc.) match too.
 find_openhud_overlay_window() {
   local min_w="${OPENHUD_MIN_W:-1280}"
   local min_h="${OPENHUD_MIN_H:-720}"
   local id w h area best=0 best_id=""
   for id in $(xdotool search --classname '^openhud' 2>/dev/null); do
-    # xdotool getwindowgeometry --shell prints WIDTH=, HEIGHT=, X=, Y=
-    # Unset before eval so a stale value from the prior iteration
-    # doesn't leak in if the window vanishes mid-loop (eval of empty
-    # string is a no-op and would silently keep last iteration's size).
+    # Unset before eval — if the window vanished mid-loop, eval of empty
+    # string is a no-op and would keep the prior iteration's size.
     unset WIDTH HEIGHT X Y SCREEN
     eval "$(xdotool getwindowgeometry --shell "$id" 2>/dev/null)"
     w="${WIDTH:-0}"; h="${HEIGHT:-0}"
@@ -208,19 +172,11 @@ find_openhud_overlay_window() {
   [ -n "$best_id" ] && echo "$best_id"
 }
 
-# Move the overlay window to (0,0) at OPENHUD_OVERLAY_W x OPENHUD_OVERLAY_H
-# and raise it above cs2 so ximagesrc captures CS2 + HUD composited.
-#
-# Polls for up to OPENHUD_OVERLAY_TIMEOUT (default 30s) for the overlay
-# to exist. The auto-overlay patch opens the spectator HUD ~2s after
-# Electron's app-ready, so calling this immediately after start_openhud
-# can race ahead of the window — wait for it to actually appear. If
-# openhud has died (process gone), respawn it and keep waiting.
-#
-# When the overlay never appears, dump openhud's process state + every
-# openhud-class window we can see so the operator can tell whether the
-# HUD window was destroyed (process alive but no big window) vs the
-# whole Electron app crashed.
+# Polls up to OPENHUD_OVERLAY_TIMEOUT for the overlay window, respawning
+# openhud if its process died, then moves+sizes+raises it above cs2 so
+# ximagesrc captures CS2 + HUD composited. On giveup, dumps the openhud
+# pid + every openhud-class window so the operator can tell whether the
+# HUD window was destroyed vs. the whole Electron app crashed.
 position_openhud_overlay() {
   local timeout="${OPENHUD_OVERLAY_TIMEOUT:-30}"
   local id="" i wid wname
@@ -255,7 +211,6 @@ position_openhud_overlay() {
   xdotool windowraise "$id"                                       2>/dev/null || true
 }
 
-# ---- GSI cfg drop --------------------------------------------------------
 # Write the gamestate_integration_openhud.cfg into CS2's cfg dir so cs2
 # POSTs game state to OpenHud at engine start. We prefer the cfg from the
 # OpenHud tarball (so it stays in lockstep with the server) but fall back
@@ -337,29 +292,19 @@ write_spec_gsi_cfg() {
     "map"      "1"
     "round"    "1"
     "player_id" "1"
+    "player_state" "1"
+    "allplayers_id"    "1"
+    "allplayers_state" "1"
   }
 }
 EOF
 }
 
-# ---- spec keybinds -------------------------------------------------------
-# CS2 spec actions that the spec-server (src/spec-server.mjs) drives are
-# pre-bound to F-keys here so the server only ever has to send a single
-# keystroke via xdotool — never open the dev console, never activate
-# the cs2 window. Activating cs2 restacks it above the OpenHud overlay
-# (and on this Openbox+picom setup, can outright destroy the overlay
-# window), so avoiding activation is the difference between an HUD
-# that survives and one the operator has to manually re-open every
-# player switch.
-#
-# Static map (mirrored in spec-server.mjs — change both together):
-#   F1 = spec_next        (/spec/click button=left)
-#   F2 = spec_prev        (/spec/click button=right)
-#   F3 = +jump            (/spec/jump — toggles lock-on/free-roam)
-#   F4 = autodirector ON  (/spec/autodirector enabled=true)
-#   F5 = autodirector OFF (/spec/autodirector enabled=false)
-#   F6-F12 = per-player slots, written by write_spec_player_binds
-#            from the seeded match metadata (up to 7 lineup players).
+# Pre-bind spec actions to F-keys so spec-server only sends a keystroke
+# via xdotool — activating cs2 restacks it above the OpenHud overlay
+# (and on this Openbox+picom setup can destroy the overlay window).
+# Per-player slots (F6-F11) appended later by write_spec_player_binds.
+# Mirrored in spec-server.mjs — change both together.
 spec_static_binds_block() {
   cat <<'EOF'
 // === spec-server keybinds (auto-generated; mirror in src/spec-server.mjs) ===
@@ -371,31 +316,14 @@ bind "F5" "spec_autodirector 0"
 EOF
 }
 
-# Demo-playback keybinds. Every interactive control the operator
-# touches resolves to a key press here — no console flash, no
-# typed-input fragility. Mirrored in src/spec-server.mjs's KEY_DEMO_*
-# constants — change both together.
-#
-# CS2's demo system uses tick offsets for relative seeking. We assume
-# 64-tick demos for the bind table (most pro/CS2 demos); ±15s = ±960
-# ticks. If we ever support sub-tick or 128-tick demos this needs to
-# parameterise — for now hardcoded.
-#
-#   Pause       = demo_togglepause   (/demo/toggle)
-#   Home        = demo_gototick -960 (/demo/skip secs=-15)
-#   End         = demo_gototick +960 (/demo/skip secs=+15)
-#   Insert      = host_timescale 1   (/demo/speed rate=1)
-#   PageDown    = host_timescale 0.25 (/demo/speed rate=0.25)
-#   semicolon   = host_timescale 0.5 (/demo/speed rate=0.5)
-#   apostrophe  = host_timescale 2   (/demo/speed rate=2)
-#   PageUp      = host_timescale 4   (/demo/speed rate=4)
+# Demo-playback keybinds. Mirrored in spec-server.mjs's KEY_DEMO_*
+# constants — change both together. Tick offsets assume 64-tick demos
+# (±15s = ±960 ticks); needs parameterising for 128-tick.
 demo_static_binds_block() {
   cat <<'EOF'
-// === demo-playback keybinds (auto-generated; mirror in src/spec-server.mjs) ===
-// Every constant-arg console action lives here so the spec-server can
-// fire it via XTest keystroke instead of typing into the dev console
-// (which flashes briefly on the captured stream). Parameterized
-// actions (demo_gototick <tick>) still need typed console.
+// demo-playback keybinds (auto-generated; mirror in src/spec-server.mjs).
+// BACKSPACE → exec 5stack_exec is the exec-cfg path spec-server uses for
+// arbitrary commands; spec-server's execCfgCommand hard-codes that key.
 bind "PAUSE" "demo_togglepause"
 bind "HOME" "demo_gototick -960"
 bind "END" "demo_gototick +960"
@@ -405,6 +333,7 @@ bind "APOSTROPHE" "host_timescale 2"
 bind "PGUP" "host_timescale 4"
 bind "PGDN" "host_timescale 0.25"
 bind "F11" "demoui"
+bind "BACKSPACE" "exec 5stack_exec"
 EOF
 }
 
@@ -493,7 +422,6 @@ print(f"wrote {slot} per-player binds (slots {KEYS[:slot]})")
 PY
 }
 
-# ---- match-metadata seed -------------------------------------------------
 # Best-effort seed of OpenHud's SQLite DB from the 5stack API. Two-step:
 #   1. GET ${API_BASE}/matches/${MATCH_ID}        (5stack — exact path TBD)
 #   2. POST translated objects to OpenHud REST    (/api/v2/matches etc.)
@@ -599,7 +527,6 @@ PY
   return 0
 }
 
-# ---- status / debug ------------------------------------------------------
 openhud_status() {
   log "openhud status:"
   if openhud_running; then

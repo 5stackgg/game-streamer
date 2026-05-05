@@ -1,30 +1,6 @@
 #!/usr/bin/env bash
-# game-streamer — production entry point.
-#
-# Self-contained: only references files under src/. Two flows are kept
-# deliberately separate so we can validate each step against the debug
-# stream before chaining them.
-#
-#   1.  setup-steam            — flow 1: launch Steam (with login),
-#                                register the steam library, disable
-#                                CS2 cloud sync, wait for the IPC pipe.
-#                                Pass --debug to also publish a screen
-#                                capture so you can watch the login.
-#   2.  run-live               — flow 2: -applaunch CS2 (Steam will
-#                                update if needed) and start the match
-#                                capture stream.
-#   2'. run-demo               — flow 2 variant: download a .dem from
-#                                DEMO_URL and play it back via +playdemo.
-#                                Same capture pipeline as run-live.
-#
-# Pass --debug as a top-level flag to publish an on-screen capture to
-# publish:debug for the duration of the flow (watch at
-# https://hls.5stack.gg/debug/). The debug-stream subcommand is also
-# available for ad-hoc start/stop.
-#
-# Required env (load via src/.env, or export beforehand):
-#   STEAM_USER, STEAM_PASSWORD               (setup-steam)
-#   MATCH_ID + (PLAYCAST_URL | CONNECT_ADDR & CONNECT_PASSWORD) (run-live)
+# game-streamer — production entry point. Subcommand list + required
+# env are documented in usage() below.
 
 set -uo pipefail
 SCRIPT_TAG=game-streamer
@@ -79,6 +55,10 @@ flows:
                            until the main Steam UI window is rendered
                            before launching CS2.
   demo                     run flow 1 then flow 2 (demo variant) end-to-end.
+  batch-highlights         demo variant — render every job in
+                           \$CLIP_BATCH_JOBS sequentially against the
+                           same cs2 instance, then exit. Spawned by
+                           the api on match metadata-parsed.
 
 global flags:
   --debug                  publish on-screen capture to publish:debug
@@ -303,6 +283,19 @@ case "$cmd" in
       DEMO_FILE_BG="${DEMO_FILE:-/tmp/game-streamer/demo.dem}"
       rm -f "$DEMO_FILE_BG" "$DEMO_FILE_BG.failed" "$DEMO_FILE_BG.partial"
       (
+        # shellcheck disable=SC1091
+        . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
+        # shellcheck disable=SC1091
+        . "$LIB_DIR/status-reporter.sh"
+        SCRIPT_TAG=demo-download
+        # Report downloading_demo HERE — the parallel curl is the
+        # actual download. Without this the only `downloading_demo`
+        # report comes from run-demo.sh AFTER the file is already on
+        # disk, gets coalesced into the next status by the 2s daemon
+        # poll, and the web stepper marks the stage SKIPPED. Same
+        # fix-pattern applies to workshop-bg below and to anywhere
+        # else a backgrounded subshell is doing user-visible work.
+        report_status status=downloading_demo
         if curl --fail --silent --show-error --location \
                 --retry 5 --retry-delay 2 --retry-all-errors \
                 --max-time "${DEMO_DOWNLOAD_TIMEOUT:-300}" \
@@ -337,6 +330,8 @@ case "$cmd" in
         . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
         # shellcheck disable=SC1091
         . "$LIB_DIR/steam.sh"
+        # shellcheck disable=SC1091
+        . "$LIB_DIR/status-reporter.sh"
         SCRIPT_TAG=workshop-bg
         # Wait for cs2 install (own steamcmd run) to finish before
         # starting our own. Caps at the same timeout used elsewhere
@@ -350,6 +345,10 @@ case "$cmd" in
           touch "$WORKSHOP_FAILED"
           exit 0
         fi
+        # Same coalescing-fix as the demo-download branch above —
+        # report the status from the actual worker so the web stepper
+        # doesn't mark this stage SKIPPED when it really did run.
+        report_status status=downloading_workshop_map "workshop_id=${WORKSHOP_ID}"
         if download_workshop_map "$WORKSHOP_ID"; then
           : # download_workshop_map already left the .vpk in place
         else
@@ -357,6 +356,43 @@ case "$cmd" in
         fi
       ) > >(awk '{print "[workshop-download] " $0; fflush()}' >&2) 2>&1 &
       echo $! > /tmp/game-streamer/workshop-download.pid
+    fi
+    "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
+    exec "$FLOWS_DIR/run-demo.sh" "$@"
+    ;;
+  # Note: there's no `render-clip` top-level command. User-initiated
+  # clip rendering runs INSIDE an existing demo-watch pod, driven by
+  # the spec-server's /demo/render-clip route which spawns
+  # lib/inline-clip-render.sh. See clips.service.ts on the api side.
+  #
+  # `batch-highlights` chains the demo flow (setup-steam → download
+  # demo → run-demo.sh) with CLIP_BATCH_MODE=1 set, which tells
+  # run-demo.sh to run process_batch_jobs() after setup instead of
+  # holding the pod open. process_batch_jobs reads CLIP_BATCH_JOBS
+  # (JSON array of {job_id, token, spec}) from env and invokes
+  # inline-clip-render.sh for each, reusing the same cs2 instance
+  # across renders.
+  batch-highlights)
+    export CLIP_BATCH_MODE=1
+    mkdir -p /tmp/game-streamer
+    if [ -n "${DEMO_URL:-}" ]; then
+      DEMO_FILE_BG="${DEMO_FILE:-/tmp/game-streamer/demo.dem}"
+      rm -f "$DEMO_FILE_BG" "$DEMO_FILE_BG.failed" "$DEMO_FILE_BG.partial"
+      (
+        # shellcheck disable=SC1091
+        . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
+        SCRIPT_TAG=demo-download
+        if curl --fail --silent --show-error --location \
+                --retry 5 --retry-delay 2 --retry-all-errors \
+                --max-time "${DEMO_DOWNLOAD_TIMEOUT:-300}" \
+                --output "$DEMO_FILE_BG.partial" \
+                "$DEMO_URL"; then
+          mv -f "$DEMO_FILE_BG.partial" "$DEMO_FILE_BG"
+        else
+          touch "$DEMO_FILE_BG.failed"
+        fi
+      ) > >(awk '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
+      echo $! > /tmp/game-streamer/demo-download.pid
     fi
     "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
     exec "$FLOWS_DIR/run-demo.sh" "$@"
