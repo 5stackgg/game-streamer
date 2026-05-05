@@ -261,7 +261,8 @@ fi
 CLIP_OUT_DIR="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}"
 mkdir -p "$CLIP_OUT_DIR"
 CLIP_OUT_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.mp4"
-rm -f "$CLIP_OUT_FILE"
+CLIP_THUMB_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.jpg"
+rm -f "$CLIP_OUT_FILE" "$CLIP_THUMB_FILE"
 
 # Per-segment output paths + concat list. We render each segment to
 # its own file and let ffmpeg concat-demux glue them — this keeps each
@@ -536,6 +537,31 @@ if [ -z "$REAL_DURATION_MS" ]; then
   REAL_DURATION_MS=$(awk -v t="$TOTAL_DURATION_TICKS" -v r="${CLIP_TICK_RATE:-64}" \
     'BEGIN{printf "%d", t / r * 1000}')
 fi
+
+THUMB_SEEK_SECS=3
+THUMB_DURATION_SECS=$(awk -v ms="$REAL_DURATION_MS" 'BEGIN{printf "%.3f", ms/1000}')
+if awk -v d="$THUMB_DURATION_SECS" -v t="$THUMB_SEEK_SECS" 'BEGIN{exit !(d <= t)}'; then
+  THUMB_SEEK_SECS=$(awk -v d="$THUMB_DURATION_SECS" 'BEGIN{printf "%.3f", d/2}')
+fi
+if ffmpeg -y -hide_banner -loglevel warning \
+     -ss "$THUMB_SEEK_SECS" -i "$CLIP_OUT_FILE" -frames:v 1 -q:v 3 \
+     "$CLIP_THUMB_FILE" 2>/dev/null \
+   && [ -s "$CLIP_THUMB_FILE" ]; then
+  THUMB_URL="${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/thumbnail"
+  say "POST $THUMB_URL"
+  if ! curl --fail --silent --show-error \
+         --max-time 60 \
+         --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
+         --header "content-type: image/jpeg" \
+         --data-binary "@${CLIP_THUMB_FILE}" \
+         --output /dev/null \
+         "$THUMB_URL"; then
+    say "WARN thumbnail upload failed — continuing without thumbnail"
+  fi
+else
+  say "WARN ffmpeg thumbnail extraction failed — continuing without thumbnail"
+fi
+rm -f "$CLIP_THUMB_FILE"
 
 api_status "status=uploading" "progress=0.0"
 UPLOAD_URL="${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/upload"
