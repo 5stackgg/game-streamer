@@ -21,7 +21,13 @@ import process from "node:process";
 
 const DISPLAY = process.env.DISPLAY ?? ":0";
 const PORT = parseInt(process.env.SPEC_PORT ?? "1350", 10);
-const BIND = process.env.SPEC_BIND ?? "0.0.0.0";
+// Default to loopback only — `/demo/exec` and `/demo/render-clip` can
+// drive arbitrary cs2 console commands and spawn render subprocesses,
+// so reaching this daemon implies full control of the pod's cs2.
+// In-pod callers (run-*.sh, batch-highlights, inline-clip-render) all
+// hit 127.0.0.1; override via SPEC_BIND only when something off-host
+// genuinely needs in (and add auth if so).
+const BIND = process.env.SPEC_BIND ?? "127.0.0.1";
 
 // Static action -> cs2-bound F-key. Mirror of the binds written by
 // run-live.sh into autoexec.cfg via lib/openhud.sh:spec_static_binds_block.
@@ -394,7 +400,29 @@ async function sendConsoleCommand(cmd) {
 // Fire any console command by writing it to 5stack_exec.cfg + sending
 // BACKSPACE (autoexec binds it to `exec 5stack_exec`). One cmd per
 // line — `;`-joined lines were being mis-parsed across cs2 builds.
+//
+// Concurrent calls are serialised through `execCfgChain`. Without the
+// mutex, two in-flight calls can interleave: call A renames its file
+// in, call B renames its (different) file in, call A's BACKSPACE fires
+// → cs2 reads B's contents. The 30ms tail delay holds the lock just
+// past the xdotool return so cs2 has time to actually read the cfg
+// before the next writer races in.
+let execCfgChain = Promise.resolve();
 async function execCfgCommand(cmd) {
+  const prev = execCfgChain;
+  let release;
+  execCfgChain = new Promise((r) => {
+    release = r;
+  });
+  try {
+    await prev.catch(() => undefined);
+    return await execCfgCommandImpl(cmd);
+  } finally {
+    setTimeout(release, 30);
+  }
+}
+
+async function execCfgCommandImpl(cmd) {
   if (!EXEC_CFG_PATH) {
     process.stderr.write(
       `[spec-server] execCfgCommand: CS2_CFG_DIR not set — falling back to sendConsoleCommand\n`,
@@ -824,6 +852,14 @@ const server = createServer(async (req, res) => {
         demoState.lastTickAtSeek = 0;
         demoState.lastSeekRealMs = Date.now();
         demoState.paused = false;
+        // Re-arm the post-GSI demoui-hide path. cs2 re-shows the
+        // panorama panel on `playdemo`, and the next GSI tick is what
+        // tells us the demo is loaded again — without resetting these
+        // we'd answer `demoui_hidden=true` against a panel that's now
+        // back on screen, and the batch-highlights pod would record
+        // the panel into its first capture.
+        demoPlayingReported = false;
+        demouiHidden = false;
         bumpActivity();
       }
       sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });

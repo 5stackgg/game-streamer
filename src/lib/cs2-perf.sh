@@ -73,11 +73,6 @@ mat_queue_mode -1
 // Reduce input lag
 engine_low_latency_sleep_after_client_tick 0
 
-// FOV viewmodel — note observer.cfg sets viewmodel_fov 70 and runs
-// AFTER this block, so this value will be overridden. Adjust
-// observer.cfg if 68 is actually wanted.
-viewmodel_fov 68
-
 // Misc
 cl_autohelp 0
 cl_showhelp 0

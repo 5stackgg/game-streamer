@@ -4,6 +4,11 @@
 # Sourced by run-demo.sh when CLIP_BATCH_MODE=1. Per-job failures don't
 # halt the batch — the render script POSTs status=error itself.
 
+# JSON parsing goes through node lib/clip-helpers.mjs — values flow via
+# argv there, never via shell-string interpolation, so player names with
+# quotes / regex metachars / `$1` don't break the script.
+CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
+
 # Resolve the GSI-reported player name for a target steamid and patch
 # the api job title. The api only had steam_id at enqueue time, so
 # titles default to "Player NNNN" until this lookup runs.
@@ -25,31 +30,17 @@ patch_title_from_gsi() {
     return 0
   fi
   local resolved
-  resolved=$(printf '%s' "$state" | python3 -c "
-import json,sys
-try:
-    d = json.load(sys.stdin)
-    target = '$target_sid'
-    for s in d.get('gsi', {}).get('spec_slots', []):
-        if s.get('steam_id') == target and s.get('name'):
-            print(s['name'])
-            sys.exit(0)
-except Exception:
-    pass
-print('')")
+  resolved=$(printf '%s' "$state" \
+    | node "$CLIP_HELPERS" name-for-steamid "$target_sid")
   if [ -z "$resolved" ]; then
     return 0
   fi
 
-  # Replace the "Player NNNN" prefix in the title with the resolved
-  # name. Other suffix patterns (em-dash + " Best Round (XK)") stay.
+  # Replace the leading "Player NNNN" prefix with the resolved name.
+  # Other suffix patterns (em-dash + " Best Round (XK)") stay.
   local new_title
-  new_title=$(printf '%s' "$current_title" | python3 -c "
-import sys, re
-title = sys.stdin.read()
-new_name = '$resolved'
-out = re.sub(r'^Player [A-Za-z0-9_-]+', new_name, title)
-print(out)")
+  new_title=$(printf '%s' "$current_title" \
+    | node "$CLIP_HELPERS" patch-player-name "$resolved")
   if [ -z "$new_title" ] || [ "$new_title" = "$current_title" ]; then
     return 0
   fi
@@ -70,36 +61,15 @@ batch_render_one_job() {
 
   local job_id token segments output_dims output_fps render_speed
   local target_sid current_title
-  job_id=$(printf '%s' "$job_json" | python3 -c \
-    'import json,sys; print(json.load(sys.stdin).get("job_id",""))')
-  token=$(printf '%s' "$job_json" | python3 -c \
-    'import json,sys; print(json.load(sys.stdin).get("token",""))')
-  segments=$(printf '%s' "$job_json" | python3 -c \
-    'import json,sys; print(json.dumps(json.load(sys.stdin).get("spec",{}).get("segments",[])))')
-  output_dims=$(printf '%s' "$job_json" | python3 -c \
-    "import json,sys
-spec = json.load(sys.stdin).get('spec',{}).get('output',{}) or {}
-res = spec.get('resolution', '1080p')
-print('1280x720' if res == '720p' else '1920x1080')")
-  output_fps=$(printf '%s' "$job_json" | python3 -c \
-    'import json,sys
-spec = json.load(sys.stdin).get("spec",{}).get("output",{}) or {}
-print(int(spec.get("fps", 60)))')
+  job_id=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-id)
+  token=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-token)
+  segments=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-segments)
+  output_dims=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-output-dims)
+  output_fps=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-output-fps)
   # First segment's pov_steam_id is the player this clip is "about".
   # All preset segments share the same pov, so segment[0] is fine.
-  target_sid=$(printf '%s' "$job_json" | python3 -c \
-    'import json,sys
-try:
-    seg = (json.load(sys.stdin).get("spec",{}).get("segments",[]) or [{}])[0]
-    print(seg.get("pov_steam_id","") or "")
-except Exception:
-    print("")')
-  current_title=$(printf '%s' "$job_json" | python3 -c \
-    'import json,sys
-try:
-    print(json.load(sys.stdin).get("spec",{}).get("title","") or "")
-except Exception:
-    print("")')
+  target_sid=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-first-pov-steamid)
+  current_title=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-title)
   render_speed="${CLIP_RENDER_SPEED:-1}"
 
   if [ -z "$job_id" ] || [ -z "$token" ]; then
@@ -142,8 +112,7 @@ process_batch_jobs() {
   fi
 
   local count
-  count=$(printf '%s' "$CLIP_BATCH_JOBS" | python3 -c \
-    'import json,sys; print(len(json.load(sys.stdin)))')
+  count=$(printf '%s' "$CLIP_BATCH_JOBS" | node "$CLIP_HELPERS" jobs-count)
   say "===================================================="
   say "batch-highlights: ${count} job(s) queued — starting"
   say "===================================================="
@@ -171,14 +140,7 @@ process_batch_jobs() {
         || true)
     if [ -n "$s" ]; then
       local ready
-      ready=$(printf '%s' "$s" | python3 -c \
-        'import json,sys
-try:
-    d=json.load(sys.stdin)
-    gsi=d.get("gsi") or {}
-    print("1" if gsi and gsi.get("demoui_hidden") else "0")
-except Exception:
-    print("0")')
+      ready=$(printf '%s' "$s" | node "$CLIP_HELPERS" demoui-hidden)
       if [ "$ready" = "1" ]; then
         demo_ready=1
         break
@@ -195,8 +157,11 @@ except Exception:
   local idx
   for idx in $(seq 0 $((count - 1))); do
     local job_json
-    job_json=$(printf '%s' "$CLIP_BATCH_JOBS" | python3 -c \
-      "import json,sys; print(json.dumps(json.load(sys.stdin)[$idx]))")
+    if ! job_json=$(printf '%s' "$CLIP_BATCH_JOBS" \
+                      | node "$CLIP_HELPERS" jobs-at "$idx"); then
+      say "  WARN failed to extract job at index $idx — skipping"
+      continue
+    fi
     batch_render_one_job "$job_json"
   done
 

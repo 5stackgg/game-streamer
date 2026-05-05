@@ -13,29 +13,20 @@ require_env CLIP_RENDER_JOB_ID CLIP_RENDER_TOKEN STATUS_API_BASE \
             SPEC_SERVER_URL
 
 CLIP_RENDER_SPEED="${CLIP_RENDER_SPEED:-1}"
+# Per-segment hard cap on the capture loop, expressed as a multiple of
+# the expected wallclock. The loop already terminates at WALLCLOCK_MS;
+# this is belt-and-suspenders against `kill -0` mis-reporting + the
+# (rare) case where gst keeps the capture pid alive past EOS.
+CLIP_SEGMENT_TIMEOUT_FACTOR="${CLIP_SEGMENT_TIMEOUT_FACTOR:-3}"
+
+CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
 
 LOG_PREFIX="[clip ${CLIP_RENDER_JOB_ID:0:8}]"
 say() { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
 
 api_status() {
   local body
-  body=$(python3 - "$@" <<'PY'
-import json, sys
-out = {}
-for arg in sys.argv[1:]:
-    if "=" not in arg:
-        continue
-    k, v = arg.split("=", 1)
-    if k == "progress":
-        try:
-            out[k] = float(v)
-        except ValueError:
-            continue
-    else:
-        out[k] = v
-print(json.dumps(out))
-PY
-)
+  body=$(node "$CLIP_HELPERS" status-body "$@")
   curl --fail --silent --show-error --max-time 10 \
        --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
        --header "content-type: application/json" \
@@ -52,7 +43,7 @@ spec_get_state() {
 
 spec_post() {
   local path="$1"; shift
-  local body="${1:-\{\}}"
+  local body="${1:-{\}}"
   local http_code
   http_code=$(printf '%s' "$body" \
     | curl --silent --show-error --max-time 5 \
@@ -139,10 +130,8 @@ log_state() {
     say "STATE [$label]: <unreachable>"
     return
   fi
-  tick=$(printf '%s' "$s" | python3 -c \
-    'import json,sys; d=json.load(sys.stdin); print(d.get("tick","?"))')
-  paused=$(printf '%s' "$s" | python3 -c \
-    'import json,sys; d=json.load(sys.stdin); print(d.get("paused","?"))')
+  tick=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-tick)
+  paused=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-paused)
   say "STATE [$label]: tick=$tick paused=$paused"
 }
 
@@ -152,14 +141,7 @@ gsi_spectated_steamid() {
   local s
   s=$(spec_get_state || true)
   [ -z "$s" ] && { echo ""; return; }
-  printf '%s' "$s" \
-    | python3 -c \
-      'import json,sys
-try:
-    d = json.load(sys.stdin)
-    print(d.get("gsi", {}).get("spectated_steam_id", "") or "")
-except Exception:
-    print("")'
+  printf '%s' "$s" | node "$CLIP_HELPERS" spectated-steamid
 }
 
 # Look up the target's CURRENT slot number (1..10) from GSI's
@@ -170,19 +152,7 @@ gsi_slot_for_steamid() {
   local s
   s=$(spec_get_state || true)
   [ -z "$s" ] && { echo ""; return; }
-  printf '%s' "$s" \
-    | python3 -c \
-      "import json,sys
-try:
-    d = json.load(sys.stdin)
-    target = '$target_sid'
-    for s in d.get('gsi', {}).get('spec_slots', []):
-        if s.get('steam_id') == target:
-            print(s['slot'])
-            sys.exit(0)
-except Exception:
-    pass
-print('')"
+  printf '%s' "$s" | node "$CLIP_HELPERS" slot-for-steamid "$target_sid"
 }
 
 # Lock cs2 onto a specific player and confirm via GSI. Uses the
@@ -238,15 +208,12 @@ has_audio_stream() {
 }
 
 # Parse segments + compute total duration for progress weighting.
-SEG_COUNT=$(printf '%s' "$CLIP_SEGMENTS" | python3 -c \
-  'import json,sys; print(len(json.load(sys.stdin)))')
+SEG_COUNT=$(printf '%s' "$CLIP_SEGMENTS" | node "$CLIP_HELPERS" segs-count)
 if [ "$SEG_COUNT" -lt 1 ]; then
   die_failed "CLIP_SEGMENTS contains zero segments"
 fi
-TOTAL_DURATION_TICKS=$(printf '%s' "$CLIP_SEGMENTS" | python3 -c \
-  'import json,sys
-segs = json.load(sys.stdin)
-print(sum(max(0, s["end_tick"] - s["start_tick"]) for s in segs))')
+TOTAL_DURATION_TICKS=$(printf '%s' "$CLIP_SEGMENTS" \
+  | node "$CLIP_HELPERS" segs-total-ticks)
 
 say "============================================================"
 say "SPEED=${CLIP_RENDER_SPEED}x  segments=${SEG_COUNT}  total_ticks=${TOTAL_DURATION_TICKS}  output=${CLIP_OUTPUT_DIMS:-?}@${CLIP_OUTPUT_FPS:-?}"
@@ -264,13 +231,7 @@ api_check_status() {
     || echo ""
 }
 PRE_STATUS_RAW=$(api_check_status)
-PRE_STATUS=$(printf '%s' "$PRE_STATUS_RAW" | python3 -c \
-  'import json,sys
-try:
-    d = json.load(sys.stdin)
-    print(d.get("status",""))
-except Exception:
-    print("")' 2>/dev/null || echo "")
+PRE_STATUS=$(printf '%s' "$PRE_STATUS_RAW" | node "$CLIP_HELPERS" status-field)
 if [ "$PRE_STATUS" = "cancelled" ]; then
   say "job already cancelled by user — skipping (no work, no error)"
   CLIP_REACHED_TERMINAL=1
@@ -284,10 +245,9 @@ STATE_JSON=$(spec_get_state || true)
 if [ -z "$STATE_JSON" ]; then
   die_failed "spec-server /demo/state unreachable"
 fi
-SAVED_TICK=$(printf '%s' "$STATE_JSON" | python3 -c \
-  'import json,sys; d=json.load(sys.stdin); print(d.get("tick",0))')
-SAVED_PAUSED=$(printf '%s' "$STATE_JSON" | python3 -c \
-  'import json,sys; d=json.load(sys.stdin); print(str(d.get("paused",False)).lower())')
+SAVED_TICK=$(printf '%s' "$STATE_JSON" | node "$CLIP_HELPERS" state-tick)
+SAVED_PAUSED=$(printf '%s' "$STATE_JSON" | node "$CLIP_HELPERS" state-paused)
+[ "$SAVED_TICK" = "?" ] && SAVED_TICK=0
 say "STEP 1: tick=$SAVED_TICK paused=$SAVED_PAUSED"
 api_status "status=rendering" "progress=0.05"
 
@@ -320,24 +280,16 @@ PROGRESS_SPAN=0.95
 ELAPSED_TICKS_TOTAL=0
 
 for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
-  SEG_START=$(printf '%s' "$CLIP_SEGMENTS" | python3 -c \
-    "import json,sys; print(json.load(sys.stdin)[$SEG_IDX]['start_tick'])")
-  SEG_END=$(printf '%s' "$CLIP_SEGMENTS" | python3 -c \
-    "import json,sys; print(json.load(sys.stdin)[$SEG_IDX]['end_tick'])")
+  SEG_START=$(printf '%s' "$CLIP_SEGMENTS" \
+    | node "$CLIP_HELPERS" seg-start-tick "$SEG_IDX")
+  SEG_END=$(printf '%s' "$CLIP_SEGMENTS" \
+    | node "$CLIP_HELPERS" seg-end-tick "$SEG_IDX")
   # POV target. accountid = steamid64 - 76561197960265728. The lock
   # is applied AFTER seeking + lead-in so the freshly-seeked target
   # gets overridden — otherwise the clip opens on whoever cs2 was
   # last spectating, producing the wrong POV.
-  SEG_POV_ACCOUNTID=$(printf '%s' "$CLIP_SEGMENTS" | python3 -c \
-    "
-import json,sys
-seg = json.load(sys.stdin)[$SEG_IDX]
-sid = seg.get('pov_steam_id')
-if isinstance(sid, str) and sid.isdigit():
-    aid = int(sid) - 76561197960265728
-    if aid > 0:
-        print(aid)
-")
+  SEG_POV_ACCOUNTID=$(printf '%s' "$CLIP_SEGMENTS" \
+    | node "$CLIP_HELPERS" seg-pov-accountid "$SEG_IDX")
   SEG_TICKS=$((SEG_END - SEG_START))
   SEG_DURATION_MS=$(awk -v t="$SEG_TICKS" -v r="${CLIP_TICK_RATE:-64}" \
     'BEGIN{printf "%d", t / r * 1000}')
@@ -412,13 +364,24 @@ if isinstance(sid, str) and sid.isdigit():
   fi
 
   WALLCLOCK_MS=$((SEG_DURATION_MS / CLIP_RENDER_SPEED))
-  say "STEP 7: capturing ${SEG_DURATION_MS}ms in ${WALLCLOCK_MS}ms wallclock"
+  # Hard cap: never let one segment's loop run more than N× expected.
+  # The normal exit path is ELAPSED_MS >= WALLCLOCK_MS; this guards
+  # against the loop body itself stalling (sleep(1) returning slow,
+  # awk math drifting, etc).
+  WALLCLOCK_DEADLINE_MS=$((WALLCLOCK_MS * CLIP_SEGMENT_TIMEOUT_FACTOR))
+  say "STEP 7: capturing ${SEG_DURATION_MS}ms in ${WALLCLOCK_MS}ms wallclock (cap ${WALLCLOCK_DEADLINE_MS}ms)"
 
   ELAPSED_MS=0
   LAST_STATE_LOG=0
+  WALLCLOCK_START_MS=$(date +%s%3N 2>/dev/null || awk 'BEGIN{srand(); printf "%d", systime()*1000}')
   while [ "$ELAPSED_MS" -lt "$WALLCLOCK_MS" ]; do
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
+    fi
+    NOW_MS=$(date +%s%3N 2>/dev/null || echo $((WALLCLOCK_START_MS + ELAPSED_MS)))
+    if [ $((NOW_MS - WALLCLOCK_START_MS)) -gt "$WALLCLOCK_DEADLINE_MS" ]; then
+      say "WARN segment $SEG_IDX exceeded ${WALLCLOCK_DEADLINE_MS}ms wallclock cap — stopping capture early"
+      break
     fi
     if [ $((ELAPSED_MS - LAST_STATE_LOG)) -ge 5000 ]; then
       log_state "seg${SEG_IDX} +${ELAPSED_MS}ms"
