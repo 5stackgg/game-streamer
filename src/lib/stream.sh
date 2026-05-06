@@ -37,6 +37,15 @@ start_capture() {
   log "starting capture '${stream_id}' (fps=$fps kbps=$kbps pointer=$pointer audio=$audio)"
   log "  -> $url"
 
+  local enc=""
+  if gst-inspect-1.0 nvh264enc >/dev/null 2>&1; then
+    enc="nvh264enc preset=low-latency-hq gop-size=$gop bitrate=$kbps rc-mode=cbr"
+    log "  encoder: nvh264enc (GPU)"
+  else
+    enc="x264enc tune=zerolatency speed-preset=veryfast bitrate=$kbps key-int-max=$gop"
+    log "  encoder: x264enc (software fallback — nvh264enc unavailable)"
+  fi
+
   local args_dir="${LOG_DIR:-/tmp/game-streamer}"
   mkdir -p "$args_dir"
   printf '%s\n%s\n%s\n%s\n%s\n' \
@@ -82,7 +91,7 @@ start_capture() {
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
-        ! nvh264enc preset=low-latency-hq gop-size="$gop" bitrate="$kbps" rc-mode=cbr \
+        ! $enc \
         ! h264parse config-interval=1 \
         ! queue ! mux. \
       pulsesrc device="$pulse_source" \
@@ -99,7 +108,7 @@ start_capture() {
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
-        ! nvh264enc preset=low-latency-hq gop-size="$gop" bitrate="$kbps" rc-mode=cbr \
+        ! $enc \
         ! h264parse config-interval=1 \
         ! mpegtsmux alignment=7 \
         ! srtsink uri="$url" latency=200

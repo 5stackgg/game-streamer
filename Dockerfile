@@ -5,7 +5,7 @@
 ARG OPENHUD_IMAGE=ghcr.io/5stackgg/openhud:latest
 FROM ${OPENHUD_IMAGE} AS openhud
 
-FROM nvidia/cuda:13.2.1-base-ubuntu24.04
+FROM nvidia/cuda:12.6.3-base-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
