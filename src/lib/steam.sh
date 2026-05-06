@@ -138,26 +138,15 @@ lf.write_text(src)
 PY
 }
 
-# Parses steamcmd "Update state (0x..) <stage>, progress: X.YY ..." lines
-# from stdin and re-emits them through report_status so the API row picks
-# up live download progress. Side-effects only — no stdout (the same
-# lines are still going to k8s logs + the steamcmd log via tee upstream).
-#
-# Suppression: only emit when the stage changes OR percent advances ≥1.0
-# since the last emit. Combined with status-reporter's 2s daemon poll +
-# sha256 dedup, worst case is one POST every 2s.
-#
-# Always returns 0 when stdin reaches EOF — relevant because
-# setup-steam.sh runs with `set -o pipefail` and this is the rightmost
-# stage of the steamcmd pipeline.
+# Forwards steamcmd "Update state ... progress: X.YY" lines through
+# report_status. Skips repeats unless stage changes or % advances ≥1.0.
+# Always returns 0 — set -o pipefail safe.
 _emit_cs2_progress_from_stdin() {
   local line stage pct last_stage="" last_pct="-1"
   while IFS= read -r line; do
     if [[ "$line" =~ Update\ state\ \(0x[0-9a-fA-F]+\)\ ([^,]+),\ progress:\ ([0-9]+\.[0-9]+) ]]; then
       stage="${BASH_REMATCH[1]}"
       pct="${BASH_REMATCH[2]}"
-      # bash can't float-compare; awk is in $PATH and cheap. Skip when
-      # same stage AND % hasn't advanced ≥1.0 since the last emit.
       if [ "$stage" = "$last_stage" ] \
          && awk -v a="$pct" -v b="$last_pct" 'BEGIN{exit !(a-b<1)}'; then
         continue
@@ -218,13 +207,10 @@ install_cs2_via_steamcmd() {
   : > "$steamcmd_log"
 
   # Call steamcmd.sh directly — the /usr/local/bin/steamcmd shim resolves
-  # its own dir wrong via symlink and can't find linux32/.
-  #
-  # The trailing _emit_cs2_progress_from_stdin pipe stage parses
-  # "Update state ... progress: X.YY" lines and forwards them through
-  # report_status, so the API row (and UI) gets a live progress %.
-  # `tee` keeps the full transcript in $steamcmd_log for the
-  # post-exit auth-error grep below.
+  # its own dir wrong via symlink and can't find linux32/. The trailing
+  # _emit_cs2_progress_from_stdin pipe stage forwards live download
+  # progress to the API; tee keeps the full transcript for the post-exit
+  # auth-error grep below.
   /opt/steamcmd/steamcmd.sh \
     +@sSteamCmdForcePlatformType linux \
     +force_install_dir "$CS2_DIR" \
