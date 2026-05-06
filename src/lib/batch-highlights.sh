@@ -131,16 +131,14 @@ process_batch_jobs() {
   # the api's status='playing' transition fires from spec-server's
   # reportDemoPlayingOnce which schedules the demoui hide and the
   # `demoui_hidden` flag is what tells us "actually toggled".
-  # Sized for the actual signal latency: spec-server hides the demoui
-  # 3s after the first GSI tick, and GSI lands ~5-10s after cs2's
-  # window appears. 45s is comfortably past that with headroom for
-  # slow-pod startup; the first-render capture path tolerates a missed
-  # signal (drops the loading frame in the post-segment validity
-  # check), so the older 90s ceiling just delayed the batch start
-  # under any of the rare misses.
-  say "waiting for demo-ready signal (GSI + demoui_hidden, up to 45s)"
-  local i demo_ready=0
-  for i in $(seq 1 45); do
+  #
+  # No timeout: GSI is the only deterministic "demo is loaded" signal
+  # we have, and rendering before it lands captures black / loading
+  # frames. We block here until GSI confirms ready — the parent k8s
+  # Job's activeDeadlineSeconds is the ultimate ceiling.
+  say "waiting for demo-ready signal (GSI + demoui_hidden) — no timeout, will not proceed without it"
+  local waited=0
+  while :; do
     local s
     s=$(curl --fail --silent --show-error --max-time 5 \
             "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/state" \
@@ -149,17 +147,14 @@ process_batch_jobs() {
       local ready
       ready=$(printf '%s' "$s" | node "$CLIP_HELPERS" demoui-hidden)
       if [ "$ready" = "1" ]; then
-        demo_ready=1
         break
       fi
     fi
+    waited=$((waited + 1))
+    [ $((waited % 15)) -eq 0 ] && say "  still waiting for GSI demo-ready (${waited}s)"
     sleep 1
   done
-  if [ "$demo_ready" != "1" ]; then
-    say "WARN demo-ready signal never arrived after 45s — proceeding; first render may capture loading frames"
-  else
-    say "demo ready (after ${i}s) — first render will capture clean frames"
-  fi
+  say "demo ready (after ${waited}s) — first render will capture clean frames"
 
   local idx
   for idx in $(seq 0 $((count - 1))); do

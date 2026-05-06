@@ -362,13 +362,22 @@ fi
 # backgrounded so they don't gate going-live.
 CS2_LOG_TAIL="${CS2_LOG_TAIL:-$STEAM_LIBRARY/steam/logs/console-linux.txt}"
 
-say "5c. start match capture stream"
-start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
-  || die "capture failed to publish — see [gst-${MATCH_ID:0:8}] log lines above"
+if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
+  # Batch-highlights pods don't need a mediamtx publish — there's no
+  # human watching, and inline-clip-render.sh captures each clip via
+  # its own ffmpeg pass. Skipping start_capture means no stop/restart
+  # churn around every render and no wasted upstream bandwidth.
+  say "5c. batch-highlights mode — skipping match capture stream (no mediamtx publish)"
+  report_status status=live "playback_mode=demo"
+else
+  say "5c. start match capture stream"
+  start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
+    || die "capture failed to publish — see [gst-${MATCH_ID:0:8}] log lines above"
 
-report_status status=live \
-  "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
-  "playback_mode=demo"
+  report_status status=live \
+    "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
+    "playback_mode=demo"
+fi
 
 # Liveness watchdog: surface a silent cs2 crash loudly so the pod
 # doesn't sit in "status=live but no frames".
