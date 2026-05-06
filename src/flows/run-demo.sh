@@ -46,7 +46,7 @@ if [ "${DEBUG_CAPTURE:-0}" = "1" ]; then
   say "0. debug capture stream"
   start_xorg
   start_capture "$DEBUG_STREAM_ID" 30 4000 true 0
-  log "watch debug: https://hls.5stack.gg/${DEBUG_STREAM_ID}/"
+  log "watch debug: https://${GAME_STREAM_DOMAIN}/${DEBUG_STREAM_ID}/"
 fi
 
 say "1. preflight"
@@ -384,7 +384,7 @@ report_status status=live \
 log "  cs2-alive watchdog started (pid $!)"
 
 say "done"
-log "watch:    https://hls.5stack.gg/${MATCH_ID}/"
+log "watch:    https://${GAME_STREAM_DOMAIN}/${MATCH_ID}/"
 log "demo:     $DEMO_FILE"
 log "stop:     src/game-streamer.sh stop-live"
 

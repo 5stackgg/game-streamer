@@ -77,7 +77,7 @@ fi
 if [ "${DEBUG_CAPTURE:-0}" = "1" ]; then
   say "2. debug capture stream"
   start_capture "$DEBUG_STREAM_ID" 30 4000 true 0
-  log "watch login: https://hls.5stack.gg/${DEBUG_STREAM_ID}/"
+  log "watch login: https://${GAME_STREAM_DOMAIN}/${DEBUG_STREAM_ID}/"
 fi
 
 say "3. clean up any prior Steam/cs2 processes"
