@@ -138,6 +138,26 @@ lf.write_text(src)
 PY
 }
 
+# Forwards steamcmd "Update state ... progress: X.YY" lines through
+# report_status. Skips repeats unless stage changes or % advances ≥1.0.
+# Always returns 0 — set -o pipefail safe.
+_emit_cs2_progress_from_stdin() {
+  local line stage pct last_stage="" last_pct="-1"
+  while IFS= read -r line; do
+    if [[ "$line" =~ Update\ state\ \(0x[0-9a-fA-F]+\)\ ([^,]+),\ progress:\ ([0-9]+\.[0-9]+) ]]; then
+      stage="${BASH_REMATCH[1]}"
+      pct="${BASH_REMATCH[2]}"
+      if [ "$stage" = "$last_stage" ] \
+         && awk -v a="$pct" -v b="$last_pct" 'BEGIN{exit !(a-b<1)}'; then
+        continue
+      fi
+      last_stage="$stage"
+      last_pct="$pct"
+      report_status status=downloading_cs2 progress="$pct" progress_stage="$stage"
+    fi
+  done
+}
+
 # Install or update CS2 via steamcmd directly into the configured library.
 # Skips when an appmanifest already exists (idempotent fast path); set
 # CS2_FORCE_UPDATE=1 to force a re-validate.
@@ -187,13 +207,16 @@ install_cs2_via_steamcmd() {
   : > "$steamcmd_log"
 
   # Call steamcmd.sh directly — the /usr/local/bin/steamcmd shim resolves
-  # its own dir wrong via symlink and can't find linux32/.
+  # its own dir wrong via symlink and can't find linux32/. The trailing
+  # _emit_cs2_progress_from_stdin pipe stage forwards live download
+  # progress to the API; tee keeps the full transcript for the post-exit
+  # auth-error grep below.
   /opt/steamcmd/steamcmd.sh \
     +@sSteamCmdForcePlatformType linux \
     +force_install_dir "$CS2_DIR" \
     +login "$STEAM_USER" "$STEAM_PASSWORD" \
     +app_update 730 validate \
-    +quit 2>&1 | tee -a "$steamcmd_log"
+    +quit 2>&1 | tee -a "$steamcmd_log" | _emit_cs2_progress_from_stdin
 
   if [ ! -f "$manifest" ] && [ -f "$CS2_DIR/steamapps/appmanifest_730.acf" ]; then
     # steamcmd put the manifest inside the install dir; lift it to the
