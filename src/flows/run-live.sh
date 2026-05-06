@@ -73,7 +73,7 @@ if [ "${DEBUG_CAPTURE:-0}" = "1" ]; then
   # debug stream is video-only — audio not useful for visual debugging
   # and avoids contending for the cs2 sink.
   start_capture "$DEBUG_STREAM_ID" 30 4000 true 0
-  log "watch debug: https://hls.5stack.gg/${DEBUG_STREAM_ID}/"
+  log "watch debug: https://${GAME_STREAM_DOMAIN}/${DEBUG_STREAM_ID}/"
 fi
 
 say "1. preflight"
@@ -400,7 +400,7 @@ report_status status=live \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
 
 say "done"
-log "watch:    https://hls.5stack.gg/${MATCH_ID}/"
+log "watch:    https://${GAME_STREAM_DOMAIN}/${MATCH_ID}/"
 log "logs:     kubectl logs (cs2-launch / gst-${MATCH_ID} / spec-server tags)"
 log "stop:     src/game-streamer.sh stop-live"
 

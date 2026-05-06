@@ -18,6 +18,11 @@ export SRC_DIR LIB_DIR FLOWS_DIR
 # sink without crashing — without this poll we'd report status=live
 # while no bytes are reaching mediamtx).
 : "${MEDIAMTX_API_BASE:=http://mediamtx.5stack.svc.cluster.local:9997}"
+# Public HLS host the streamer logs in `watch:` lines. The api injects
+# GAME_STREAM_DOMAIN into the Job spec from its own configmap (see
+# api/src/matches/game-streamer/game-streamer.service.ts buildJobSpec).
+# The fallback only matters for ad-hoc local runs without that env.
+: "${GAME_STREAM_DOMAIN:=hls.5stack.gg}"
 # Local scratch dir. Despite the name it's NOT for log files anymore —
 # k8s captures the pod's stdout/stderr and that's where logs live.
 # This directory holds non-log state shared between subshells:
@@ -46,8 +51,8 @@ mkdir -p "$LOG_DIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
 export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \
-       MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE LOG_DIR XORG_CONFIG \
-       CS2_GRAPHICS_PRESET CS2_FPS_MAX
+       MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE GAME_STREAM_DOMAIN \
+       LOG_DIR XORG_CONFIG CS2_GRAPHICS_PRESET CS2_FPS_MAX
 
 
 say()  { printf '\n=== %s ===\n' "$*"; }

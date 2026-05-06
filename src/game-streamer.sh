@@ -25,7 +25,7 @@ load_env
 # Top-level flags (must come before the subcommand).
 #   --debug : publish an on-screen capture stream to publish:$DEBUG_STREAM_ID
 #             (default 'debug') for the duration of the run. Watch at
-#             https://hls.5stack.gg/${DEBUG_STREAM_ID}/.
+#             https://${GAME_STREAM_DOMAIN}/${DEBUG_STREAM_ID}/.
 DEBUG_CAPTURE="${DEBUG_CAPTURE:-0}"
 : "${DEBUG_STREAM_ID:=debug}"
 while [ $# -gt 0 ]; do
@@ -62,7 +62,7 @@ flows:
 
 global flags:
   --debug                  publish on-screen capture to publish:debug
-                           (watch at https://hls.5stack.gg/debug/)
+                           (watch at https://${GAME_STREAM_DOMAIN}/debug/)
   --debug-id <id>          override the debug stream id (implies --debug)
   --trace, -x              set -x on every script (very loud, for debug)
 
@@ -182,10 +182,10 @@ cmd_debug_stream() {
     start)
       start_xorg
       start_capture "$id" 30 4000 true
-      log "watch: https://hls.5stack.gg/${id}/"
+      log "watch: https://${GAME_STREAM_DOMAIN}/${id}/"
       ;;
     stop)  stop_capture "$id" ;;
-    url)   echo "https://hls.5stack.gg/${id}/" ;;
+    url)   echo "https://${GAME_STREAM_DOMAIN}/${id}/" ;;
     *)     echo "usage: debug-stream start|stop|url [stream-id]" >&2; exit 2 ;;
   esac
 }
