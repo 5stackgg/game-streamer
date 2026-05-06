@@ -18,10 +18,6 @@ export SRC_DIR LIB_DIR FLOWS_DIR
 # sink without crashing — without this poll we'd report status=live
 # while no bytes are reaching mediamtx).
 : "${MEDIAMTX_API_BASE:=http://mediamtx.5stack.svc.cluster.local:9997}"
-# Public HLS host the streamer logs in `watch:` lines. The api injects
-# GAME_STREAM_DOMAIN into the Job spec from its own configmap (see
-# api/src/matches/game-streamer/game-streamer.service.ts buildJobSpec).
-# The fallback only matters for ad-hoc local runs without that env.
 : "${GAME_STREAM_DOMAIN:=hls.5stack.gg}"
 # Local scratch dir. Despite the name it's NOT for log files anymore —
 # k8s captures the pod's stdout/stderr and that's where logs live.
