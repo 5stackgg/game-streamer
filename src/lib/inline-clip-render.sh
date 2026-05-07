@@ -207,6 +207,41 @@ has_audio_stream() {
     -of csv=p=0 "$f" 2>/dev/null | grep -q audio
 }
 
+# Resolve the video codec once, end-to-end, BEFORE any segment runs.
+# GStreamer capture and the ffmpeg slowdown / concat-fallback passes all
+# need to agree on the codec — if gst captures HEVC but the slowdown
+# transcodes to h264, the concat-demuxer `-c copy` fails on mixed-codec
+# inputs and the whole render falls into the re-encode fallback, which
+# would itself need to know which codec to target. So opt-in HEVC
+# requires *both* hardware paths (NVENC HEVC in gstreamer + hevc_nvenc
+# in ffmpeg) to be available; if either is missing we downgrade the
+# whole render to h264 here at the top, then re-export CLIP_VIDEO_CODEC
+# so clip-capture.sh sees the resolved value.
+#
+# Default is h265: NVENC HEVC is free on GPU (same dedicated silicon as
+# h264) and ~30% smaller files at matched quality. Set CLIP_VIDEO_CODEC
+# explicitly to h264 to opt out.
+CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h265}"
+case "$CLIP_VIDEO_CODEC" in
+  h265|hevc)
+    if h265_available && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q '\bhevc_nvenc\b'; then
+      # hvc1 tag is what Safari/iOS need to play HEVC in MP4. CQ 24 on
+      # NVENC HEVC ≈ h264 CRF 22 visually, with smaller files.
+      FFMPEG_VENC_ARGS=(-c:v hevc_nvenc -preset p5 -rc vbr -cq 24 -tag:v hvc1)
+      CLIP_VIDEO_CODEC=h265
+    else
+      say "h265 requested but gstreamer or ffmpeg lacks NVENC HEVC — using h264 for this render"
+      CLIP_VIDEO_CODEC=h264
+      FFMPEG_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22)
+    fi
+    ;;
+  *)
+    CLIP_VIDEO_CODEC=h264
+    FFMPEG_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22)
+    ;;
+esac
+export CLIP_VIDEO_CODEC
+
 # Parse segments + compute total duration for progress weighting.
 SEG_COUNT=$(printf '%s' "$CLIP_SEGMENTS" | node "$CLIP_HELPERS" segs-count)
 if [ "$SEG_COUNT" -lt 1 ]; then
@@ -433,7 +468,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
          -i "$SEG_FILE" \
          -vf "setpts=${CLIP_RENDER_SPEED}*PTS" \
          "${AUDIO_ARGS[@]}" \
-         -c:v libx264 -preset veryfast -crf 22 \
+         "${FFMPEG_VENC_ARGS[@]}" \
          -movflags +faststart \
          "$SLOW_FILE"; then
       rm -f "$SLOW_FILE"
@@ -483,12 +518,14 @@ fi
 # reads better and the action stays continuous.
 #
 # Encoder strategy: try `-c copy` first — every segment is already
-# h264/aac (from gst at speed=1, or from the libx264 slowdown pass at
-# speed>1), so a stream copy is bit-perfect and finishes near disk-IO
-# speed instead of a second full 1080p60 encode. Concat-demuxer copy
-# only works when timebase + codec params line up across inputs, and
-# nvh264enc vs x264enc + the slowdown pass can produce mismatched
-# params on some pods. Re-encode is the fallback for that case.
+# in the configured codec/aac (from gst at speed=1, or from the
+# matching slowdown pass at speed>1), so a stream copy is bit-perfect
+# and finishes near disk-IO speed instead of a second full 1080p60
+# encode. Concat-demuxer copy only works when timebase + codec params
+# line up across inputs, and the GPU vs sw encoder pair can produce
+# mismatched params on some pods. Re-encode is the fallback for that
+# case, using the same codec family as the segments to keep file
+# sizes consistent.
 if [ "$SEG_COUNT" = "1" ]; then
   ONLY_SEG=$(awk -F"'" '/^file/{print $2}' "$SEG_DIR/concat.txt" | head -1)
   mv -f "$ONLY_SEG" "$CLIP_OUT_FILE"
@@ -505,7 +542,7 @@ else
     say "  concat: stream-copy refused — falling back to re-encode"
     if ! ffmpeg -y -hide_banner -loglevel warning \
          -f concat -safe 0 -i "$SEG_DIR/concat.txt" \
-         -c:v libx264 -preset veryfast -crf 22 \
+         "${FFMPEG_VENC_ARGS[@]}" \
          -c:a aac -b:a 192k \
          -movflags +faststart \
          "$CLIP_OUT_FILE"; then
