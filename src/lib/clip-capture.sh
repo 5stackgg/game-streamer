@@ -1,7 +1,18 @@
 # shellcheck shell=bash
-# File-output GStreamer pipeline for the render-clip flow. Mirrors
-# stream.sh's start_capture but writes to a local mp4 via qtmux +
-# filesink instead of publishing to mediamtx.
+# clip-capture.sh — file-output GStreamer pipeline for the render-clip
+# flow. Mirrors stream.sh's start_capture but writes to a local mp4 via
+# qtmux + filesink instead of publishing to mediamtx via mpegtsmux +
+# srtsink. Shares the same NVENC encoder pickers (pick_h265_pipeline /
+# pick_h264_pipeline) as the live capture; we don't need low-latency
+# tuning here since the consumer is the file writer not a realtime
+# viewer, but matching the live encoder keeps a single GPU code path
+# warm.
+#
+# Why a separate function instead of overloading start_capture: the
+# pipeline tail differs (mux + sink) and start_capture's stream_id /
+# url derivation is tied to the publish:* convention. Keeping them
+# split avoids growing start_capture's argument list past the point
+# of readability — it's already a 5-arg function.
 
 # start_clip_capture <output-file> [fps] [video-kbps] [audio]
 # Returns immediately with $CLIP_CAPTURE_PID set to the gst pid;
@@ -20,10 +31,44 @@ start_clip_capture() {
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
 
-  local enc
-  enc=$(pick_h264_pipeline "$gop" "$kbps" clip)
+  # CLIP_VIDEO_CODEC defaults to h265 — NVENC HEVC runs on the same
+  # dedicated silicon as h264 (no extra GPU cost) and produces ~30%
+  # smaller files at matched quality. The h265 picker scales the kbps
+  # internally to reflect HEVC's efficiency, so callers pass a single
+  # h264-equivalent bitrate. mp4 needs the hvc1 stream-format tag for
+  # Safari/iOS playback (h265parse defaults to byte-stream), forced via
+  # capsfilter before qtmux.
+  #
+  # When called inside the inline-clip-render flow, that script does an
+  # upfront coordinated probe and downgrades CLIP_VIDEO_CODEC to h264 if
+  # either side (gst capture or ffmpeg slowdown/concat) lacks NVENC HEVC
+  # — so the fallback below is mostly belt-and-suspenders for direct
+  # callers. Either way the segment ends up codec-uniform with the
+  # ffmpeg passes.
+  local codec="${CLIP_VIDEO_CODEC:-h265}"
+  local enc="" parse_caps=""
+  case "$codec" in
+    h265|hevc)
+      if enc=$(pick_h265_pipeline "$gop" "$kbps" clip); then
+        parse_caps="h265parse config-interval=1 ! video/x-h265,stream-format=hvc1,alignment=au"
+      else
+        warn "CLIP_VIDEO_CODEC=$codec but no NVENC HEVC encoder available — falling back to h264"
+        codec="h264"
+      fi
+      ;;
+    h264) : ;;
+    *)
+      warn "CLIP_VIDEO_CODEC=$codec unrecognized — using h264"
+      codec="h264"
+      ;;
+  esac
+  if [ "$codec" = "h264" ]; then
+    enc=$(pick_h264_pipeline "$gop" "$kbps" clip)
+    parse_caps="h264parse config-interval=1"
+  fi
 
-  log "  clip capture: $out_file (${fps}fps, ${kbps}kbps, audio=$audio)"
+  # mp4 uses qtmux faststart=true so the api can stream straight to S3.
+  log "  clip capture: $out_file (${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
 
   # qtmux faststart=true puts moov at the front so the api can stream
   # the upload straight to S3 without buffering the whole file.
@@ -33,7 +78,7 @@ start_clip_capture() {
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
-        ! h264parse config-interval=1 \
+        ! $parse_caps \
         ! queue ! mux. \
       pulsesrc device="$pulse_source" \
         ! audio/x-raw,rate=48000,channels=2 \
@@ -50,7 +95,7 @@ start_clip_capture() {
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
-        ! h264parse config-interval=1 \
+        ! $parse_caps \
         ! qtmux faststart=true \
         ! filesink location="$out_file"
   fi

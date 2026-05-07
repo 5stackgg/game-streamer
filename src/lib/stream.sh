@@ -32,8 +32,40 @@ start_capture() {
 
   log "starting capture '${stream_id}' (fps=$fps kbps=$kbps audio=$audio) -> $url"
 
-  local enc
-  enc=$(pick_h264_pipeline "$gop" "$kbps" live)
+  # LIVE_VIDEO_CODEC defaults to h265 — NVENC HEVC encode is free on
+  # GPU and ~30-40% smaller bitrate at matched quality, which is the
+  # win on the mediamtx → viewer hop. mediamtx (>=1.x) muxes HEVC into
+  # HLS over fMP4 fine; modern Chrome/Edge/Safari/iOS decode in HW.
+  # Firefox-on-Linux + older Android viewers may fail to play, surface
+  # a "use a different browser" notice in the player UI for those.
+  # If NVENC HEVC is unavailable (no GPU / older driver), fall back to
+  # h264 so the live stream never goes dark.
+  #
+  # MPEG-TS does NOT use the hvc1/hev1 codec tag (that's an MP4 thing),
+  # so h265parse's default byte-stream output is what mpegtsmux wants
+  # — no capsfilter needed here.
+  local codec="${LIVE_VIDEO_CODEC:-h265}"
+  local enc="" parse=""
+  case "$codec" in
+    h265|hevc)
+      if enc=$(pick_h265_pipeline "$gop" "$kbps" live); then
+        parse="h265parse config-interval=1"
+      else
+        warn "LIVE_VIDEO_CODEC=$codec but no NVENC HEVC encoder available — falling back to h264"
+        codec="h264"
+      fi
+      ;;
+    h264) : ;;
+    *)
+      warn "LIVE_VIDEO_CODEC=$codec unrecognized — using h264"
+      codec="h264"
+      ;;
+  esac
+  if [ "$codec" = "h264" ]; then
+    enc=$(pick_h264_pipeline "$gop" "$kbps" live)
+    parse="h264parse config-interval=1"
+  fi
+  log "  codec: $codec"
 
   # Persist args so restart_capture can re-invoke us identically.
   local args_dir="${LOG_DIR:-/tmp/game-streamer}"
@@ -64,7 +96,7 @@ start_capture() {
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
-        ! h264parse config-interval=1 \
+        ! $parse \
         ! queue ! mux. \
       pulsesrc device="$pulse_source" \
         ! audio/x-raw,rate=48000,channels=2 \
@@ -81,7 +113,7 @@ start_capture() {
         ! video/x-raw,framerate="$fps"/1 \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
-        ! h264parse config-interval=1 \
+        ! $parse \
         ! mpegtsmux alignment=7 \
         ! srtsink uri="$url" latency=200
   fi
@@ -90,6 +122,7 @@ start_capture() {
   # nvh264enc init, srt handshake). The WhepPlayer's own retry surfaces
   # later publish failures.
   local pid=$SPAWNED_PID
+  local i
   for i in 1 2 3; do
     if ! kill -0 "$pid" 2>/dev/null; then
       warn "capture '${stream_id}' died after ${i}s"
