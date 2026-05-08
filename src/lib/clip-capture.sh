@@ -34,19 +34,9 @@ start_clip_capture() {
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
 
-  # Encoder: prefer the GPU path for parity with the live capture.
-  # nvh264enc on the GPU pod, x264enc as fallback for non-GPU debug
-  # rigs. crf-style tuning isn't exposed on nvh264enc — bitrate at
-  # 8mbps gives clean 1080p60 for short clips without ballooning
-  # filesize. mp4 is `qtmux faststart=true` so the moov atom lives at
-  # the head of the file; this is what lets the api stream the file
-  # straight through to S3 (no second pass needed).
-  local enc=""
-  if gst-inspect-1.0 nvh264enc >/dev/null 2>&1; then
-    enc="nvh264enc preset=hq gop-size=$gop bitrate=$kbps rc-mode=cbr"
-  else
-    enc="x264enc tune=zerolatency speed-preset=veryfast bitrate=$kbps key-int-max=$gop"
-  fi
+  # mp4 uses qtmux faststart=true so the api can stream straight to S3.
+  local enc
+  enc=$(pick_h264_pipeline "$gop" "$kbps" clip)
 
   log "  clip capture: $out_file (${fps}fps, ${kbps}kbps, audio=$audio)"
 

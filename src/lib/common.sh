@@ -105,6 +105,103 @@ dump_log() {
     "${SCRIPT_TAG:-game-streamer}" "${1:-?}" >&2
 }
 
+# Pick an H.264 encoder fragment for `! video/x-raw,format=NV12 !`.
+# Tries nvcudah264enc, then nvh264enc with a probed preset (driver 550+
+# drops legacy preset GUIDs from the enumerated list, so low-latency-hq
+# fails strict validation), then x264enc. Result cached per-process in
+# GS_NVENC_PICK; override the family with GS_NVENC_ELEMENT.
+# Usage: pick_h264_pipeline <gop> <kbps> [live|clip]
+pick_h264_pipeline() {
+  local gop="${1:?gop required}"
+  local kbps="${2:?kbps required}"
+  local mode="${3:-live}"
+
+  if [ -z "${GS_NVENC_PICK:-}" ]; then
+    GS_NVENC_PICK=$(_resolve_h264_method) || return 1
+    export GS_NVENC_PICK
+  fi
+
+  case "$GS_NVENC_PICK" in
+    nvcudah264enc)
+      local preset tune
+      case "$mode" in
+        clip) preset="p5"; tune="high-quality" ;;
+        *)    preset="p4"; tune="low-latency"  ;;
+      esac
+      printf 'cudaupload ! nvcudah264enc preset=%s tune=%s rc-mode=cbr gop-size=%s bitrate=%s' \
+        "$preset" "$tune" "$gop" "$kbps"
+      ;;
+    nvh264enc:*)
+      local preset="${GS_NVENC_PICK#nvh264enc:}"
+      printf 'nvh264enc preset=%s rc-mode=cbr gop-size=%s bitrate=%s' \
+        "$preset" "$gop" "$kbps"
+      ;;
+    x264enc)
+      printf 'x264enc tune=zerolatency speed-preset=veryfast bitrate=%s key-int-max=%s' \
+        "$kbps" "$gop"
+      ;;
+  esac
+}
+
+_resolve_h264_method() {
+  local force="${GS_NVENC_ELEMENT:-auto}"
+
+  if [ "$force" = "auto" ] || [ "$force" = "nvcudah264enc" ]; then
+    if gst-inspect-1.0 nvcudah264enc >/dev/null 2>&1 \
+       && gst-inspect-1.0 cudaupload >/dev/null 2>&1 \
+       && _probe_nvcudah264enc; then
+      log "  encoder: nvcudah264enc (GPU, modern API)"
+      printf 'nvcudah264enc'
+      return 0
+    fi
+    [ "$force" = "nvcudah264enc" ] && \
+      warn "GS_NVENC_ELEMENT=nvcudah264enc forced but unavailable — falling through"
+  fi
+
+  if [ "$force" = "auto" ] || [ "$force" = "nvh264enc" ]; then
+    if gst-inspect-1.0 nvh264enc >/dev/null 2>&1; then
+      local preset
+      if preset=$(_probe_nvh264enc_preset); then
+        log "  encoder: nvh264enc preset=$preset (GPU, legacy API)"
+        printf 'nvh264enc:%s' "$preset"
+        return 0
+      fi
+    fi
+    [ "$force" = "nvh264enc" ] && \
+      warn "GS_NVENC_ELEMENT=nvh264enc forced but unavailable — falling through"
+  fi
+
+  log "  encoder: x264enc (software fallback)"
+  printf 'x264enc'
+}
+
+_probe_nvcudah264enc() {
+  gst-launch-1.0 -q \
+    videotestsrc num-buffers=1 \
+    ! video/x-raw,format=NV12,width=320,height=240,framerate=30/1 \
+    ! cudaupload \
+    ! nvcudah264enc preset=p4 tune=low-latency \
+    ! fakesink sync=false \
+    >/dev/null 2>&1
+}
+
+_probe_nvh264enc_preset() {
+  local p
+  for p in ${NVH264_PRESET_CANDIDATES:-low-latency-hq low-latency hq default}; do
+    if gst-launch-1.0 -q \
+         videotestsrc num-buffers=1 \
+         ! video/x-raw,format=NV12,width=320,height=240,framerate=30/1 \
+         ! nvh264enc preset="$p" \
+         ! fakesink sync=false \
+         >/dev/null 2>&1
+    then
+      printf '%s' "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Trap-friendly verbose toggle. `GS_TRACE=1 ./game-streamer.sh ...` runs
 # under `set -x` so every command is echoed.
 [ "${GS_TRACE:-0}" = "1" ] && set -x
