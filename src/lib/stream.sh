@@ -60,6 +60,11 @@ start_capture() {
         codec="h264"
       fi
       ;;
+    h264) : ;;
+    *)
+      warn "LIVE_VIDEO_CODEC=$codec unrecognized — using h264"
+      codec="h264"
+      ;;
   esac
   if [ "$codec" = "h264" ]; then
     enc=$(pick_h264_pipeline "$gop" "$kbps" live)

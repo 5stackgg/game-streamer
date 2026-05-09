@@ -60,6 +60,11 @@ start_clip_capture() {
         codec="h264"
       fi
       ;;
+    h264) : ;;
+    *)
+      warn "CLIP_VIDEO_CODEC=$codec unrecognized — using h264"
+      codec="h264"
+      ;;
   esac
   if [ "$codec" = "h264" ]; then
     enc=$(pick_h264_pipeline "$gop" "$kbps" clip)
