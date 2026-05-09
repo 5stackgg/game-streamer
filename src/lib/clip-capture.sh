@@ -2,10 +2,11 @@
 # clip-capture.sh — file-output GStreamer pipeline for the render-clip
 # flow. Mirrors stream.sh's start_capture but writes to a local mp4 via
 # qtmux + filesink instead of publishing to mediamtx via mpegtsmux +
-# srtsink. Same nvh264enc/x264enc encoder choice rules; we don't need
-# low-latency tuning here since the consumer is the file writer not a
-# realtime viewer, but matching the live encoder keeps a single GPU
-# code path warm.
+# srtsink. Shares the same NVENC encoder pickers (pick_h265_pipeline /
+# pick_h264_pipeline) as the live capture; we don't need low-latency
+# tuning here since the consumer is the file writer not a realtime
+# viewer, but matching the live encoder keeps a single GPU code path
+# warm.
 #
 # Why a separate function instead of overloading start_capture: the
 # pipeline tail differs (mux + sink) and start_capture's stream_id /
