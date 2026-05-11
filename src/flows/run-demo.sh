@@ -289,31 +289,7 @@ do_applaunch() {
   fi
 }
 do_applaunch
-RELAUNCH_DONE=0
-
-CS2_PID=""
-for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
-  CS2_PID=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
-  [ -n "$CS2_PID" ] && break
-
-  if [ "$i" -ge 3 ] && [ "$i" -le 90 ] && [ $(( i % 5 )) -eq 0 ]; then
-    poke_steam_dialog
-  fi
-
-  [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
-
-  if [ "$i" = 30 ] && [ "$RELAUNCH_DONE" = 0 ]; then
-    log "  30s without cs2 — re-issuing -applaunch (one-shot fallback)"
-    do_applaunch
-    RELAUNCH_DONE=1
-  fi
-  sleep 1
-done
-[ -n "$CS2_PID" ] || {
-  log "--- $STEAM_LIBRARY/steam/logs/console-linux.txt (last 20) ---"
-  tail -20 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null || true
-  die "Steam never spawned cs2 in ${CS2_LAUNCH_TIMEOUT}s"
-}
+wait_for_cs2_process do_applaunch
 log "  cs2 pid=$CS2_PID"
 
 minimize_steam_windows

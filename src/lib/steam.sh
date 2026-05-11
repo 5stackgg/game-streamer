@@ -1435,3 +1435,70 @@ wait_for_steam_pipe() {
     sleep 1
   done
 }
+
+# wait_for_cs2_process <applaunch_fn>
+#
+# Block until a /linuxsteamrt64/cs2 process appears, up to
+# CS2_LAUNCH_TIMEOUT seconds. Sets CS2_PID for the caller. die()s on
+# timeout (and dumps the tail of Steam's console-linux.txt first).
+#
+# Side effects on each iteration:
+#   - first 90s, every 5s: poke_steam_dialog (Space-press the focused
+#     button on any modal CEF dialog Steam pops — cloud-out-of-date,
+#     shader pre-cache, etc).
+#   - every 30s, up to 4 retries: re-invoke <applaunch_fn>. Steam
+#     sometimes silently drops the very first applaunch on a cold
+#     login (logs "Steam is already running, command line was
+#     forwarded" but no cs2 follows). One retry was the original
+#     fallback; bumping it to 4 spaced-out retries covers the cases
+#     where Steam is still doing first-cold init (auth refresh,
+#     manifest sync) past the 30s mark — observed in the wild on a
+#     pod where cs2 only spawned after Steam finished its background
+#     update check ~2 min in.
+#   - at 60s/120s/180s: dump open X windows + console-linux.txt tail
+#     so a future failure leaves evidence (which dialog was up, what
+#     Steam was doing) instead of a silent 5-min wait.
+#
+# The applaunch fn is passed by NAME (so the caller doesn't need to
+# export it). It must be a defined shell function in the caller's
+# scope; we invoke it as `"$1"`.
+wait_for_cs2_process() {
+  local applaunch_fn="${1:?applaunch function name required}"
+  local relaunch_count=0
+  local pid="" i
+
+  for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
+    pid=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
+    if [ -n "$pid" ]; then
+      CS2_PID="$pid"
+      return 0
+    fi
+
+    if [ "$i" -ge 3 ] && [ "$i" -le 90 ] && [ $(( i % 5 )) -eq 0 ]; then
+      poke_steam_dialog
+    fi
+
+    [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
+
+    if [ $(( i % 30 )) -eq 0 ] && [ "$relaunch_count" -lt 4 ]; then
+      relaunch_count=$(( relaunch_count + 1 ))
+      log "  ${i}s without cs2 — re-issuing -applaunch (retry ${relaunch_count}/4)"
+      "$applaunch_fn"
+    fi
+
+    case "$i" in
+      60|120|180)
+        log "  diag @ ${i}s — open X windows:"
+        list_x_windows 2>/dev/null | sed 's/^/    /' || true
+        log "  diag @ ${i}s — last 10 lines of $STEAM_LIBRARY/steam/logs/console-linux.txt:"
+        tail -10 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null | sed 's/^/    /' || true
+        ;;
+    esac
+
+    sleep 1
+  done
+
+  log "--- $STEAM_LIBRARY/steam/logs/console-linux.txt (last 20) ---"
+  tail -20 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null || true
+  die "Steam never spawned cs2 in ${CS2_LAUNCH_TIMEOUT}s"
+}
