@@ -289,48 +289,7 @@ do_applaunch() {
   fi
 }
 do_applaunch
-RELAUNCH_DONE=0
-
-# Wait for cs2 process. Two side-effects on each iteration:
-#  - poke the Steam window with Return: dismisses the focused button on
-#    any modal CEF dialog (cloud-out-of-date, "Launching ... shaders", etc).
-#  - every 15s, dump the open X windows + cs2/launcher state so the
-#    operator can see what Steam is actually showing right now.
-CS2_PID=""
-for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
-  CS2_PID=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
-  [ -n "$CS2_PID" ] && break
-
-  # Auto-poke: Space dismisses Steam's CEF dialogs (cloud-out-of-date,
-  # shader pre-cache) by activating the default-focused button. Bounded
-  # to the first 90s of the wait — covers a late-appearing dialog while
-  # cs2 is downloading cloud files. cs2 spawn breaks the loop so this
-  # never fires once the game is up.
-  if [ "$i" -ge 3 ] && [ "$i" -le 90 ] && [ $(( i % 5 )) -eq 0 ]; then
-    poke_steam_dialog
-  fi
-
-  [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
-
-  # Fallback: if cs2 still hasn't spawned after 30s, re-issue applaunch
-  # once. Steam sometimes ignores the very first applaunch on a fresh
-  # login (logs "Steam is already running, command line was forwarded"
-  # but never spawns cs2). A second applaunch reliably kicks it.
-  if [ "$i" = 30 ] && [ "$RELAUNCH_DONE" = 0 ]; then
-    log "  30s without cs2 — re-issuing -applaunch (one-shot fallback)"
-    do_applaunch
-    RELAUNCH_DONE=1
-  fi
-  sleep 1
-done
-[ -n "$CS2_PID" ] || {
-  # Steam-side console log isn't piped to stderr (it's a file Steam
-  # owns) so dump its tail inline. Other diagnostics live in the k8s
-  # log under [cs2-launch] / [steam].
-  log "--- $STEAM_LIBRARY/steam/logs/console-linux.txt (last 20) ---"
-  tail -20 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null || true
-  die "Steam never spawned cs2 in ${CS2_LAUNCH_TIMEOUT}s"
-}
+wait_for_cs2_process do_applaunch
 log "  cs2 pid=$CS2_PID"
 
 # cs2 is up — hide Steam's main UI + Friends List so any missed
