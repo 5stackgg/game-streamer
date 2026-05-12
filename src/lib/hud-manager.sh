@@ -310,12 +310,14 @@ seed_hud_db() {
   local hdr=()
   [ -n "$API_TOKEN" ] && hdr=(-H "Authorization: Bearer $API_TOKEN")
 
-  # GET /matches/:id/hud-data returns the curated shape we POST onward
-  # — pre-flattened lineups with absolute avatar/logo URLs. See
-  # api/src/matches/matches.controller.ts:getMatchHudData.
+  # GET /hud-data/:id returns the curated shape we POST onward — pre-flattened
+  # lineups with absolute avatar/logo URLs. See
+  # api/src/matches/game-streamer/hud-data.controller.ts:getMatchHudData.
+  # Path is intentionally outside /matches/* so it stays off the public api
+  # ingress (only reachable from inside the cluster via $API_BASE).
   local match_json
   match_json=$(curl -fsS --max-time 10 "${hdr[@]}" \
-        "${API_BASE%/}/matches/${match_id}/hud-data") || {
+        "${API_BASE%/}/hud-data/${match_id}") || {
     warn "match fetch failed"
     return 0
   }
