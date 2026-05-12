@@ -139,8 +139,8 @@ PY
 }
 
 # Forwards steamcmd "Update state ... progress: X.YY" lines through
-# report_status. Skips repeats unless stage changes or % advances ≥1.0.
-# Always returns 0 — set -o pipefail safe.
+# report_status; mirrors each throttled tick to stderr. Skips repeats
+# unless stage changes or % advances ≥1.0. set -o pipefail safe.
 _emit_cs2_progress_from_stdin() {
   local line stage pct last_stage="" last_pct="-1"
   while IFS= read -r line; do
@@ -153,6 +153,7 @@ _emit_cs2_progress_from_stdin() {
       fi
       last_stage="$stage"
       last_pct="$pct"
+      printf '[steamcmd] cs2 install: %s %s%%\n' "$stage" "$pct" >&2
       report_status status=downloading_cs2 progress="$pct" progress_stage="$stage"
     fi
   done
@@ -249,8 +250,36 @@ install_cs2_via_steamcmd() {
   if grep -qE 'No subscription|No license' "$steamcmd_log"; then
     die "Steam account lacks a CS2 license — the streamer Steam account must own (or have a free license for) CS2 (appid 730)."
   fi
+  if grep -qE 'No space left on device|Disk write failure|ENOSPC|insufficient.*disk space' "$steamcmd_log"; then
+    die "steamcmd failed: out of disk space on the streamer PVC (\$STEAM_LIBRARY=$STEAM_LIBRARY) — resize or evict cached games."
+  fi
+  if grep -qE 'Connection reset by peer|Failed to receive any data, quitting now|Could not connect to Steam network|Connecting anonymously to Steam Public.*FAILED|Connection to Steam servers lost' "$steamcmd_log"; then
+    die "steamcmd lost connection to Steam servers — usually transient, the pod will retry on restart. Last log lines: $(_steamcmd_log_tail "$steamcmd_log")"
+  fi
+  local appstate_line
+  appstate_line=$(grep -E 'ERROR! ?(App|Update) .*(state|failed)|Failed to install app|Update failed' "$steamcmd_log" | tail -1 || true)
+  if [ -n "$appstate_line" ]; then
+    die "steamcmd install failed: ${appstate_line}"
+  fi
 
-  die "steamcmd finished but no $manifest — install failed (see steamcmd-cs2-install.log in pod logs)"
+  die "steamcmd finished but no $manifest — install failed. Tail: $(_steamcmd_log_tail "$steamcmd_log")"
+}
+
+# Joins the last few non-empty lines with ` | ` for embedding in die().
+# Capped well under the api's 500-char error_message ceiling.
+_steamcmd_log_tail() {
+  local f="${1:?log path required}"
+  [ -f "$f" ] || { printf '(log missing)'; return; }
+  local tail_text
+  tail_text=$(grep -v '^[[:space:]]*$' "$f" 2>/dev/null \
+    | tail -8 \
+    | tr '\n' '|' \
+    | sed 's/|$//; s/|/ | /g')
+  if [ -z "$tail_text" ]; then
+    printf '(no output captured)'
+  else
+    printf '%.380s' "$tail_text"
+  fi
 }
 
 # Pre-download a CS2 workshop map via steamcmd. Without this, +playdemo
