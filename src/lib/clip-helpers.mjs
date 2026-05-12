@@ -105,13 +105,20 @@ switch (subcmd) {
   }
 
   // [stdin: CLIP_BATCH_JOBS] -> one "<job_id>\t<token>" line per job.
+  // Tabs/newlines in either field would mis-split the bash `read -r`
+  // on the other side, so we reject malformed entries silently.
   case "jobs-credentials": {
     const d = readStdinJson();
     if (!Array.isArray(d)) break;
+    const FORBIDDEN = /[\t\n\r]/;
     for (const job of d) {
       const id = job?.job_id;
       const token = job?.token;
-      if (typeof id === "string" && typeof token === "string" && id && token) {
+      if (
+        typeof id === "string" && typeof token === "string"
+        && id && token
+        && !FORBIDDEN.test(id) && !FORBIDDEN.test(token)
+      ) {
         process.stdout.write(`${id}\t${token}\n`);
       }
     }

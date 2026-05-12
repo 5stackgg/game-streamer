@@ -60,16 +60,58 @@ _status_reporter_configured() {
   [ -n "$MATCH_ID" ] && [ -n "$MATCH_PASSWORD" ]
 }
 
-# Fan errors out to every job in CLIP_BATCH_JOBS — batch pods have no
-# single status channel, so die() relies on this instead.
-broadcast_batch_error() {
-  [ "${CLIP_BATCH_MODE:-0}" = "1" ] || return 0
-  [ -n "${CLIP_BATCH_JOBS:-}" ]    || return 0
-  [ "$#" -gt 0 ]                   || return 0
+# True when this pod is processing a batch of highlight render jobs.
+_in_batch_broadcast_mode() {
+  [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -n "${CLIP_BATCH_JOBS:-}" ]
+}
+
+# POSTs $body to /clip-renders/:id/status for every job in
+# CLIP_BATCH_JOBS. Curls fan out in parallel — N jobs cost max(curl)
+# (~3s timeout) not N*3s — and we wait so callers don't leak zombies.
+_broadcast_to_batch_jobs() {
+  local body="$1"
+  [ -n "$body" ] || return 0
 
   local helpers="${LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/clip-helpers.mjs"
   [ -f "$helpers" ] || return 0
   command -v node >/dev/null 2>&1 || return 0
+
+  local creds id token
+  creds=$(printf '%s' "$CLIP_BATCH_JOBS" \
+    | node "$helpers" jobs-credentials 2>/dev/null) || return 0
+  [ -n "$creds" ] || return 0
+
+  local pids=() pid
+  while IFS=$'\t' read -r id token; do
+    [ -n "$id" ] && [ -n "$token" ] || continue
+    curl -sS -m 3 -X POST \
+      -H "x-origin-auth: ${id}:${token}" \
+      -H "Content-Type: application/json" \
+      --data-binary "$body" \
+      -o /dev/null \
+      "${STATUS_API_BASE}/clip-renders/${id}/status" \
+      2>/dev/null &
+    pids+=( "$!" )
+  done <<< "$creds"
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+}
+
+# Encodes args to JSON via clip-helpers and broadcasts. Returns empty
+# on encode failure so callers can early-return.
+_encode_status_body() {
+  local helpers="${LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/clip-helpers.mjs"
+  [ -f "$helpers" ] || return 1
+  command -v node >/dev/null 2>&1 || return 1
+  node "$helpers" status-body "$@" 2>/dev/null
+}
+
+# Fan errors out to every job in CLIP_BATCH_JOBS — batch pods have no
+# single status channel, so die() relies on this instead.
+broadcast_batch_error() {
+  _in_batch_broadcast_mode || return 0
+  [ "$#" -gt 0 ]           || return 0
 
   # clip_render_jobs use status="error" (not "errored" like match_streams).
   local mapped=() arg
@@ -81,33 +123,15 @@ broadcast_batch_error() {
   done
 
   local body
-  body=$(node "$helpers" status-body "${mapped[@]}" 2>/dev/null) || return 0
-  [ -n "$body" ] || return 0
-
-  local creds id token
-  creds=$(printf '%s' "$CLIP_BATCH_JOBS" \
-    | node "$helpers" jobs-credentials 2>/dev/null) || return 0
-  [ -n "$creds" ] || return 0
-
-  while IFS=$'\t' read -r id token; do
-    [ -n "$id" ] && [ -n "$token" ] || continue
-    curl -sS -m 3 -X POST \
-      -H "x-origin-auth: ${id}:${token}" \
-      -H "Content-Type: application/json" \
-      --data-binary "$body" \
-      -o /dev/null \
-      "${STATUS_API_BASE}/clip-renders/${id}/status" \
-      2>/dev/null \
-      || true
-  done <<< "$creds"
+  body=$(_encode_status_body "${mapped[@]}") || return 0
+  _broadcast_to_batch_jobs "$body"
 }
 
 # Fan boot-stage ticks out as {status: "booting", boot_stage,
 # boot_progress} — the api keeps row.status untouched.
 broadcast_batch_status() {
-  [ "${CLIP_BATCH_MODE:-0}" = "1" ] || return 0
-  [ -n "${CLIP_BATCH_JOBS:-}" ]    || return 0
-  [ "$#" -gt 0 ]                   || return 0
+  _in_batch_broadcast_mode || return 0
+  [ "$#" -gt 0 ]           || return 0
 
   local arg stage="" progress=""
   for arg in "$@"; do
@@ -126,10 +150,6 @@ broadcast_batch_status() {
     ""|errored|live|error) return 0 ;;
   esac
 
-  local helpers="${LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/clip-helpers.mjs"
-  [ -f "$helpers" ] || return 0
-  command -v node >/dev/null 2>&1 || return 0
-
   # Translate the 0..100 setup-steam progress into 0..1 the api expects.
   local boot_progress=""
   if [ -n "$progress" ]; then
@@ -138,32 +158,15 @@ broadcast_batch_status() {
       if (n < 0) n = 0
       if (n > 100) n = 100
       printf "%.4f", n / 100
-    }' 2>/dev/null) || boot_progress=""
+    }')
   fi
 
   local body_args=( "status=booting" "boot_stage=$stage" )
   [ -n "$boot_progress" ] && body_args+=( "boot_progress=$boot_progress" )
 
   local body
-  body=$(node "$helpers" status-body "${body_args[@]}" 2>/dev/null) || return 0
-  [ -n "$body" ] || return 0
-
-  local creds id token
-  creds=$(printf '%s' "$CLIP_BATCH_JOBS" \
-    | node "$helpers" jobs-credentials 2>/dev/null) || return 0
-  [ -n "$creds" ] || return 0
-
-  while IFS=$'\t' read -r id token; do
-    [ -n "$id" ] && [ -n "$token" ] || continue
-    curl -sS -m 3 -X POST \
-      -H "x-origin-auth: ${id}:${token}" \
-      -H "Content-Type: application/json" \
-      --data-binary "$body" \
-      -o /dev/null \
-      "${STATUS_API_BASE}/clip-renders/${id}/status" \
-      2>/dev/null \
-      || true
-  done <<< "$creds"
+  body=$(_encode_status_body "${body_args[@]}") || return 0
+  _broadcast_to_batch_jobs "$body"
 }
 
 _status_report_url() {
@@ -188,6 +191,10 @@ _status_auth_header() {
 # under $LOG_DIR.
 report_status() {
   [ "$#" -eq 0 ] && return 0
+
+  # Cheap bail-out: if neither the reporter daemon nor a batch broadcast
+  # has a destination for this call, don't bother tracking state.
+  _status_reporter_configured || _in_batch_broadcast_mode || return 0
 
   local arg new_status=""
   for arg in "$@"; do

@@ -43,6 +43,8 @@ die()  {
     broadcast_batch_error status=errored "error=$*" >/dev/null 2>&1 || true
   fi
   # Brief flush so the daemon's poll cycle PUTs before the Job is reaped.
+  # batch_error is synchronous curl + wait, so it needs no flush; the
+  # sleep is purely for the daemon path.
   if declare -F report_status >/dev/null 2>&1; then
     sleep "${STATUS_DIE_FLUSH_SECONDS:-3}" 2>/dev/null || true
   fi
