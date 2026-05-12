@@ -1,11 +1,10 @@
-import process from "node:process";
-
 import { DISPLAY } from "../env.mjs";
 import { run } from "../util/run.mjs";
 
 // cs2's reported window name varies by game state, so we try several
 // strategies. xdotool --name matches per-property, so anchored ^...$
-// forms miss when WM_NAME differs from _NET_WM_NAME.
+// forms miss when WM_NAME differs from _NET_WM_NAME. Returns null
+// silently — callers check the return value.
 export async function findCs2Window() {
   for (const pattern of ["Counter-Strike 2", "Counter-Strike", "cs2"]) {
     const r = await run(["xdotool", "search", "--name", pattern]);
@@ -28,6 +27,5 @@ export async function findCs2Window() {
       }
     }
   }
-  process.stderr.write(`[spec-server] no cs2 window on DISPLAY=${DISPLAY}\n`);
   return null;
 }

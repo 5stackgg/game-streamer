@@ -60,6 +60,112 @@ _status_reporter_configured() {
   [ -n "$MATCH_ID" ] && [ -n "$MATCH_PASSWORD" ]
 }
 
+# Fan errors out to every job in CLIP_BATCH_JOBS — batch pods have no
+# single status channel, so die() relies on this instead.
+broadcast_batch_error() {
+  [ "${CLIP_BATCH_MODE:-0}" = "1" ] || return 0
+  [ -n "${CLIP_BATCH_JOBS:-}" ]    || return 0
+  [ "$#" -gt 0 ]                   || return 0
+
+  local helpers="${LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/clip-helpers.mjs"
+  [ -f "$helpers" ] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+
+  # clip_render_jobs use status="error" (not "errored" like match_streams).
+  local mapped=() arg
+  for arg in "$@"; do
+    case "$arg" in
+      status=errored) mapped+=("status=error") ;;
+      *)              mapped+=("$arg")         ;;
+    esac
+  done
+
+  local body
+  body=$(node "$helpers" status-body "${mapped[@]}" 2>/dev/null) || return 0
+  [ -n "$body" ] || return 0
+
+  local creds id token
+  creds=$(printf '%s' "$CLIP_BATCH_JOBS" \
+    | node "$helpers" jobs-credentials 2>/dev/null) || return 0
+  [ -n "$creds" ] || return 0
+
+  while IFS=$'\t' read -r id token; do
+    [ -n "$id" ] && [ -n "$token" ] || continue
+    curl -sS -m 3 -X POST \
+      -H "x-origin-auth: ${id}:${token}" \
+      -H "Content-Type: application/json" \
+      --data-binary "$body" \
+      -o /dev/null \
+      "${STATUS_API_BASE}/clip-renders/${id}/status" \
+      2>/dev/null \
+      || true
+  done <<< "$creds"
+}
+
+# Fan boot-stage ticks out as {status: "booting", boot_stage,
+# boot_progress} — the api keeps row.status untouched.
+broadcast_batch_status() {
+  [ "${CLIP_BATCH_MODE:-0}" = "1" ] || return 0
+  [ -n "${CLIP_BATCH_JOBS:-}" ]    || return 0
+  [ "$#" -gt 0 ]                   || return 0
+
+  local arg stage="" progress=""
+  for arg in "$@"; do
+    case "$arg" in
+      status=*) stage="${arg#status=}" ;;
+      progress=*) progress="${arg#progress=}" ;;
+      progress_stage=*)
+        # Fold sub-stage into boot_stage as "downloading_cs2:Validating".
+        local sub="${arg#progress_stage=}"
+        [ -n "$sub" ] && [ -n "$stage" ] && stage="${stage}:${sub}"
+        ;;
+    esac
+  done
+
+  case "$stage" in
+    ""|errored|live|error) return 0 ;;
+  esac
+
+  local helpers="${LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/clip-helpers.mjs"
+  [ -f "$helpers" ] || return 0
+  command -v node >/dev/null 2>&1 || return 0
+
+  # Translate the 0..100 setup-steam progress into 0..1 the api expects.
+  local boot_progress=""
+  if [ -n "$progress" ]; then
+    boot_progress=$(awk -v p="$progress" 'BEGIN{
+      n = p + 0
+      if (n < 0) n = 0
+      if (n > 100) n = 100
+      printf "%.4f", n / 100
+    }' 2>/dev/null) || boot_progress=""
+  fi
+
+  local body_args=( "status=booting" "boot_stage=$stage" )
+  [ -n "$boot_progress" ] && body_args+=( "boot_progress=$boot_progress" )
+
+  local body
+  body=$(node "$helpers" status-body "${body_args[@]}" 2>/dev/null) || return 0
+  [ -n "$body" ] || return 0
+
+  local creds id token
+  creds=$(printf '%s' "$CLIP_BATCH_JOBS" \
+    | node "$helpers" jobs-credentials 2>/dev/null) || return 0
+  [ -n "$creds" ] || return 0
+
+  while IFS=$'\t' read -r id token; do
+    [ -n "$id" ] && [ -n "$token" ] || continue
+    curl -sS -m 3 -X POST \
+      -H "x-origin-auth: ${id}:${token}" \
+      -H "Content-Type: application/json" \
+      --data-binary "$body" \
+      -o /dev/null \
+      "${STATUS_API_BASE}/clip-renders/${id}/status" \
+      2>/dev/null \
+      || true
+  done <<< "$creds"
+}
+
 _status_report_url() {
   if [ -n "$STATUS_REPORT_URL" ]; then
     printf '%s' "$STATUS_REPORT_URL"
@@ -81,7 +187,6 @@ _status_auth_header() {
 # Callers may run in different subshells, so state lives in files
 # under $LOG_DIR.
 report_status() {
-  _status_reporter_configured || return 0
   [ "$#" -eq 0 ] && return 0
 
   local arg new_status=""
@@ -105,6 +210,10 @@ report_status() {
     fi
     printf '%s|%s\n' "$new_status" "$now" >"$STATUS_LAST_FILE"
   fi
+
+  broadcast_batch_status "$@" || true
+
+  _status_reporter_configured || return 0
 
   local tmp="$STATUS_STATE_FILE.tmp.$$"
   if ! python3 - "$@" >"$tmp" <<'PY'
@@ -173,7 +282,11 @@ _status_daemon_loop() {
 
 start_status_reporter() {
   if ! _status_reporter_configured; then
-    log "status-reporter: disabled (MATCH_ID/MATCH_PASSWORD unset)"
+    if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -n "${CLIP_BATCH_JOBS:-}" ]; then
+      log "status-reporter: batch-highlights mode — broadcasting per-job"
+    else
+      log "status-reporter: disabled (MATCH_ID/MATCH_PASSWORD unset)"
+    fi
     return 0
   fi
   if _status_daemon_running; then

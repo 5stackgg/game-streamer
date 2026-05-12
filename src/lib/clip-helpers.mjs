@@ -104,6 +104,20 @@ switch (subcmd) {
     break;
   }
 
+  // [stdin: CLIP_BATCH_JOBS] -> one "<job_id>\t<token>" line per job.
+  case "jobs-credentials": {
+    const d = readStdinJson();
+    if (!Array.isArray(d)) break;
+    for (const job of d) {
+      const id = job?.job_id;
+      const token = job?.token;
+      if (typeof id === "string" && typeof token === "string" && id && token) {
+        process.stdout.write(`${id}\t${token}\n`);
+      }
+    }
+    break;
+  }
+
   // [stdin: CLIP_BATCH_JOBS] -> JSON of jobs[argv[0]]. Exits 1 if oob.
   case "jobs-at": {
     const idx = Number(args[0]);
@@ -228,16 +242,17 @@ switch (subcmd) {
     break;
   }
 
-  // Build a status-body JSON object from "k=v" args. `progress` is
-  // coerced to a number (and dropped if NaN); other keys stay strings.
+  // Build a status-body JSON object from "k=v" args. Numeric fields
+  // are coerced (and dropped if NaN); other keys stay strings.
   case "status-body": {
+    const NUMERIC = new Set(["progress", "boot_progress", "duration_ms"]);
     const out = {};
     for (const kv of args) {
       const i = kv.indexOf("=");
       if (i < 0) continue;
       const k = kv.slice(0, i);
       const v = kv.slice(i + 1);
-      if (k === "progress") {
+      if (NUMERIC.has(k)) {
         const f = Number(v);
         if (Number.isFinite(f)) out[k] = f;
       } else {

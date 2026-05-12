@@ -36,11 +36,14 @@ log()  { printf '[%s] %s\n' "${SCRIPT_TAG:-game-streamer}" "$*"; }
 warn() { printf '[%s] WARN: %s\n' "${SCRIPT_TAG:-game-streamer}" "$*" >&2; }
 die()  {
   printf '[%s] ERROR: %s\n' "${SCRIPT_TAG:-game-streamer}" "$*" >&2
-  # Surface failure to the api before exit if the reporter is loaded.
-  # Brief sleep lets the daemon's poll cycle pick up the new state
-  # before the Job gets reaped by stopLive.
   if declare -F report_status >/dev/null 2>&1; then
     report_status status=errored "error=$*" >/dev/null 2>&1 || true
+  fi
+  if declare -F broadcast_batch_error >/dev/null 2>&1; then
+    broadcast_batch_error status=errored "error=$*" >/dev/null 2>&1 || true
+  fi
+  # Brief flush so the daemon's poll cycle PUTs before the Job is reaped.
+  if declare -F report_status >/dev/null 2>&1; then
     sleep "${STATUS_DIE_FLUSH_SECONDS:-3}" 2>/dev/null || true
   fi
   exit 1
