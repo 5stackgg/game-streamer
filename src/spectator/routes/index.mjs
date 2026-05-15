@@ -31,6 +31,7 @@ import {
 } from "./demo.mjs";
 import { renderClipHandler } from "./render-clip.mjs";
 import { switchMatchHandler } from "./switch-match.mjs";
+import { reconnectHandler } from "./reconnect.mjs";
 
 const HEALTH_GET_URLS = new Set(["/", "/health", "/spec/health"]);
 
@@ -46,6 +47,7 @@ const ROUTES = new Map([
   ["POST /spec/hud",          hudHandler],
   ["POST /spec/hud-mode",     hudModeHandler],
   ["POST /spec/switch-match", switchMatchHandler],
+  ["POST /spec/reconnect",    reconnectHandler],
   ["POST /spec/xray",         specXrayHandler],
   ["POST /spec/scoreboard",   specScoreboardHandler],
 

@@ -160,8 +160,11 @@ _emit_cs2_progress_from_stdin() {
 }
 
 # Install or update CS2 via steamcmd directly into the configured library.
-# Skips when an appmanifest already exists (idempotent fast path); set
-# CS2_FORCE_UPDATE=1 to force a re-validate.
+# Always runs app_update — Steam's -applaunch path doesn't auto-update
+# CS2, so without this a warm pod sticks on whatever buildid was current
+# at first install. On warm pods app_update is a fast manifest delta
+# (no `validate` checksum re-walk); cold pods get `validate` to catch
+# partial-download corruption.
 #
 # Runs against $STEAM_LIBRARY (not the default ~/.local/share/Steam) by
 # passing +force_install_dir, so the install lands inside our registered
@@ -175,13 +178,12 @@ install_cs2_via_steamcmd() {
   local manifest="$STEAM_LIBRARY/steamapps/appmanifest_730.acf"
   local cs2_bin="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
 
-  if [ "${CS2_FORCE_UPDATE:-0}" != "1" ] \
-     && [ -f "$manifest" ] && [ -x "$cs2_bin" ]; then
+  local update_args=("+app_update" "730" "validate")
+  if [ -f "$manifest" ] && [ -x "$cs2_bin" ]; then
     local bid
     bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
-    log "CS2 already installed at $CS2_DIR (${bid:-buildid unknown}) — skip steamcmd"
-    log "  force re-validate with CS2_FORCE_UPDATE=1"
-    return 0
+    log "CS2 already installed at $CS2_DIR (${bid:-buildid unknown}) — checking for updates"
+    update_args=("+app_update" "730")
   fi
 
   if ! command -v /opt/steamcmd/steamcmd.sh >/dev/null 2>&1 \
@@ -189,9 +191,6 @@ install_cs2_via_steamcmd() {
     die "steamcmd not found at /opt/steamcmd/steamcmd.sh — image needs the steamcmd install layer"
   fi
 
-  # Only emit the download status when we're actually downloading.
-  # Pre-cached pods returned above and never light up "Downloading CS2"
-  # in the UI. status-reporter is a no-op when not configured.
   report_status status=downloading_cs2
 
   log "running steamcmd: install/update CS2 (appid 730) into $CS2_DIR"
@@ -216,7 +215,7 @@ install_cs2_via_steamcmd() {
     +@sSteamCmdForcePlatformType linux \
     +force_install_dir "$CS2_DIR" \
     +login "$STEAM_USER" "$STEAM_PASSWORD" \
-    +app_update 730 validate \
+    "${update_args[@]}" \
     +quit 2>&1 | tee -a "$steamcmd_log" | _emit_cs2_progress_from_stdin
 
   if [ ! -f "$manifest" ] && [ -f "$CS2_DIR/steamapps/appmanifest_730.acf" ]; then
