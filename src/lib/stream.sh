@@ -32,19 +32,9 @@ start_capture() {
 
   log "starting capture '${stream_id}' (fps=$fps kbps=$kbps audio=$audio) -> $url"
 
-  # LIVE_VIDEO_CODEC defaults to h265 — NVENC HEVC encode is free on
-  # GPU and ~30-40% smaller bitrate at matched quality, which is the
-  # win on the mediamtx → viewer hop. mediamtx (>=1.x) muxes HEVC into
-  # HLS over fMP4 fine; modern Chrome/Edge/Safari/iOS decode in HW.
-  # Firefox-on-Linux + older Android viewers may fail to play, surface
-  # a "use a different browser" notice in the player UI for those.
-  # If NVENC HEVC is unavailable (no GPU / older driver), fall back to
-  # h264 so the live stream never goes dark.
-  #
-  # MPEG-TS does NOT use the hvc1/hev1 codec tag (that's an MP4 thing),
-  # so h265parse's default byte-stream output is what mpegtsmux wants
-  # — no capsfilter needed here.
-  local codec="${LIVE_VIDEO_CODEC:-h265}"
+  # LIVE_VIDEO_CODEC=h264|h265. Default h264 — HEVC-over-WebRTC is Safari 17+ only
+  # (Chrome behind flag, Firefox no). h265 is opt-in for Safari/iOS-heavy audiences.
+  local codec="${LIVE_VIDEO_CODEC:-h264}"
   local enc="" parse=""
   case "$codec" in
     h265|hevc)
@@ -75,9 +65,8 @@ start_capture() {
     > "${args_dir}/capture-${stream_id}.args"
 
   if [ "$audio" = 1 ]; then
-    # Pin to our named null sink's .monitor. Trusting `pactl info`'s
-    # default would let hud-manager's Pulse client nudge us off
-    # cs2.monitor and onto silence / HUD UI audio.
+    # Pin to our named null sink's .monitor — pactl's default can drift
+    # to hud-manager's Pulse client / silence.
     local pulse_source="${pulse_sink}.monitor"
     if ! pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qx "$pulse_source"; then
       warn "  ${pulse_source} not present — falling back to default source"
@@ -88,9 +77,7 @@ start_capture() {
       fi
       [ -n "$pulse_source" ] || pulse_source="${pulse_sink}.monitor"
     fi
-    # Opus, not AAC: mediamtx forwards Opus straight to WebRTC consumers
-    # (browsers decode it natively) without per-viewer ffmpeg transcode.
-    # LL-HLS carries Opus fine for modern browsers + Safari 17+.
+    # Opus: mediamtx forwards straight to WebRTC without per-viewer transcode.
     spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
         ! video/x-raw,framerate="$fps"/1 \
@@ -118,9 +105,7 @@ start_capture() {
         ! srtsink uri="$url" latency=200
   fi
 
-  # Liveness check — the pipeline must survive negotiation (pulse,
-  # nvh264enc init, srt handshake). The WhepPlayer's own retry surfaces
-  # later publish failures.
+  # Liveness check — must survive pulse / NVENC init / srt handshake.
   local pid=$SPAWNED_PID
   local i
   for i in 1 2 3; do

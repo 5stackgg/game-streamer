@@ -168,23 +168,11 @@ _probe_nvh264enc_preset() {
   return 1
 }
 
-# Pick an H.265/HEVC encoder fragment for `! video/x-raw,format=NV12 !`.
-# Mirrors pick_h264_pipeline — same driver-550+ legacy-preset deprecation
-# hits nvh265enc, same modern-CUDA API name surface (`rate-control` not
-# `rc-mode`), same probe-then-cache pattern. Software x265enc is *not* in
-# the fallback chain: the slowdown ffmpeg pass would have to use libx265
-# too to keep segments codec-uniform for `-c copy` concat, and libx265
-# at 1080p60 is 3-5× slower than libx264 — would blow render budgets.
-# So if no NVENC HEVC encoder is available, we return nonzero and the
-# caller falls back to h264 end-to-end.
-# Result cached per-process in GS_NVENC_PICK_H265; override family with
-# GS_NVENC_H265_ELEMENT.
-#
-# kbps is the h264-equivalent target bitrate. HEVC at the same bitrate
-# looks markedly better than h264, so we scale to 70% inside the picker
-# — callers pass one number and don't need to know about codec
-# efficiency. Comparable visual quality, ~30% smaller files.
-#
+# Pick an H.265/HEVC encoder fragment. Returns nonzero if no NVENC HEVC
+# encoder is available; caller must fall back to h264 (no software fallback —
+# libx265 is too slow to keep up with the slowdown / concat ffmpeg passes).
+# kbps is the h264-equivalent target; scaled to 70% internally for HEVC.
+# Cached in GS_NVENC_PICK_H265; override with GS_NVENC_H265_ELEMENT.
 # Usage: pick_h265_pipeline <gop> <kbps-h264-equiv> [live|clip]
 pick_h265_pipeline() {
   local gop="${1:?gop required}"
@@ -213,15 +201,17 @@ pick_h265_pipeline() {
       printf 'nvh265enc preset=%s rc-mode=cbr gop-size=%s bitrate=%s' \
         "$preset" "$gop" "$h265_kbps"
       ;;
+    none|"")
+      return 1
+      ;;
     *)
+      warn "GS_NVENC_PICK_H265='${GS_NVENC_PICK_H265}' unrecognized — treating as no NVENC HEVC"
       return 1
       ;;
   esac
 }
 
-# Returns 0 if a hardware h265 encoder pipeline can be resolved on this
-# pod, 1 otherwise. Cheap to call — caches state in GS_NVENC_PICK_H265
-# so a later pick_h265_pipeline doesn't re-probe.
+# 0 if NVENC HEVC is available on this pod. Caches into GS_NVENC_PICK_H265.
 h265_available() {
   if [ -z "${GS_NVENC_PICK_H265:-}" ]; then
     GS_NVENC_PICK_H265=$(_resolve_h265_method) || true
@@ -234,9 +224,7 @@ h265_available() {
 }
 
 _resolve_h265_method() {
-  # Same stdout-capture contract as _resolve_h264_method: log lines must
-  # go to stderr or they get glued into GS_NVENC_PICK_H265 and break the
-  # pipeline parse.
+  # Log to stderr only — stdout is captured into GS_NVENC_PICK_H265.
   local force="${GS_NVENC_H265_ELEMENT:-auto}"
 
   if [ "$force" = "auto" ] || [ "$force" = "nvcudah265enc" ]; then
