@@ -27,6 +27,9 @@ export async function reportDemoPlayingOnce() {
   void execCfgCommand("demo_pause").catch(() => undefined);
   // GSI lands AFTER the demoui panel renders; defer so the toggle
   // actually flips visible → hidden instead of no-op'ing pre-paint.
+  // 500ms was tested and the demoui panel was still showing up in
+  // captured clips — cs2 needs this full ~3s window between GSI's
+  // first map-phase event and the panel being interactable.
   setTimeout(() => {
     void execCfgCommand("demoui")
       .catch(() => undefined)

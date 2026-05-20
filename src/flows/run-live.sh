@@ -83,8 +83,15 @@ if [ -x "${HUD_BIN:-/opt/hud-manager/jts-hud-manager}" ] && [ -f "$OBSERVER_SRC"
   EXEC_OBSERVER="exec observer.cfg"
 fi
 
+# autoexec.cfg gets auto-execed by cs2 on engine init AND we pass
+# +exec live_autoexec on the command line. If both files carry the
+# same payload, every `exec observer.cfg` + every bind is interpreted
+# twice. Keep autoexec.cfg stubbed; put the real payload in
+# live_autoexec.cfg only.
+printf '// see live_autoexec.cfg\n' > "$CS2_CFG_DIR/autoexec.cfg"
+
 if [ "$CS2_CONNECT_MODE" = "playcast" ]; then
-  cat > "$CS2_CFG_DIR/autoexec.cfg" <<EOF
+  cat > "$CS2_CFG_DIR/live_autoexec.cfg" <<EOF
 con_enable 1
 $HIDE_UI_CMDS
 $(cs2_perf_autoexec_block)
@@ -93,7 +100,7 @@ $SPEC_BINDS_BLOCK
 playcast "$PLAYCAST_URL"
 EOF
 else
-  cat > "$CS2_CFG_DIR/autoexec.cfg" <<EOF
+  cat > "$CS2_CFG_DIR/live_autoexec.cfg" <<EOF
 con_enable 1
 $HIDE_UI_CMDS
 $(cs2_perf_autoexec_block)
@@ -128,10 +135,8 @@ fi
 
 write_spec_player_binds \
   "$LOG_DIR/hud-seed-match.json" \
-  "$CS2_CFG_DIR/autoexec.cfg" \
+  "$CS2_CFG_DIR/live_autoexec.cfg" \
   "$LOG_DIR/spec-bindings.json"
-
-cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
 
 # cs2 dlopens libpangoft2-1.0.so without the .0 suffix.
 for base in libpangoft2-1.0 libpango-1.0; do
@@ -157,8 +162,12 @@ do_applaunch() {
   # -windowed -noborder required so the alwaysOnTop Electron overlay
   # actually composites above cs2; exclusive -fullscreen prevents
   # stacking entirely.
+  # Boot-trim flags — see run-demo.sh for the empirical pass that
+  # narrowed this down from a larger experimental set.
   local cs2_args=(
     -windowed -noborder -width 1920 -height 1080 -novid -nojoy -console
+    -disable_loadingplaque
+    +cl_disablehtmlmotd 1
     +exec live_autoexec)
   if [ "$CS2_CONNECT_MODE" = "playcast" ]; then
     cs2_args+=(+playcast "$PLAYCAST_URL")

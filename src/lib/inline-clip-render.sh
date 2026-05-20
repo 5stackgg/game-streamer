@@ -95,6 +95,13 @@ on_exit() {
     restart_capture "$MATCH_ID" || true
     LIVE_CAPTURE_STOPPED=0
   fi
+  # Backgrounded chip render — kill it if we're exiting before the
+  # polish pass had a chance to wait on it (e.g. cs2 stall, SIGTERM).
+  if [ -n "${CHIP_RENDER_PID:-}" ] && kill -0 "$CHIP_RENDER_PID" 2>/dev/null; then
+    kill -TERM "$CHIP_RENDER_PID" 2>/dev/null || true
+    wait "$CHIP_RENDER_PID" 2>/dev/null || true
+  fi
+  [ -n "${CHIP_RENDER_LOG:-}" ] && rm -f "$CHIP_RENDER_LOG"
   # ProRes intermediates are ~20MB/s — drop the chip mov even on
   # error so a flapping pod doesn't fill its scratch dir.
   if [ -n "${CHIP_MOV:-}" ]; then rm -f "$CHIP_MOV"; fi
@@ -345,8 +352,11 @@ MOTION_DIR="${MOTION_DIR:-/opt/game-streamer/motion}"
 if [ -n "$CHIP_NAME" ] && [ ! -d "$MOTION_DIR" ]; then
   say "WARN motion project missing at $MOTION_DIR — skipping chip"
 fi
+CHIP_RENDER_PID=""
+CHIP_RENDER_LOG=""
 if [ -n "$CHIP_NAME" ] && [ -d "$MOTION_DIR" ]; then
   CHIP_MOV="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}/${CLIP_RENDER_JOB_ID}-chip.mov"
+  CHIP_RENDER_LOG="${CHIP_MOV}.log"
   mkdir -p "$(dirname "$CHIP_MOV")"
   CHIP_PROPS=$(CHIP_NAME="$CHIP_NAME" \
                CHIP_AVATAR="$CHIP_AVATAR" \
@@ -367,25 +377,62 @@ if [ -n "$CHIP_NAME" ] && [ -d "$MOTION_DIR" ]; then
                           height: Number(process.env.CHIP_OUT_H),
                           fps: Number(process.env.CHIP_OUT_FPS),
                         }))')
-  say "CHIP: rendering for '${CHIP_NAME}'"
-  if ! (cd "$MOTION_DIR" && \
-        node node_modules/.bin/remotion render \
-            src/index.ts PlayerChip "$CHIP_MOV" \
-            --codec=prores --prores-profile=4444 \
-            --pixel-format=yuva444p10le --image-format=png \
-            --log=error \
-            --props="$CHIP_PROPS"); then
+  say "CHIP: rendering for '${CHIP_NAME}' (background)"
+  # Remotion render runs in parallel with the segment seek + capture.
+  # The chip mov is only consumed by the per-segment polish pass; we
+  # wait_for_chip_render before that block. Backgrounding overlaps the
+  # ~1-3s Chromium render with the ~3-10s capture wallclock.
+  (
+    cd "$MOTION_DIR" && \
+    node node_modules/.bin/remotion render \
+        src/index.ts PlayerChip "$CHIP_MOV" \
+        --codec=prores --prores-profile=4444 \
+        --pixel-format=yuva444p10le --image-format=png \
+        --log=error \
+        --props="$CHIP_PROPS"
+  ) >"$CHIP_RENDER_LOG" 2>&1 &
+  CHIP_RENDER_PID=$!
+fi
+
+wait_for_chip_render() {
+  [ -z "$CHIP_RENDER_PID" ] && return 0
+  if ! wait "$CHIP_RENDER_PID"; then
     say "WARN chip render failed — continuing without chip overlay"
+    [ -n "$CHIP_RENDER_LOG" ] && [ -s "$CHIP_RENDER_LOG" ] \
+      && sed 's/^/  chip: /' "$CHIP_RENDER_LOG" >&2
     rm -f "$CHIP_MOV"
     CHIP_MOV=""
   fi
-fi
+  rm -f "$CHIP_RENDER_LOG"
+  CHIP_RENDER_PID=""
+}
 
 CLIP_OUT_DIR="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}"
 mkdir -p "$CLIP_OUT_DIR"
 CLIP_OUT_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.mp4"
 CLIP_THUMB_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.jpg"
 rm -f "$CLIP_OUT_FILE" "$CLIP_THUMB_FILE"
+
+# Precompute: will an outro be appended at concat time? If yes AND we
+# would have run a per-segment polish pass (chip or speed change), we
+# can fuse both into a single ffmpeg encode at the end — eliminating
+# one full 1080p60 NVENC pass per clip. The polish-skip gate below
+# reads OUTRO_WILL_APPEND; the fused encode reads it at concat time.
+OUTRO_WILL_APPEND=0
+OUTRO_FUSED_FILE=""
+if [ "$BRANDING_ENABLED" = "1" ] && [ "${CLIP_DISABLE_OUTRO:-0}" != "1" ]; then
+  OUTRO_DIMS_PRE="${CLIP_OUTPUT_DIMS:-1920x1080}"
+  OUTRO_FPS_PRE="${CLIP_OUTPUT_FPS:-60}"
+  OUTRO_FUSED_FILE="${OUTRO_DIR:-/opt/game-streamer/resources/video}/outro_${OUTRO_DIMS_PRE}_${OUTRO_FPS_PRE}.mp4"
+  if [ -f "$OUTRO_FUSED_FILE" ]; then
+    OUTRO_WILL_APPEND=1
+  fi
+fi
+WILL_FUSE_POLISH_OUTRO=0
+if [ "$OUTRO_WILL_APPEND" = "1" ] \
+   && { [ "$CLIP_RENDER_SPEED" != "1" ] || [ -n "$CHIP_NAME" ]; }; then
+  WILL_FUSE_POLISH_OUTRO=1
+fi
 
 # Per-segment output paths + concat list. We render each segment to
 # its own file and let ffmpeg concat-demux glue them — this keeps each
@@ -538,8 +585,13 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   # Per-segment polish pass — combines slowdown (when CLIP_RENDER_SPEED
   # != 1) and chip overlay (when CHIP_MOV is set) into a single ffmpeg
   # call so we don't re-encode twice. Skipped when neither applies so
-  # the speed=1 + no-chip path keeps gstreamer's capture intact.
-  if [ "$CLIP_RENDER_SPEED" != "1" ] || [ -n "$CHIP_MOV" ]; then
+  # the speed=1 + no-chip path keeps gstreamer's capture intact. Also
+  # skipped when WILL_FUSE_POLISH_OUTRO=1 — the chip/slowdown gets
+  # baked into the same filter_complex as the outro concat, saving
+  # one full NVENC encode per clip.
+  wait_for_chip_render
+  if [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] \
+     && { [ "$CLIP_RENDER_SPEED" != "1" ] || [ -n "$CHIP_MOV" ]; }; then
     HAS_AUDIO=0
     if has_audio_stream "$SEG_FILE"; then HAS_AUDIO=1; fi
     POLISH_FILE="${SEG_FILE}.polish.mp4"
@@ -669,18 +721,87 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
   # captured segments carry trailing PTS that pushes the outro ~30s
   # past with -c copy. Filter-graph concat is the reliable splice
   # across heterogeneous sources.
-  say "STEP 9: ffmpeg concat ${SEG_COUNT} segments (with outro, filter-graph)"
+  #
+  # WILL_FUSE_POLISH_OUTRO=1: the per-segment polish pass was skipped,
+  # so the chip overlay + slowdown gets folded into this same encode
+  # — one NVENC pass instead of two (polish-per-segment + concat).
+  CAP_SEG_COUNT=$((SEG_COUNT - 1))  # last entry in concat.txt is outro
   CONCAT_INPUTS=()
   while IFS= read -r line; do
     f=$(printf '%s' "$line" | awk -F"'" '/^file/{print $2}')
     [ -n "$f" ] && CONCAT_INPUTS+=("-i" "$f")
   done <"$SEG_DIR/concat.txt"
-  N=${#SEG_COUNT}
+
   FC=""
-  for i in $(seq 0 $((SEG_COUNT - 1))); do
-    FC+="[${i}:v:0][${i}:a:0]"
-  done
-  FC+="concat=n=${SEG_COUNT}:v=1:a=1[v][a]"
+  if [ "$WILL_FUSE_POLISH_OUTRO" != "1" ]; then
+    # Segments were already polished per-segment; simple concat-only graph.
+    say "STEP 9: ffmpeg concat ${SEG_COUNT} segments (with outro, filter-graph)"
+    for i in $(seq 0 $((SEG_COUNT - 1))); do
+      FC+="[${i}:v:0][${i}:a:0]"
+    done
+    FC+="concat=n=${SEG_COUNT}:v=1:a=1[v][a]"
+  else
+    # Fused path: bake chip overlay + slowdown into the same encode as
+    # the outro concat — one NVENC pass instead of two.
+    say "STEP 9: ffmpeg fused polish+concat ${CAP_SEG_COUNT} seg(s) + outro"
+
+    # Chip is appended as one extra input after segments+outro. Split it
+    # once per captured segment when there's more than one segment (so
+    # each gets its own ~3.5s chip head, matching the per-segment polish
+    # behaviour). split=1 isn't valid, so single-segment skips the split.
+    if [ -n "$CHIP_MOV" ]; then
+      CHIP_IDX=$SEG_COUNT
+      CONCAT_INPUTS+=("-i" "$CHIP_MOV")
+      if [ "$CAP_SEG_COUNT" -gt 1 ]; then
+        FC+="[${CHIP_IDX}:v]split=${CAP_SEG_COUNT}"
+        for i in $(seq 0 $((CAP_SEG_COUNT - 1))); do FC+="[chip${i}]"; done
+        FC+=";"
+      fi
+    fi
+
+    if [ "$CLIP_RENDER_SPEED" != "1" ]; then
+      case "$CLIP_RENDER_SPEED" in
+        2) ATEMPO_CHAIN="atempo=0.5" ;;
+        3) ATEMPO_CHAIN="atempo=0.5,atempo=0.667" ;;
+        4) ATEMPO_CHAIN="atempo=0.5,atempo=0.5" ;;
+        *) ATEMPO_CHAIN="atempo=0.5" ;;
+      esac
+    else
+      ATEMPO_CHAIN=""
+    fi
+
+    for i in $(seq 0 $((CAP_SEG_COUNT - 1))); do
+      if [ -n "$CHIP_MOV" ]; then
+        if [ "$CAP_SEG_COUNT" -gt 1 ]; then
+          FC+="[${i}:v][chip${i}]overlay=0:0:eof_action=pass:format=auto"
+        else
+          FC+="[${i}:v][${CHIP_IDX}:v]overlay=0:0:eof_action=pass:format=auto"
+        fi
+      else
+        FC+="[${i}:v]null"
+      fi
+      if [ "$CLIP_RENDER_SPEED" != "1" ]; then
+        FC+=",setpts=${CLIP_RENDER_SPEED}*PTS"
+      fi
+      FC+="[v${i}];"
+      if [ -n "$ATEMPO_CHAIN" ]; then
+        FC+="[${i}:a]${ATEMPO_CHAIN}[a${i}];"
+      fi
+    done
+
+    # Final concat: per-segment polished streams + raw outro streams.
+    for i in $(seq 0 $((CAP_SEG_COUNT - 1))); do
+      FC+="[v${i}]"
+      if [ -n "$ATEMPO_CHAIN" ]; then
+        FC+="[a${i}]"
+      else
+        FC+="[${i}:a]"
+      fi
+    done
+    FC+="[${CAP_SEG_COUNT}:v][${CAP_SEG_COUNT}:a]"
+    FC+="concat=n=${SEG_COUNT}:v=1:a=1[v][a]"
+  fi
+
   if ! ffmpeg -y -hide_banner -loglevel warning \
        "${CONCAT_INPUTS[@]}" \
        -filter_complex "$FC" \
@@ -742,25 +863,32 @@ THUMB_DURATION_SECS=$(awk -v ms="$REAL_DURATION_MS" 'BEGIN{printf "%.3f", ms/100
 if awk -v d="$THUMB_DURATION_SECS" -v t="$THUMB_SEEK_SECS" 'BEGIN{exit !(d <= t)}'; then
   THUMB_SEEK_SECS=$(awk -v d="$THUMB_DURATION_SECS" 'BEGIN{printf "%.3f", d/2}')
 fi
-if ffmpeg -y -hide_banner -loglevel warning \
-     -ss "$THUMB_SEEK_SECS" -i "$CLIP_OUT_FILE" -frames:v 1 -q:v 3 \
-     "$CLIP_THUMB_FILE" 2>/dev/null \
-   && [ -s "$CLIP_THUMB_FILE" ]; then
-  THUMB_URL="${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/thumbnail"
-  say "POST $THUMB_URL"
-  if ! curl --fail --silent --show-error \
-         --max-time 60 \
-         --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
-         --header "content-type: image/jpeg" \
-         --data-binary "@${CLIP_THUMB_FILE}" \
-         --output /dev/null \
-         "$THUMB_URL"; then
-    say "WARN thumbnail upload failed — continuing without thumbnail"
+
+# Thumbnail extract + POST runs in parallel with the clip upload —
+# both read $CLIP_OUT_FILE independently. The thumb POST is
+# best-effort (no die_failed), so failures only warn.
+THUMB_URL="${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/thumbnail"
+say "thumbnail extract + POST $THUMB_URL (background)"
+(
+  if ffmpeg -y -hide_banner -loglevel warning \
+       -ss "$THUMB_SEEK_SECS" -i "$CLIP_OUT_FILE" -frames:v 1 -q:v 3 \
+       "$CLIP_THUMB_FILE" 2>/dev/null \
+     && [ -s "$CLIP_THUMB_FILE" ]; then
+    if ! curl --fail --silent --show-error \
+           --max-time 60 \
+           --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
+           --header "content-type: image/jpeg" \
+           --data-binary "@${CLIP_THUMB_FILE}" \
+           --output /dev/null \
+           "$THUMB_URL"; then
+      say "WARN thumbnail upload failed — continuing without thumbnail"
+    fi
+  else
+    say "WARN ffmpeg thumbnail extraction failed — continuing without thumbnail"
   fi
-else
-  say "WARN ffmpeg thumbnail extraction failed — continuing without thumbnail"
-fi
-rm -f "$CLIP_THUMB_FILE"
+  rm -f "$CLIP_THUMB_FILE"
+) &
+THUMB_BG_PID=$!
 
 api_status "status=uploading" "progress=0.0"
 UPLOAD_URL="${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/upload"
@@ -775,6 +903,10 @@ if ! curl --fail --silent --show-error \
        "$UPLOAD_URL"; then
   die_failed "clip upload failed"
 fi
+
+# Thumbnail is best-effort but we still want it posted before the
+# pod exits (batch mode reaps the job right after status=done).
+wait "$THUMB_BG_PID" 2>/dev/null || true
 
 api_status "status=done" "progress=1.0"
 CLIP_REACHED_TERMINAL=1

@@ -97,7 +97,14 @@ if [ -x "${HUD_BIN:-/opt/hud-manager/jts-hud-manager}" ] && [ -f "$OBSERVER_SRC"
   EXEC_OBSERVER="exec observer.cfg"
 fi
 
-cat > "$CS2_CFG_DIR/autoexec.cfg" <<EOF
+# autoexec.cfg gets auto-execed by cs2 on engine init AND we pass
+# +exec live_autoexec on the command line. If both files carry the
+# same payload, every `exec observer.cfg` + every bind is interpreted
+# twice (~30 binds × 2 passes), visible in console.log. Keep
+# autoexec.cfg stubbed; put the real payload in live_autoexec.cfg.
+printf '// see live_autoexec.cfg\n' > "$CS2_CFG_DIR/autoexec.cfg"
+
+cat > "$CS2_CFG_DIR/live_autoexec.cfg" <<EOF
 con_enable 1
 $HIDE_UI_CMDS
 $(cs2_perf_autoexec_block)
@@ -126,10 +133,8 @@ fi
 
 write_spec_player_binds \
   "$LOG_DIR/hud-seed-match.json" \
-  "$CS2_CFG_DIR/autoexec.cfg" \
+  "$CS2_CFG_DIR/live_autoexec.cfg" \
   "$LOG_DIR/spec-bindings.json"
-
-cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
 
 ROUND_TICKS_PATH="${LOG_DIR}/demo-round-ticks.json"
 if [ -n "${ROUND_TICKS:-}" ]; then
@@ -180,9 +185,22 @@ do_applaunch() {
   # +playdemo on the launch line so cs2 starts loading the demo during
   # engine init — the stream never shows the main menu. -condebug tees
   # cs2's console to csgo/console.log.
+  #
+  # Boot-time trim flags. The set below was the survivor of an
+  # empirical pass against the ~5s Panorama main-menu init gap
+  # between `server module init ok` and `DELAYED COMMAND: playdemo`.
+  # Flags that demonstrably didn't bite on this cs2 build
+  # (-nogamestats, -noassert, -allow_third_party_software, -vrmode
+  # none, -nominidumps, -language english) were dropped — the
+  # leaderboards job, localization spam, and BlurTarget warnings all
+  # kept firing with them set.
+  #   -disable_loadingplaque   recommended Source 2 perf hint
+  #   +cl_disablehtmlmotd 1    skip HTML MOTD subsystem init
   local cs2_args=(
     -windowed -noborder -width 1920 -height 1080 -novid -nojoy -console
     -insecure -condebug
+    -disable_loadingplaque
+    +cl_disablehtmlmotd 1
     +exec live_autoexec
     +playdemo "$DEMO_FILE")
   local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")

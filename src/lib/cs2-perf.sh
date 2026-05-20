@@ -78,6 +78,13 @@ cl_autohelp 0
 cl_showhelp 0
 cl_disablefreezecam 1
 
+// Boot trim — cheap suppressions of subsystems we don't need for
+// demo playback / spectator capture.
+sys_minidumpspewlines 0
+cl_disable_ragdolls 1
+r_drawscreenspaceparticles 0
+cl_disablehtmlmotd 1
+
 echo "LOW SETTINGS LOADED"
 EOF
 }

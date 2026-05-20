@@ -1192,15 +1192,17 @@ wait_for_steam_pipe() {
 #   - first 90s, every 5s: poke_steam_dialog (Space-press the focused
 #     button on any modal CEF dialog Steam pops — cloud-out-of-date,
 #     shader pre-cache, etc).
-#   - every 30s, up to 4 retries: re-invoke <applaunch_fn>. Steam
-#     sometimes silently drops the very first applaunch on a cold
-#     login (logs "Steam is already running, command line was
-#     forwarded" but no cs2 follows). One retry was the original
-#     fallback; bumping it to 4 spaced-out retries covers the cases
-#     where Steam is still doing first-cold init (auth refresh,
-#     manifest sync) past the 30s mark — observed in the wild on a
-#     pod where cs2 only spawned after Steam finished its background
-#     update check ~2 min in.
+#   - first retry at 8s, then every 30s, up to 4 retries: re-invoke
+#     <applaunch_fn>. Steam sometimes silently drops the very first
+#     applaunch on a cold login (logs "Steam is already running,
+#     command line was forwarded" but no cs2 follows). The 8s first
+#     retry covers that fast-drop path — empirically Steam either
+#     spawns cs2 within ~7s of a successful applaunch or never does.
+#     The 30s back-off on later retries covers the slower cases where
+#     Steam is still doing first-cold init (auth refresh, manifest
+#     sync) past the 30s mark — observed in the wild on a pod where
+#     cs2 only spawned after Steam finished its background update
+#     check ~2 min in.
 #   - at 60s/120s/180s: dump open X windows + console-linux.txt tail
 #     so a future failure leaves evidence (which dialog was up, what
 #     Steam was doing) instead of a silent 5-min wait.
@@ -1211,6 +1213,7 @@ wait_for_steam_pipe() {
 wait_for_cs2_process() {
   local applaunch_fn="${1:?applaunch function name required}"
   local relaunch_count=0
+  local next_retry_at=8
   local pid="" i
 
   for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
@@ -1226,10 +1229,11 @@ wait_for_cs2_process() {
 
     [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
 
-    if [ $(( i % 30 )) -eq 0 ] && [ "$relaunch_count" -lt 4 ]; then
+    if [ "$i" -ge "$next_retry_at" ] && [ "$relaunch_count" -lt 4 ]; then
       relaunch_count=$(( relaunch_count + 1 ))
       log "  ${i}s without cs2 — re-issuing -applaunch (retry ${relaunch_count}/4)"
       "$applaunch_fn"
+      next_retry_at=$(( i + 30 ))
     fi
 
     case "$i" in
