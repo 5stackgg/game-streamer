@@ -219,11 +219,27 @@ CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h265}"
 H264_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
 case "$CLIP_VIDEO_CODEC" in
   h265|hevc)
-    if h265_available && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q '\bhevc_nvenc\b'; then
+    GST_H265_OK=0
+    FFMPEG_H265_OK=0
+    if h265_available; then
+      GST_H265_OK=1
+      say "h265 probe: gstreamer NVENC HEVC OK (pick=${GS_NVENC_PICK_H265:-?})"
+    else
+      say "h265 probe: gstreamer NVENC HEVC unavailable (no nvcudah265enc/nvh265enc element on this pod)"
+    fi
+    FFMPEG_HEVC_LINE=$(ffmpeg -hide_banner -encoders 2>/dev/null | grep -E '\bhevc_nvenc\b' || true)
+    if [ -n "$FFMPEG_HEVC_LINE" ]; then
+      FFMPEG_H265_OK=1
+      say "h265 probe: ffmpeg hevc_nvenc OK ($(printf '%s' "$FFMPEG_HEVC_LINE" | awk '{$1=$1};1'))"
+    else
+      say "h265 probe: ffmpeg hevc_nvenc NOT FOUND in 'ffmpeg -encoders' (this build was compiled without NVENC HEVC)"
+    fi
+    if [ "$GST_H265_OK" = "1" ] && [ "$FFMPEG_H265_OK" = "1" ]; then
       FFMPEG_VENC_ARGS=(-c:v hevc_nvenc -preset p5 -rc vbr -cq 24 -tag:v hvc1)
       CLIP_VIDEO_CODEC=h265
+      say "h265 selected for this render"
     else
-      say "h265 requested but gstreamer or ffmpeg lacks NVENC HEVC — using h264 for this render"
+      say "h265 requested but unavailable (gst_ok=${GST_H265_OK} ffmpeg_ok=${FFMPEG_H265_OK}) — using h264 for this render"
       CLIP_VIDEO_CODEC=h264
       FFMPEG_VENC_ARGS=("${H264_VENC_ARGS[@]}")
     fi
@@ -287,7 +303,7 @@ if [ -n "${MATCH_ID:-}" ]; then
 fi
 
 # CLIP_BAKE_BRANDING=1 enables the player chip + outro. Default off.
-BRANDING_ENABLED="${CLIP_BAKE_BRANDING:-0}"
+BRANDING_ENABLED="${CLIP_BAKE_BRANDING:-1}"
 say "BRANDING enabled=${BRANDING_ENABLED}"
 
 # Player chip overlay — rendered once per job by the Remotion
