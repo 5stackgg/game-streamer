@@ -1,0 +1,30 @@
+{
+  "name": "5stack-motion",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Remotion compositions for the 5stack game-streamer (outro, player chip overlay)",
+  "scripts": {
+    "dev": "npm run build:audio && remotion studio",
+    "build:audio": "bash scripts/build-audio.sh",
+    "render:outro:1080": "remotion render Outro out/outro_1920x1080_60.mp4 --props='{\"width\":1920,\"height\":1080,\"fps\":60}' --codec=h264 --pixel-format=yuv420p",
+    "render:outro:720": "remotion render Outro out/outro_1280x720_60.mp4 --props='{\"width\":1280,\"height\":720,\"fps\":60}' --codec=h264 --pixel-format=yuv420p",
+    "render:chip:sample": "remotion render PlayerChip out/chip-sample.mov --codec=prores --prores-profile=4444 --pixel-format=yuva444p10le --image-format=png --props='{\"name\":\"LukeP\",\"kills\":3,\"width\":1920,\"height\":1080,\"fps\":60}'",
+    "bundle": "remotion bundle src/index.ts out/bundle"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.463",
+    "@remotion/cli": "4.0.463",
+    "@remotion/renderer": "4.0.463",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "remotion": "4.0.463"
+  },
+  "devDependencies": {
+    "@types/react": "19.0.0",
+    "@types/react-dom": "19.0.0",
+    "typescript": "5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

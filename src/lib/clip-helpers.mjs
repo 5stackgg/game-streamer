@@ -158,6 +158,45 @@ switch (subcmd) {
     break;
   }
 
+  case "job-target-name": {
+    const d = readStdinJson();
+    const n = d?.spec?.target_name;
+    process.stdout.write(typeof n === "string" ? n : "");
+    break;
+  }
+
+  case "job-target-avatar-url": {
+    const d = readStdinJson();
+    const a = d?.spec?.target_avatar_url;
+    process.stdout.write(typeof a === "string" ? a : "");
+    break;
+  }
+
+  case "job-kills-count": {
+    const d = readStdinJson();
+    const k = d?.spec?.kills_count;
+    if (typeof k === "number" && Number.isFinite(k) && k > 0) {
+      process.stdout.write(String(Math.floor(k)));
+    }
+    break;
+  }
+
+  case "job-map-name": {
+    const d = readStdinJson();
+    const m = d?.spec?.map_name;
+    process.stdout.write(typeof m === "string" ? m : "");
+    break;
+  }
+
+  case "job-round": {
+    const d = readStdinJson();
+    const r = d?.spec?.round;
+    if (typeof r === "number" && Number.isFinite(r) && r >= 0) {
+      process.stdout.write(String(Math.floor(r)));
+    }
+    break;
+  }
+
   // [stdin: job_json] -> spec.segments as a JSON string.
   case "job-segments": {
     const d = readStdinJson();

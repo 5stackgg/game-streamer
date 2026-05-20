@@ -168,6 +168,40 @@ RUN chmod +x /opt/game-streamer/src/*.sh \
              /opt/game-streamer/src/actions/*.sh \
              /opt/game-streamer/src/dev/*.sh 2>/dev/null || true
 
+# Remotion motion project — owns the branded Outro (pre-rendered into
+# resources/video/ at build time) and the per-job PlayerChip overlay
+# composited onto each segment by inline-clip-render.sh. We split
+# package install + source copy into separate layers so source-only
+# edits don't bust the npm-install cache (full install is ~600MB).
+COPY motion/package.json motion/package-lock.json /opt/game-streamer/motion/
+RUN cd /opt/game-streamer/motion && npm ci --no-audit --no-fund
+
+COPY motion/ /opt/game-streamer/motion/
+
+# Synthesize the outro audio bed first, then pre-download Remotion's
+# headless Chrome and pre-render the two standard outro variants
+# (1080p60, 720p60). The audio is generated from ffmpeg lavfi (see
+# motion/scripts/build-audio.sh) so the WAV stays out of git and the
+# image always ships whatever the current script produces. Outros are
+# static (no per-job props) — baking them in keeps the render-pod hot
+# path to a concat-demux paste at the end of the clip. PlayerChip
+# needs the player's name/kills, so it stays a per-job render at clip
+# time.
+RUN cd /opt/game-streamer/motion \
+ && bash scripts/build-audio.sh \
+ && node node_modules/.bin/remotion browser ensure \
+ && mkdir -p out /opt/game-streamer/resources/video \
+ && node node_modules/.bin/remotion render src/index.ts Outro \
+      out/outro_1920x1080_60.mp4 \
+      --codec=h264 --pixel-format=yuv420p \
+      --props='{"width":1920,"height":1080,"fps":60,"durationS":3}' \
+ && node node_modules/.bin/remotion render src/index.ts Outro \
+      out/outro_1280x720_60.mp4 \
+      --codec=h264 --pixel-format=yuv420p \
+      --props='{"width":1280,"height":720,"fps":60,"durationS":3}' \
+ && cp out/outro_*.mp4 /opt/game-streamer/resources/video/ \
+ && rm -rf out
+
 WORKDIR /opt/game-streamer
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/game-streamer/src/game-streamer.sh"]

@@ -43,15 +43,19 @@ batch_render_one_job() {
   local job_json="$1"
 
   local job_id token segments output_dims output_fps render_speed
-  local target_sid current_title
+  local target_sid current_title target_name target_avatar kills_count map_name round
   job_id=$(printf       '%s' "$job_json" | node "$CLIP_HELPERS" job-id)
   token=$(printf        '%s' "$job_json" | node "$CLIP_HELPERS" job-token)
   segments=$(printf     '%s' "$job_json" | node "$CLIP_HELPERS" job-segments)
   output_dims=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-output-dims)
   output_fps=$(printf   '%s' "$job_json" | node "$CLIP_HELPERS" job-output-fps)
-  # All preset segments share the same pov, so segment[0] is fine.
   target_sid=$(printf   '%s' "$job_json" | node "$CLIP_HELPERS" job-first-pov-steamid)
   current_title=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-title)
+  target_name=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-target-name)
+  target_avatar=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-target-avatar-url)
+  kills_count=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-kills-count)
+  map_name=$(printf     '%s' "$job_json" | node "$CLIP_HELPERS" job-map-name)
+  round=$(printf        '%s' "$job_json" | node "$CLIP_HELPERS" job-round)
   render_speed="${CLIP_RENDER_SPEED:-1}"
 
   if [ -z "$job_id" ] || [ -z "$token" ]; then
@@ -62,8 +66,8 @@ batch_render_one_job() {
   say "batch render: $job_id"
   patch_title_from_gsi "$job_id" "$token" "$target_sid" "$current_title"
 
-  # Subshell so the render script's trap + env don't leak. We do NOT
-  # pass MATCH_ID — batch pods don't publish a match capture.
+  # Subshell so the render trap + env don't leak. MATCH_ID is unset
+  # because batch pods don't publish a live match capture.
   (
     export CLIP_RENDER_JOB_ID="$job_id"
     export CLIP_RENDER_TOKEN="$token"
@@ -73,6 +77,12 @@ batch_render_one_job() {
     export CLIP_TICK_RATE="${DEMO_TICK_RATE:-64}"
     export SPEC_SERVER_URL="${SPEC_SERVER_URL:-http://127.0.0.1:1350}"
     export CLIP_RENDER_SPEED="$render_speed"
+    export CLIP_DISPLAY_NAME="$target_name"
+    export CLIP_DISPLAY_AVATAR="$target_avatar"
+    export CLIP_DISPLAY_TARGET_STEAMID="$target_sid"
+    export CLIP_DISPLAY_KILLS="$kills_count"
+    export CLIP_DISPLAY_MAP="$map_name"
+    export CLIP_DISPLAY_ROUND="$round"
     unset MATCH_ID
     bash "$LIB_DIR/inline-clip-render.sh"
   ) || say "  job $job_id failed (others in batch unaffected)"
