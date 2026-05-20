@@ -43,7 +43,7 @@ batch_render_one_job() {
   local job_json="$1"
 
   local job_id token segments output_dims output_fps render_speed
-  local target_sid current_title
+  local target_sid current_title target_name kills_count team_name map_name round
   job_id=$(printf       '%s' "$job_json" | node "$CLIP_HELPERS" job-id)
   token=$(printf        '%s' "$job_json" | node "$CLIP_HELPERS" job-token)
   segments=$(printf     '%s' "$job_json" | node "$CLIP_HELPERS" job-segments)
@@ -52,6 +52,11 @@ batch_render_one_job() {
   # All preset segments share the same pov, so segment[0] is fine.
   target_sid=$(printf   '%s' "$job_json" | node "$CLIP_HELPERS" job-first-pov-steamid)
   current_title=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-title)
+  target_name=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-target-name)
+  kills_count=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-kills-count)
+  team_name=$(printf    '%s' "$job_json" | node "$CLIP_HELPERS" job-team-name)
+  map_name=$(printf     '%s' "$job_json" | node "$CLIP_HELPERS" job-map-name)
+  round=$(printf        '%s' "$job_json" | node "$CLIP_HELPERS" job-round)
   render_speed="${CLIP_RENDER_SPEED:-1}"
 
   if [ -z "$job_id" ] || [ -z "$token" ]; then
@@ -73,6 +78,15 @@ batch_render_one_job() {
     export CLIP_TICK_RATE="${DEMO_TICK_RATE:-64}"
     export SPEC_SERVER_URL="${SPEC_SERVER_URL:-http://127.0.0.1:1350}"
     export CLIP_RENDER_SPEED="$render_speed"
+    # Chip overlay inputs — name comes from the api job spec when
+    # set, falls back to GSI-resolved name inside inline-clip-render.
+    # Everything else is optional; the chip omits missing pieces.
+    export CLIP_DISPLAY_NAME="$target_name"
+    export CLIP_DISPLAY_TARGET_STEAMID="$target_sid"
+    export CLIP_DISPLAY_KILLS="$kills_count"
+    export CLIP_DISPLAY_TEAM="$team_name"
+    export CLIP_DISPLAY_MAP="$map_name"
+    export CLIP_DISPLAY_ROUND="$round"
     unset MATCH_ID
     bash "$LIB_DIR/inline-clip-render.sh"
   ) || say "  job $job_id failed (others in batch unaffected)"

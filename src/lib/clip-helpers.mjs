@@ -158,6 +158,59 @@ switch (subcmd) {
     break;
   }
 
+  // [stdin: job_json] -> spec.target_name (or empty). Used by
+  // inline-clip-render.sh to bake a "player chip" overlay into each
+  // captured segment, mirroring web/components/clips/ClipPlayer.vue's
+  // #bottom slot chip on the live player surface.
+  case "job-target-name": {
+    const d = readStdinJson();
+    const n = d?.spec?.target_name;
+    process.stdout.write(typeof n === "string" ? n : "");
+    break;
+  }
+
+  // [stdin: job_json] -> spec.kills_count (or empty). Optional —
+  // when the api populates it the streamer renders a red kill badge
+  // next to the player name chip; when absent the chip omits the
+  // badge cleanly.
+  case "job-kills-count": {
+    const d = readStdinJson();
+    const k = d?.spec?.kills_count;
+    if (typeof k === "number" && Number.isFinite(k) && k > 0) {
+      process.stdout.write(String(Math.floor(k)));
+    }
+    break;
+  }
+
+  // [stdin: job_json] -> spec.team_name (or empty). Optional chip
+  // meta — shown under the player name when present.
+  case "job-team-name": {
+    const d = readStdinJson();
+    const t = d?.spec?.team_name;
+    process.stdout.write(typeof t === "string" ? t : "");
+    break;
+  }
+
+  // [stdin: job_json] -> spec.map_name (or empty). Optional chip
+  // meta — shown in the chip's bottom row when present.
+  case "job-map-name": {
+    const d = readStdinJson();
+    const m = d?.spec?.map_name;
+    process.stdout.write(typeof m === "string" ? m : "");
+    break;
+  }
+
+  // [stdin: job_json] -> spec.round (positive integer, else empty).
+  // Optional chip meta — rendered as "R<n>" in the chip's bottom row.
+  case "job-round": {
+    const d = readStdinJson();
+    const r = d?.spec?.round;
+    if (typeof r === "number" && Number.isFinite(r) && r >= 0) {
+      process.stdout.write(String(Math.floor(r)));
+    }
+    break;
+  }
+
   // [stdin: job_json] -> spec.segments as a JSON string.
   case "job-segments": {
     const d = readStdinJson();

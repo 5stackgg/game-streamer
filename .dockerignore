@@ -1,0 +1,9 @@
+.env
+src/.env
+.git
+.github
+.DS_Store
+**/.DS_Store
+**/node_modules
+motion/out
+motion/.remotion

@@ -95,6 +95,9 @@ on_exit() {
     restart_capture "$MATCH_ID" || true
     LIVE_CAPTURE_STOPPED=0
   fi
+  # ProRes intermediates are ~20MB/s — drop the chip mov even on
+  # error so a flapping pod doesn't fill its scratch dir.
+  if [ -n "${CHIP_MOV:-}" ]; then rm -f "$CHIP_MOV"; fi
   restore_user_playback
   # Belt-and-suspenders status report. If we exited without having
   # POSTed a terminal status (set -u trip, SIGTERM, early exit before
@@ -258,6 +261,92 @@ if [ -n "${MATCH_ID:-}" ]; then
   LIVE_CAPTURE_STOPPED=1
 fi
 
+# Master switch for baked-in branding (player chip overlay + outro
+# concat). Defaults OFF so existing clip renders are byte-equivalent
+# to the pre-Remotion pipeline. Flip to "1" in the spectator pod env
+# (helm values / k8s manifest) to enable; the Dockerfile already
+# ships the motion/ Remotion project + pre-rendered outros so no
+# rebuild is needed to toggle.
+#
+# Per-feature overrides (apply only when branding is enabled):
+#   CLIP_DISABLE_CHIP=1   skip chip overlay even with branding on
+#   CLIP_DISABLE_OUTRO=1  skip outro append even with branding on
+BRANDING_ENABLED="${CLIP_BAKE_BRANDING:-0}"
+
+# Player chip overlay — rendered once per job by the Remotion
+# composition at motion/src/PlayerChip.tsx, then composited onto each
+# captured segment via ffmpeg overlay during the polish pass. Mirrors
+# the bottom-left chip on web/components/clips/ClipPlayer.vue.
+CHIP_NAME=""
+CHIP_KILLS=0
+CHIP_TEAM=""
+CHIP_MAP=""
+CHIP_ROUND=""
+CHIP_MOV=""
+if [ "$BRANDING_ENABLED" = "1" ] && [ "${CLIP_DISABLE_CHIP:-0}" != "1" ]; then
+  CHIP_NAME="${CLIP_DISPLAY_NAME:-}"
+  if [ -z "$CHIP_NAME" ] && [ -n "${CLIP_DISPLAY_TARGET_STEAMID:-}" ]; then
+    CHIP_NAME=$(printf '%s' "$STATE_JSON" \
+      | node "$CLIP_HELPERS" name-for-steamid "$CLIP_DISPLAY_TARGET_STEAMID")
+  fi
+  CHIP_KILLS=$(printf '%s' "${CLIP_DISPLAY_KILLS:-}" \
+    | awk '{n=int($1); if (n>0) printf "%d", n; else printf "0"}')
+  CHIP_TEAM="${CLIP_DISPLAY_TEAM:-}"
+  CHIP_MAP="${CLIP_DISPLAY_MAP:-}"
+  CHIP_ROUND="${CLIP_DISPLAY_ROUND:-}"
+fi
+
+CHIP_OUT_W="${CLIP_OUTPUT_DIMS%x*}"
+CHIP_OUT_H="${CLIP_OUTPUT_DIMS#*x}"
+[ -z "$CHIP_OUT_W" ] && CHIP_OUT_W=1920
+[ -z "$CHIP_OUT_H" ] && CHIP_OUT_H=1080
+CHIP_OUT_FPS="${CLIP_OUTPUT_FPS:-60}"
+
+# Pre-render the chip to a ProRes 4444 .mov (yuva444p) so ffmpeg
+# overlay reads its alpha channel natively. We tried VP9+yuva420p
+# first but this ffmpeg build's libvpx-vp9 silently strips alpha on
+# the way into the webm container; ProRes 4444 is the reliable path
+# for short-lived intermediates and encodes much faster than libvpx.
+MOTION_DIR="${MOTION_DIR:-/opt/game-streamer/motion}"
+if [ -n "$CHIP_NAME" ] && [ -d "$MOTION_DIR" ]; then
+  CHIP_MOV="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}/${CLIP_RENDER_JOB_ID}-chip.mov"
+  mkdir -p "$(dirname "$CHIP_MOV")"
+  # node helper produces a JSON-encoded props blob so weird names
+  # (quotes, backslashes, unicode) don't shell-escape into trouble.
+  CHIP_PROPS=$(CHIP_NAME="$CHIP_NAME" \
+               CHIP_KILLS="$CHIP_KILLS" \
+               CHIP_TEAM="$CHIP_TEAM" \
+               CHIP_MAP="$CHIP_MAP" \
+               CHIP_ROUND="$CHIP_ROUND" \
+               CHIP_OUT_W="$CHIP_OUT_W" \
+               CHIP_OUT_H="$CHIP_OUT_H" \
+               CHIP_OUT_FPS="$CHIP_OUT_FPS" \
+               node -e 'const r = Number(process.env.CHIP_ROUND);
+                        process.stdout.write(JSON.stringify({
+                          name: process.env.CHIP_NAME,
+                          team: process.env.CHIP_TEAM || null,
+                          kills: Number(process.env.CHIP_KILLS) || 0,
+                          map: process.env.CHIP_MAP || null,
+                          round: Number.isFinite(r) && r >= 0 ? Math.floor(r) : null,
+                          avatarUrl: null,
+                          width: Number(process.env.CHIP_OUT_W),
+                          height: Number(process.env.CHIP_OUT_H),
+                          fps: Number(process.env.CHIP_OUT_FPS),
+                        }))')
+  say "STEP 1b: render chip (Remotion) name='${CHIP_NAME}' team='${CHIP_TEAM}' kills=${CHIP_KILLS} map='${CHIP_MAP}' round='${CHIP_ROUND}'"
+  if ! (cd "$MOTION_DIR" && \
+        node node_modules/.bin/remotion render \
+            src/index.ts PlayerChip "$CHIP_MOV" \
+            --codec=prores --prores-profile=4444 \
+            --pixel-format=yuva444p10le --image-format=png \
+            --log=error \
+            --props="$CHIP_PROPS"); then
+    say "WARN chip render failed — continuing without chip overlay"
+    rm -f "$CHIP_MOV"
+    CHIP_MOV=""
+  fi
+fi
+
 CLIP_OUT_DIR="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}"
 mkdir -p "$CLIP_OUT_DIR"
 CLIP_OUT_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.mp4"
@@ -412,34 +501,64 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   say "STEP 8: stop capture (segment $SEG_IDX)"
   stop_clip_capture
 
-  # Per-segment slowdown so the concat input is already at real-time.
-  if [ "$CLIP_RENDER_SPEED" != "1" ]; then
-    case "$CLIP_RENDER_SPEED" in
-      2) ATEMPO_FILTER="atempo=0.5" ;;
-      3) ATEMPO_FILTER="atempo=0.5,atempo=0.667" ;;
-      4) ATEMPO_FILTER="atempo=0.5,atempo=0.5" ;;
-      *) ATEMPO_FILTER="atempo=0.5" ;;
-    esac
+  # Per-segment polish pass — combines slowdown (when CLIP_RENDER_SPEED
+  # != 1) and chip overlay (when CHIP_MOV is set) into a single ffmpeg
+  # call so we don't re-encode twice. Skipped when neither applies so
+  # the speed=1 + no-chip path keeps gstreamer's capture intact.
+  if [ "$CLIP_RENDER_SPEED" != "1" ] || [ -n "$CHIP_MOV" ]; then
     HAS_AUDIO=0
     if has_audio_stream "$SEG_FILE"; then HAS_AUDIO=1; fi
-    SLOW_FILE="${SEG_FILE}.slow.mp4"
+    POLISH_FILE="${SEG_FILE}.polish.mp4"
+
+    # Build the video filter graph. We always go through filter_complex
+    # so the chip-overlay path can splice in cleanly.
+    if [ "$CLIP_RENDER_SPEED" != "1" ]; then
+      FC_VIDEO="[0:v]setpts=${CLIP_RENDER_SPEED}*PTS[v0]"
+    else
+      FC_VIDEO="[0:v]null[v0]"
+    fi
+    if [ -n "$CHIP_MOV" ]; then
+      # shortest=0 + format=auto: keep the underlying segment's
+      # duration, blend the chip's alpha properly. The chip mov is
+      # only ~3.5s — past its end the [1:v] stream ends and overlay
+      # falls through with no chip drawn (eof_action=pass).
+      FC_VIDEO="${FC_VIDEO};[v0][1:v]overlay=0:0:eof_action=pass:format=auto[vout]"
+      INPUT_ARGS=(-i "$SEG_FILE" -i "$CHIP_MOV")
+    else
+      FC_VIDEO="${FC_VIDEO};[v0]null[vout]"
+      INPUT_ARGS=(-i "$SEG_FILE")
+    fi
+
     AUDIO_ARGS=()
     if [ "$HAS_AUDIO" = "1" ]; then
-      AUDIO_ARGS=(-af "$ATEMPO_FILTER" -c:a aac -b:a 192k)
+      if [ "$CLIP_RENDER_SPEED" != "1" ]; then
+        case "$CLIP_RENDER_SPEED" in
+          2) ATEMPO_FILTER="atempo=0.5" ;;
+          3) ATEMPO_FILTER="atempo=0.5,atempo=0.667" ;;
+          4) ATEMPO_FILTER="atempo=0.5,atempo=0.5" ;;
+          *) ATEMPO_FILTER="atempo=0.5" ;;
+        esac
+        AUDIO_ARGS=(-map 0:a -af "$ATEMPO_FILTER" -c:a aac -b:a 192k)
+      else
+        AUDIO_ARGS=(-map 0:a -c:a aac -b:a 192k)
+      fi
     else
       AUDIO_ARGS=(-an)
     fi
+
     if ! ffmpeg -y -hide_banner -loglevel warning \
-         -i "$SEG_FILE" \
-         -vf "setpts=${CLIP_RENDER_SPEED}*PTS" \
+         "${INPUT_ARGS[@]}" \
+         -filter_complex "$FC_VIDEO" \
+         -map "[vout]" \
          "${AUDIO_ARGS[@]}" \
-         -c:v libx264 -preset veryfast -crf 22 \
+         -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p \
+         -profile:v high -level 4.2 \
          -movflags +faststart \
-         "$SLOW_FILE"; then
-      rm -f "$SLOW_FILE"
-      die_failed "ffmpeg slowdown failed (segment $SEG_IDX)"
+         "$POLISH_FILE"; then
+      rm -f "$POLISH_FILE"
+      die_failed "ffmpeg polish pass failed (segment $SEG_IDX)"
     fi
-    mv -f "$SLOW_FILE" "$SEG_FILE"
+    mv -f "$POLISH_FILE" "$SEG_FILE"
   fi
 
   # Sanity check: capture sometimes produces an mp4 with no
@@ -473,6 +592,26 @@ done
 SEG_COUNT=$(grep -c "^file " "$SEG_DIR/concat.txt" 2>/dev/null || echo 0)
 if [ "$SEG_COUNT" -lt 1 ]; then
   die_failed "all segments produced empty captures — cs2 may be stalled"
+fi
+
+# Append the pre-rendered 5stack outro (Remotion-built at Docker
+# build time — see motion/src/Outro.tsx). Outros are sized to match
+# the standard output resolutions; if the job runs at a non-standard
+# dim we skip the outro rather than mangle the concat with a
+# mismatched resolution. Gated on the BRANDING_ENABLED master switch
+# (CLIP_BAKE_BRANDING=1 to enable); CLIP_DISABLE_OUTRO=1 force-skips
+# even when branding is on (used by integration tests).
+if [ "$BRANDING_ENABLED" = "1" ] && [ "${CLIP_DISABLE_OUTRO:-0}" != "1" ]; then
+  OUTRO_DIMS="${CLIP_OUTPUT_DIMS:-1920x1080}"
+  OUTRO_FPS="${CLIP_OUTPUT_FPS:-60}"
+  OUTRO_FILE="${OUTRO_DIR:-/opt/game-streamer/resources/video}/outro_${OUTRO_DIMS}_${OUTRO_FPS}.mp4"
+  if [ -f "$OUTRO_FILE" ]; then
+    say "  appending outro: $OUTRO_FILE"
+    printf "file '%s'\n" "$OUTRO_FILE" >>"$SEG_DIR/concat.txt"
+    SEG_COUNT=$((SEG_COUNT + 1))
+  else
+    say "  WARN outro $OUTRO_FILE missing — clip will ship without branding"
+  fi
 fi
 
 # Concat — direct cuts between segments. We tried 0.4s fade
