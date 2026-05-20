@@ -32,9 +32,9 @@ start_capture() {
 
   log "starting capture '${stream_id}' (fps=$fps kbps=$kbps audio=$audio) -> $url"
 
-  # LIVE_VIDEO_CODEC=h264|h265. Default h264 — HEVC-over-WebRTC is Safari 17+ only
-  # (Chrome behind flag, Firefox no). h265 is opt-in for Safari/iOS-heavy audiences.
-  local codec="${LIVE_VIDEO_CODEC:-h264}"
+  # LIVE_VIDEO_CODEC=h265|h264. Default h265 — falls back to h264 if no NVENC HEVC.
+  # Note: HEVC-over-WebRTC is Safari 17+ only; non-HEVC browsers fall back to HLS.
+  local codec="${LIVE_VIDEO_CODEC:-h265}"
   local enc="" parse=""
   case "$codec" in
     h265|hevc)

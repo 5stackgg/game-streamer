@@ -7,7 +7,7 @@
 start_clip_capture() {
   local out_file="${1:?output file required}"
   local fps="${2:-60}"
-  local kbps="${3:-8000}"
+  local kbps="${3:-16000}"
   local audio="${4:-1}"
 
   local pulse_source="${PULSE_SINK_NAME:-cs2}.monitor"

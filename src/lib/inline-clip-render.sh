@@ -215,6 +215,8 @@ has_audio_stream() {
 # breaks on mixed-codec inputs. HEVC needs both NVENC paths (gst + ffmpeg);
 # downgrade to h264 if either is missing.
 CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h265}"
+# yuv420p + high@4.2 are required for broad Safari/iOS/Android MP4 playback.
+H264_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
 case "$CLIP_VIDEO_CODEC" in
   h265|hevc)
     if h265_available && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q '\bhevc_nvenc\b'; then
@@ -223,12 +225,12 @@ case "$CLIP_VIDEO_CODEC" in
     else
       say "h265 requested but gstreamer or ffmpeg lacks NVENC HEVC — using h264 for this render"
       CLIP_VIDEO_CODEC=h264
-      FFMPEG_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
+      FFMPEG_VENC_ARGS=("${H264_VENC_ARGS[@]}")
     fi
     ;;
   *)
     CLIP_VIDEO_CODEC=h264
-    FFMPEG_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22)
+    FFMPEG_VENC_ARGS=("${H264_VENC_ARGS[@]}")
     ;;
 esac
 export CLIP_VIDEO_CODEC
@@ -446,7 +448,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   fi
 
   say "STEP 5: start GStreamer file capture -> $SEG_FILE"
-  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" 8000 1; then
+  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" 16000 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 5: pid=${CLIP_CAPTURE_PID:-?}"
