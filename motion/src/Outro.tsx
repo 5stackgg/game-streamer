@@ -63,13 +63,6 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
   const subtitleTop = titleY + titleSize * 1.45;
   const yoursTop = subtitleTop + Math.round(titleSize * 0.6);
 
-  const introFlash = interpolate(
-    t,
-    [0, 0.04 * TIME_SCALE, 0.16 * TIME_SCALE],
-    [1, 0.7, 0],
-    { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
-  );
-
   const cinematicZoom = 1 + (t / durationS) * 0.04;
 
   const bgFade = interpolate(t, [0, 0.2 * TIME_SCALE], [0, 1], {
@@ -710,19 +703,6 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
         </span>
       </div>
 
-      {/* Intro flash — full-frame white burst at t=0. */}
-      {introFlash > 0.001 && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 0,
-            background: "#fff",
-            opacity: introFlash,
-            mixBlendMode: "screen",
-            pointerEvents: "none",
-          }}
-        />
-      )}
     </AbsoluteFill>
   );
 };
