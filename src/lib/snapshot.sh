@@ -60,8 +60,6 @@ _snapshot_upload() {
   local url="${STATUS_API_BASE}/game-streamer/${MATCH_ID}/snapshot"
   local auth="${MATCH_ID}:${MATCH_PASSWORD}"
 
-  # Multipart form upload — matches the FileInterceptor pattern the
-  # other api binary uploads (branding/trophies/avatars) use.
   local http_code
   http_code=$(curl -sS -m 10 -X POST \
     -H "x-origin-auth: ${auth}" \
@@ -80,8 +78,8 @@ _snapshot_upload() {
 }
 
 _snapshot_loop() {
-  # Brief pause so cs2 has painted at least one frame before the first
-  # snapshot — otherwise the first thumbnail is a black/loading screen.
+  # Warm-up: cs2 needs to paint a frame before the first snapshot,
+  # otherwise the thumbnail is a black loading screen.
   sleep "$SNAPSHOT_INITIAL_DELAY_SECONDS"
 
   local start sleep_for
@@ -92,8 +90,6 @@ _snapshot_loop() {
     else
       warn "snapshot capture failed"
     fi
-    # Subtract elapsed so cadence stays at the configured interval even
-    # when capture+upload takes a couple of seconds.
     local elapsed=$(( $(date +%s) - start ))
     sleep_for=$(( SNAPSHOT_INTERVAL_SECONDS - elapsed ))
     [ "$sleep_for" -lt 1 ] && sleep_for=1

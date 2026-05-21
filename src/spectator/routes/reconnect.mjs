@@ -1,6 +1,6 @@
 import process from "node:process";
 
-import { execCfgCommand } from "../cs2/exec-cfg.mjs";
+import { sendConsoleCommand } from "../cs2/input.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
 import { sendJson } from "../util/http.mjs";
 
@@ -65,7 +65,12 @@ export async function reconnectHandler(_req, res) {
     script = `disconnect; password "${target.password}"; connect ${target.addr}`;
   }
 
-  const ok = await execCfgCommand(script);
+  // The console is layered above the "Disconnected — Unable to
+  // establish a connection" Panorama modal, but key binds (including
+  // the BackSpace that triggers exec_cfg) are not — the modal eats
+  // them. So reconnect always goes through the console path, even
+  // when EXEC_CFG_PATH is configured.
+  const ok = await sendConsoleCommand(script);
   if (!ok) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
