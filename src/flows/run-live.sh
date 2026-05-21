@@ -12,6 +12,8 @@ SCRIPT_TAG=run-live
 # shellcheck disable=SC1091
 . "$LIB_DIR/stream.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/snapshot.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/audio.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/steam.sh"
@@ -225,6 +227,10 @@ fi
 # 5th arg = 1 → include PulseAudio leg.
 start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
   || die "capture failed to publish"
+
+# Periodic JPEG thumbnails for the watch-page preview tiles. Failures
+# here are non-fatal — the broadcast is the source of truth.
+start_snapshot_loop || warn "start_snapshot_loop failed — will continue without thumbnails"
 
 report_status status=live \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
