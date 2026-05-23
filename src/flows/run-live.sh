@@ -47,7 +47,13 @@ else
 fi
 
 : "${FPS:=30}"
-: "${VIDEO_KBPS:=6000}"
+# VIDEO_KBPS scales with the pixel count of CS2_DISPLAY_RES (1440p is
+# 1.78x 1080p) so encoder quality stays roughly constant across modes.
+# An explicit override (env or pod spec) still wins via `:=` semantics.
+case "$CS2_DISPLAY_RES" in
+  2560x1440) : "${VIDEO_KBPS:=10000}" ;;
+  *)         : "${VIDEO_KBPS:=6000}"  ;;
+esac
 : "${CS2_LAUNCH_TIMEOUT:=300}"
 : "${CS2_WINDOW_TIMEOUT:=300}"
 
@@ -169,7 +175,9 @@ do_applaunch() {
   # Boot-trim flags — see run-demo.sh for the empirical pass that
   # narrowed this down from a larger experimental set.
   local cs2_args=(
-    -windowed -noborder -width 1920 -height 1080 -novid -nojoy -high -console
+    -windowed -noborder
+    -width "$CS2_WIDTH" -height "$CS2_HEIGHT"
+    -novid -nojoy -high -console
     -threads 4
     -disable_loadingplaque
     +cl_disablehtmlmotd 1

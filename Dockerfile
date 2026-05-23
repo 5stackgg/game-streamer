@@ -163,7 +163,8 @@ RUN mkdir -p /opt/steam-bootstrap \
 
 COPY src/ /opt/game-streamer/src/
 COPY resources/ /opt/game-streamer/resources/
-COPY resources/xorg-dummy.conf /etc/X11/xorg-dummy.conf
+COPY resources/xorg-dummy-1080p.conf /etc/X11/xorg-dummy-1080p.conf
+COPY resources/xorg-dummy-1440p.conf /etc/X11/xorg-dummy-1440p.conf
 RUN chmod +x /opt/game-streamer/src/*.sh \
              /opt/game-streamer/src/*.mjs \
              /opt/game-streamer/src/actions/*.sh \

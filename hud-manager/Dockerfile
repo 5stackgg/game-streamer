@@ -54,9 +54,10 @@ RUN git clone --depth 1 --branch "$HUD_REF" \
 # Upstream's v5.x rewrite already does the right thing for the structural
 # bits we used to sed-fix in the openhud era (focusable: true is fine
 # because the overlay calls setIgnoreMouseEvents/enforceOverlayOnTop;
-# fullscreen+1920x1080 are baked into the BrowserWindow options; the
-# admin window is a separate 1280x720 window). So no surgery beyond the
-# patch — just apply it.
+# the admin window is a separate 1280x720 window). The overlay's old
+# hardcoded 1920×1080 BrowserWindow is replaced by auto-overlay.patch
+# with `...screen.getPrimaryDisplay().bounds` + fullscreen:true, so the
+# overlay tracks whatever resolution Xorg reports (1080p / 1440p).
 COPY auto-overlay.patch /tmp/auto-overlay.patch
 RUN git apply --verbose /tmp/auto-overlay.patch \
  && rm /tmp/auto-overlay.patch
