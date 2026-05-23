@@ -30,9 +30,18 @@ write_cs2_video_cfg() {
 
   local overrides="${CS2_VIDEO_SETTINGS:-{\}}"
   if ! echo "$overrides" | jq -e . >/dev/null 2>&1; then
-    warn "CS2_VIDEO_SETTINGS is not valid JSON; writing template unchanged"
-    cp -f "$template" "$dst"
+    warn "CS2_VIDEO_SETTINGS is not valid JSON; treating as auto"
     overrides='{}'
+  fi
+
+  # Auto mode: no per-node overrides — let cs2's first-launch auto-detect
+  # generate cs2_video.txt against the actual GPU. Remove any leftover
+  # file from a previous override run (it would be 0444 and block cs2's
+  # writeback).
+  if [ "$(echo "$overrides" | jq -r 'length')" = "0" ]; then
+    rm -f "$dst"
+    log "  cs2_video.txt: auto mode (no overrides; cs2 will generate)"
+    return 0
   fi
 
   # Locked keys — the streamer requires these exact values for HUD overlay
