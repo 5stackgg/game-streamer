@@ -120,14 +120,18 @@ if [ -n "${MATCH_ID:-}" ] && [ -n "${API_BASE:-}" ]; then
       # window appears in run-live.sh. A second /api/overlay/start
       # there is harmless — hud-manager's closeActiveOverlay() →
       # openOverlayForHud() is idempotent.
-      # Forward the api-resolved HUD_MODE as the variant — without it
-      # this call rebuilds the overlay with an empty `?variant=` and
-      # silently resets the boot-time variant the auto-overlay set.
-      curl -fsS -m 5 -X POST -o /dev/null \
-           -H 'content-type: application/json' \
-           --data "{\"variant\":\"${HUD_MODE:-horizontal}\"}" \
-           "http://${HUD_HOST:-127.0.0.1}:${HUD_PORT:-1349}/api/overlay/start" \
-        || warn "early /api/overlay/start failed (will retry after cs2)"
+      # Batch-highlights doesn't run hud-manager at all, so the kick
+      # would just spam Connection refused.
+      if [ "${CLIP_BATCH_MODE:-0}" != "1" ]; then
+        # Forward the api-resolved HUD_MODE as the variant — without it
+        # this call rebuilds the overlay with an empty `?variant=` and
+        # silently resets the boot-time variant the auto-overlay set.
+        curl -fsS -m 5 -X POST -o /dev/null \
+             -H 'content-type: application/json' \
+             --data "{\"variant\":\"${HUD_MODE:-horizontal}\"}" \
+             "http://${HUD_HOST:-127.0.0.1}:${HUD_PORT:-1349}/api/overlay/start" \
+          || warn "early /api/overlay/start failed (will retry after cs2)"
+      fi
     else
       : > "$LOG_DIR/match-cfgs-failed"
     fi

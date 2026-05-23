@@ -26,11 +26,23 @@ start_capture() {
   local pulse_sink="${PULSE_SINK_NAME:-cs2}"
   local gst_tag="gst-${stream_id:0:8}"
 
+  # Output dims: scale capture to LIVE_OUTPUT_DIMS (default 1920x1080).
+  # CS2 may render at 1440p natively, but the live HLS stream + HUD
+  # overlay CSS + viewer expectations all key off 1080p — and scaling
+  # 1440p → 1080p at capture time gives a supersampled 1080p that's
+  # crisper than rendering CS2 natively at 1080p.
+  local live_out="${LIVE_OUTPUT_DIMS:-1920x1080}"
+  local out_w="${live_out%x*}"
+  local out_h="${live_out#*x}"
+  [ -z "$out_w" ] && out_w=1920
+  [ -z "$out_h" ] && out_h=1080
+  local scale_caps="video/x-raw,width=${out_w},height=${out_h},framerate=${fps}/1"
+
   if stream_running "$stream_id"; then
     return 0
   fi
 
-  log "starting capture '${stream_id}' (fps=$fps kbps=$kbps audio=$audio) -> $url"
+  log "starting capture '${stream_id}' (${out_w}x${out_h}@${fps}fps kbps=$kbps audio=$audio) -> $url"
 
   # LIVE_VIDEO_CODEC=h265|h264. Default h265 — falls back to h264 if no NVENC HEVC.
   # Note: HEVC-over-WebRTC is Safari 17+ only; non-HEVC browsers fall back to HLS.
@@ -81,6 +93,7 @@ start_capture() {
     spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
         ! video/x-raw,framerate="$fps"/1 \
+        ! videoscale ! "$scale_caps" \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
         ! $parse \
@@ -98,6 +111,7 @@ start_capture() {
     spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
         ! video/x-raw,framerate="$fps"/1 \
+        ! videoscale ! "$scale_caps" \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
         ! $parse \

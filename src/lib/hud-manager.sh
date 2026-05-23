@@ -328,6 +328,16 @@ seed_hud_db() {
 
   printf '%s\n' "$match_json" >"$LOG_DIR/hud-seed-match.json"
 
+  # Batch-highlights skips the HUD overlay entirely (no scoreboard on
+  # recorded clips), so hud-manager isn't running. Downstream callers
+  # (write_spec_player_binds) only need the JSON file we just wrote;
+  # the HTTP POSTs below would otherwise spam "Connection refused" and
+  # obscure real clip-render errors in the logs.
+  if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
+    log "  CLIP_BATCH_MODE=1 — skipping hud-manager POSTs (json snapshot saved)"
+    return 0
+  fi
+
   python3 - <<'PY' "$match_json" "http://${HUD_HOST}:${HUD_PORT}/api"
 import json, secrets, sys, urllib.request, urllib.error
 

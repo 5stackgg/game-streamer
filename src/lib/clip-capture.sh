@@ -4,6 +4,9 @@
 
 # start_clip_capture <output-file> [fps] [video-kbps] [audio]
 # Sets $CLIP_CAPTURE_PID; stop with stop_clip_capture for clean EOS.
+# Reads $CLIP_OUTPUT_DIMS from env to scale capture → output dims so
+# the produced mp4 is always at the spec'd resolution regardless of
+# the X display's native size (the node may run CS2 at 1080p or 1440p).
 start_clip_capture() {
   local out_file="${1:?output file required}"
   local fps="${2:-60}"
@@ -13,6 +16,16 @@ start_clip_capture() {
   local pulse_source="${PULSE_SINK_NAME:-cs2}.monitor"
   local gop=$((fps * 2))
   local gst_tag="gst-clip"
+
+  # Output dims: scale capture to CLIP_OUTPUT_DIMS (e.g. 1920x1080). The
+  # chip overlay + outro are rendered/picked at the same dims, so the
+  # ffmpeg polish + concat passes downstream don't hit dimension
+  # mismatches even when the X display is 1440p.
+  local out_w="${CLIP_OUTPUT_DIMS%x*}"
+  local out_h="${CLIP_OUTPUT_DIMS#*x}"
+  [ -z "$out_w" ] && out_w=1920
+  [ -z "$out_h" ] && out_h=1080
+  local scale_caps="video/x-raw,width=${out_w},height=${out_h},framerate=${fps}/1"
 
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
@@ -41,13 +54,14 @@ start_clip_capture() {
     parse_caps="h264parse config-interval=1"
   fi
 
-  log "  clip capture: $out_file (${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
+  log "  clip capture: $out_file (${out_w}x${out_h}@${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
 
   # qtmux faststart=true puts moov first so the api streams uploads to S3 without buffering.
   if [ "$audio" = "1" ]; then
     spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer=false \
         ! video/x-raw,framerate="$fps"/1 \
+        ! videoscale ! "$scale_caps" \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
         ! $parse_caps \
@@ -65,6 +79,7 @@ start_clip_capture() {
     spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer=false \
         ! video/x-raw,framerate="$fps"/1 \
+        ! videoscale ! "$scale_caps" \
         ! videoconvert ! video/x-raw,format=NV12 \
         ! $enc \
         ! $parse_caps \
