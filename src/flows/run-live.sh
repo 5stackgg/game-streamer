@@ -20,6 +20,8 @@ SCRIPT_TAG=run-live
 # shellcheck disable=SC1091
 . "$LIB_DIR/cs2-perf.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/cs2-options.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/hud-manager.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
@@ -62,7 +64,7 @@ rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
 
 CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
 mkdir -p "$CS2_CFG_DIR"
-apply_cs2_video_preset
+write_cs2_video_cfg live
 
 # Source 2 silently drops +exec from launch args, so we write
 # autoexec.cfg (auto-loaded at engine init) AND live_autoexec.cfg
@@ -167,9 +169,11 @@ do_applaunch() {
   # Boot-trim flags — see run-demo.sh for the empirical pass that
   # narrowed this down from a larger experimental set.
   local cs2_args=(
-    -windowed -noborder -width 1920 -height 1080 -novid -nojoy -console
+    -windowed -noborder -width 1920 -height 1080 -novid -nojoy -high -console
+    -threads 4
     -disable_loadingplaque
     +cl_disablehtmlmotd 1
+    +fps_max 120
     +exec live_autoexec)
   if [ "$CS2_CONNECT_MODE" = "playcast" ]; then
     cs2_args+=(+playcast "$PLAYCAST_URL")

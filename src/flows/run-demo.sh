@@ -18,6 +18,8 @@ SCRIPT_TAG=run-demo
 # shellcheck disable=SC1091
 . "$LIB_DIR/cs2-perf.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/cs2-options.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/hud-manager.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
@@ -74,7 +76,7 @@ fi
 
 CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
 mkdir -p "$CS2_CFG_DIR"
-apply_cs2_video_preset
+write_cs2_video_cfg demo
 
 read -r -d '' HIDE_UI_CMDS <<'EOF' || true
 snd_mute_losefocus 0
@@ -197,10 +199,12 @@ do_applaunch() {
   #   -disable_loadingplaque   recommended Source 2 perf hint
   #   +cl_disablehtmlmotd 1    skip HTML MOTD subsystem init
   local cs2_args=(
-    -windowed -noborder -width 1920 -height 1080 -novid -nojoy -console
+    -windowed -noborder -width 1920 -height 1080 -novid -nojoy -high -console
+    -threads 4
     -insecure -condebug
     -disable_loadingplaque
     +cl_disablehtmlmotd 1
+    +fps_max 120
     +exec live_autoexec
     +playdemo "$DEMO_FILE")
   local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")

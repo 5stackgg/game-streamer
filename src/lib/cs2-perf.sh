@@ -1,32 +1,14 @@
 # shellcheck shell=bash
-# CS2 in-game perf helpers — fps cap + cs2_video.txt preset.
-# Sourced by src/flows/run-live.sh and src/flows/run-demo.sh; depends on
-# log/die/CS2_DIR/SRC_DIR from common.sh.
-
-# Copy resources/video/<preset>.txt -> $CS2_DIR/game/csgo/cfg/cs2_video.txt.
-# Overwrites any prior copy so each launch starts from a known state.
-# Aborts via die() if CS2_GRAPHICS_PRESET names a preset we don't ship.
-apply_cs2_video_preset() {
-  local preset="${CS2_GRAPHICS_PRESET:-low}"
-  local src="$SRC_DIR/../resources/video/${preset}.txt"
-  local dst="$CS2_DIR/game/csgo/cfg/cs2_video.txt"
-  if [ ! -f "$src" ]; then
-    local available
-    available="$(ls "$SRC_DIR/../resources/video/" 2>/dev/null \
-                  | sed 's/\.txt$//' | tr '\n' ' ')"
-    die "unknown CS2_GRAPHICS_PRESET=$preset (available: ${available:-none})"
-  fi
-  mkdir -p "$(dirname "$dst")"
-  cp -f "$src" "$dst"
-  log "  applied graphics preset '$preset' (-> $dst, fps_max=$CS2_FPS_MAX)"
-}
+# CS2 in-game perf helpers — autoexec convar block.
+# Sourced by src/flows/run-live.sh and src/flows/run-demo.sh; depends
+# on log/die/CS2_DIR/SRC_DIR from common.sh.
+#
+# Note: video.cfg generation lives in cs2-options.sh (write_cs2_video_cfg),
+# driven by per-node CS2_VIDEO_SETTINGS. fps_max comes from the
+# +fps_max launch arg hardcoded in run-live.sh / run-demo.sh.
 
 # Lines to append to the generated autoexec.cfg. Caller stitches this
 # into the heredoc next to HIDE_UI_CMDS / SPEC_BINDS_BLOCK.
-#
-# These are the runtime convar twin of resources/video/${CS2_GRAPHICS_PRESET}.txt
-# — a hand-curated low-quality profile. They run at engine init and are
-# the source of truth until we capture real cs2_video.txt files.
 cs2_perf_autoexec_block() {
   cat <<'EOF'
 // ===== VIDEO / PERFORMANCE =====
@@ -37,7 +19,7 @@ cs2_perf_autoexec_block() {
 // the launch args and break the overlay.
 // mat_setvideomode 1280 960 1
 
-fps_max 0
+// fps_max is driven by the +fps_max launch flag (see cs2-options.sh).
 fps_max_ui 60
 
 // Disable VSync / latency stuff
@@ -85,6 +67,6 @@ cl_disable_ragdolls 1
 r_drawscreenspaceparticles 0
 cl_disablehtmlmotd 1
 
-echo "LOW SETTINGS LOADED"
+echo "PERF SETTINGS LOADED"
 EOF
 }
