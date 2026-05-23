@@ -9,7 +9,6 @@
 	"setting.monitor_index"		"0"
 	"Version"		"16"
 	"VendorID"		"4318"
-	"DeviceID"		"11266"
 	"setting.cpu_level"		"3"
 	"setting.gpu_mem_level"		"3"
 	"setting.gpu_level"		"3"

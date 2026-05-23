@@ -35,36 +35,36 @@ write_cs2_video_cfg() {
     overrides='{}'
   fi
 
-  # JSONB stores keys without the `setting.` prefix (GraphQL inline
-  # mutations don't allow dotted keys). Prefix them here so we can match
-  # cs2_video.txt's `"setting.foo"` lines. Locked keys are deleted so
-  # neither the form nor a direct DB edit can break the pod.
+  # Locked keys — the streamer requires these exact values for HUD overlay
+  # compositing and headless capture to work. Stripped from user input so
+  # the form (and direct DB edits) can't break the pod.
   # r_low_latency is force-set per-flow below (live=2, demo=0).
   overrides=$(echo "$overrides" | jq --argjson ll "$low_latency" '
-    with_entries(.key |= "setting." + .)
-    | del(
-        .["setting.fullscreen"],
-        .["setting.nowindowborder"],
-        .["setting.coop_fullscreen"],
-        .["setting.fullscreen_min_on_focus_loss"],
-        .["setting.high_dpi"],
-        .["setting.mat_vsync"],
-        .["setting.aspectratiomode"],
-        .["setting.refreshrate_numerator"],
-        .["setting.refreshrate_denominator"],
-        .["setting.monitor_index"],
-        .["setting.cpu_level"],
-        .["setting.gpu_level"],
-        .["setting.gpu_mem_level"],
-        .["setting.videocfg_hdr_detail"],
-        .["setting.videocfg_fsr_detail"]
-      )
+    del(
+      .["setting.fullscreen"],
+      .["setting.nowindowborder"],
+      .["setting.coop_fullscreen"],
+      .["setting.fullscreen_min_on_focus_loss"],
+      .["setting.high_dpi"],
+      .["setting.mat_vsync"],
+      .["setting.aspectratiomode"],
+      .["setting.refreshrate_numerator"],
+      .["setting.refreshrate_denominator"],
+      .["setting.monitor_index"],
+      .["setting.cpu_level"],
+      .["setting.gpu_level"],
+      .["setting.gpu_mem_level"],
+      .["setting.videocfg_hdr_detail"],
+      .["setting.videocfg_fsr_detail"]
+    )
     | .["setting.r_low_latency"] = $ll
   ')
 
   # Copy template, then rewrite each overridden `"key" "value"` line
   # in place via sed. The template's body lines look like
   # `\t"setting.foo"\t\t"123"`; sed preserves the surrounding whitespace.
+  # `rm -f` first so a prior-run 0444 file doesn't block the rewrite.
+  rm -f "$dst"
   cp -f "$template" "$dst"
   local override_count=0
   while IFS=$'\t' read -r k v; do
@@ -78,5 +78,11 @@ write_cs2_video_cfg() {
   done < <(echo "$overrides" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
   rm -f "${dst}.bak"
 
-  log "  wrote cs2_video.txt (mode=$mode, r_low_latency=$low_latency, overrides=$override_count) -> $dst"
+  # CS2's auto-config pass rewrites cs2_video.txt on launch if the file
+  # doesn't match its detected hardware (Version/VendorID/DeviceID etc).
+  # Mark the file read-only so any rewrite attempt EACCES's and our
+  # values survive. CS2 logs a warning but continues normally.
+  chmod 0444 "$dst"
+
+  log "  wrote cs2_video.txt (mode=$mode, r_low_latency=$low_latency, overrides=$override_count, read-only) -> $dst"
 }
