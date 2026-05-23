@@ -638,6 +638,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
          -map "[vout]" \
          "${AUDIO_ARGS[@]}" \
          "${FFMPEG_VENC_ARGS[@]}" \
+         -r "${CLIP_OUTPUT_FPS:-60}" \
          -movflags +faststart \
          "$POLISH_FILE"; then
       rm -f "$POLISH_FILE"
@@ -807,6 +808,7 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
        -filter_complex "$FC" \
        -map "[v]" -map "[a]" \
        "${FFMPEG_VENC_ARGS[@]}" \
+       -r "${CLIP_OUTPUT_FPS:-60}" \
        -c:a aac -b:a 192k -ar 48000 -ac 2 \
        -movflags +faststart \
        "$CLIP_OUT_FILE"; then
@@ -826,6 +828,7 @@ else
     if ! ffmpeg -y -hide_banner -loglevel warning \
          -f concat -safe 0 -i "$SEG_DIR/concat.txt" \
          "${FFMPEG_VENC_ARGS[@]}" \
+         -r "${CLIP_OUTPUT_FPS:-60}" \
          -c:a aac -b:a 192k \
          -movflags +faststart \
          "$CLIP_OUT_FILE"; then
