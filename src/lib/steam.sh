@@ -1012,6 +1012,20 @@ ensure_steam_home_persist() {
   log "ensure_steam_home_persist: $dotsteam/{steam,root} -> $STEAM_HOME"
 }
 
+# Use ALL the node's cores for the shader compile. Steam's default is only
+# ~half and there's no "all" keyword, so we compute it. The pod has no CPU
+# limit (1 streamer/GPU node), so nproc = the node's full core count.
+write_steam_dev_cfg() {
+  local cfg="$STEAM_HOME/steam_dev.cfg"
+  local threads
+  threads=$(nproc 2>/dev/null || echo 0)
+  if printf 'unShaderBackgroundProcessingThreads %s\n' "$threads" > "$cfg" 2>/dev/null; then
+    log "write_steam_dev_cfg: unShaderBackgroundProcessingThreads=$threads (all cores)"
+  else
+    warn "write_steam_dev_cfg: could not write $cfg"
+  fi
+}
+
 fix_steam_perms() {
   if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
     log "fix_steam_perms: Steam is running — skip"

@@ -69,6 +69,7 @@ kill_steam
 # self-update rename across the two would fail with error 18.
 ensure_steam_home_persist
 fix_steam_perms
+write_steam_dev_cfg   # pin fossilize fork count to the pod's cores
 
 mkdir -p "$STEAM_LIBRARY/steamapps/common"
 register_library "$STEAM_LIBRARY"
