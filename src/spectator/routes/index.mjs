@@ -33,6 +33,7 @@ import {
 import { renderClipHandler } from "./render-clip.mjs";
 import { switchMatchHandler } from "./switch-match.mjs";
 import { reconnectHandler } from "./reconnect.mjs";
+import { skipShadersHandler } from "./skip-shaders.mjs";
 
 const HEALTH_GET_URLS = new Set(["/", "/health", "/spec/health"]);
 
@@ -50,6 +51,7 @@ const ROUTES = new Map([
   ["POST /spec/hud-sides",    hudSidesHandler],
   ["POST /spec/switch-match", switchMatchHandler],
   ["POST /spec/reconnect",    reconnectHandler],
+  ["POST /spec/skip-shaders", skipShadersHandler],
   ["POST /spec/xray",         specXrayHandler],
   ["POST /spec/scoreboard",   specScoreboardHandler],
 

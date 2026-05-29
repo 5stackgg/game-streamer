@@ -18,6 +18,12 @@ ENV GTK_A11Y=none
 ENV NO_AT_BRIDGE=1
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
+# NOTE: the NVIDIA shader disk cache env (__GL_SHADER_DISK_CACHE*) is NOT
+# set globally here. Enabling it pod-wide regressed Steam bring-up
+# (steamwebhelper / picom / hud-manager init GL and stalled). It's now
+# exported only for the cs2 process — see export_cs2_shader_cache_env in
+# src/lib/shader-cache.sh.
+
 # Common tools + i386 arch for 32-bit Steam client deps.
 #   curl       — download Steam bootstrap + steamcmd at image build
 #   tini       — PID 1 reaper for the entrypoint
@@ -35,8 +41,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update
 
 # X server + WM + dbus.
-#   xdotool   — used to dismiss "Processing Vulkan shaders" dialog and to
-#               drive console-connect.sh
+#   xdotool   — used to dismiss Steam CEF modals during launch (and, when
+#               SHADER_PRECACHE=0, the "Processing Vulkan shaders" dialog)
+#               and to drive console-connect.sh
 #   xwininfo  — used to detect when the CS2 window appears
 #   zenity    — Steam's bootstrap shells out to it for error popups; without
 #               it Steam crashes hard on certain failure paths

@@ -12,6 +12,8 @@ SCRIPT_TAG=run-live
 # shellcheck disable=SC1091
 . "$LIB_DIR/stream.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/shader-cache.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/snapshot.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/audio.sh"
@@ -54,7 +56,15 @@ case "$CS2_DISPLAY_RES" in
   2560x1440) : "${VIDEO_KBPS:=20000}" ;;
   *)         : "${VIDEO_KBPS:=12000}" ;;
 esac
-: "${CS2_LAUNCH_TIMEOUT:=300}"
+# Letting shaders compile (SHADER_PRECACHE=1) can add 5-13 min on a cold
+# GLCache before cs2 spawns, so give wait_for_cs2_process a much longer
+# leash in that mode (it also pauses the countdown while shaders are
+# actively compiling — see steam.sh).
+if [ "${SHADER_PRECACHE:-0}" = "1" ]; then
+  : "${CS2_LAUNCH_TIMEOUT:=1800}"
+else
+  : "${CS2_LAUNCH_TIMEOUT:=300}"
+fi
 : "${CS2_WINDOW_TIMEOUT:=300}"
 
 steam_pipe_up || die "Steam isn't running"
@@ -67,6 +77,26 @@ sleep 1
 rm -f /tmp/source_engine_*.lock
 rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
       "$CS2_DIR/game/bin/linuxsteamrt64/steam_appid.txt" 2>/dev/null || true
+
+# Pulse wiring is needed before the (possibly early) capture starts —
+# Steam's -applaunch scrubs XDG_RUNTIME_DIR, so cs2's libpulse can't find
+# the unix socket; pin PULSE_SERVER to a TCP coordinate instead.
+export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
+: "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
+export PULSE_SERVER
+
+# Start the capture stream EARLY — before cs2 — so operators can watch the
+# Steam boot and the "Processing Vulkan shaders" screen live (important
+# now that we let shaders compile instead of skipping them). ximagesrc
+# grabs the X root, so no cs2 window is required; audio is silent and the
+# HUD isn't composited until cs2 connects. Idempotent: the post-launch
+# start_capture below no-ops if this already published, and acts as the
+# fallback when EARLY_STREAM=0 or this attempt failed. Disable with
+# EARLY_STREAM=0.
+if [ "${EARLY_STREAM:-1}" = "1" ]; then
+  start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
+    || warn "early start_capture failed — will retry after cs2 launches"
+fi
 
 CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
 mkdir -p "$CS2_CFG_DIR"
@@ -162,11 +192,6 @@ CS2_BIN="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
 cd "$(dirname "$CS2_BIN")"
 
 report_status status=launching_cs2
-export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
-# Steam's -applaunch scrubs XDG_RUNTIME_DIR, so cs2's libpulse can't
-# find the unix socket — pin PULSE_SERVER to a TCP coordinate instead.
-: "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
-export PULSE_SERVER
 
 do_applaunch() {
   # -windowed -noborder required so the alwaysOnTop Electron overlay
@@ -188,10 +213,15 @@ do_applaunch() {
   else
     cs2_args+=(+password "$CS2_CONNECT_PASSWORD" +connect "$CS2_CONNECT_ADDR")
   fi
+  # Scope the NVIDIA shader disk-cache env to cs2 (NOT the whole pod —
+  # that regressed Steam bring-up). cs2 inherits this exported env.
+  export_cs2_shader_cache_env
   local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
   spawn_logged cs2-launch "${cmd[@]}"
 }
 do_applaunch
+# wait_for_cs2_process reports "Processing Vulkan shaders" progress inline
+# (from Steam's shader log) while it waits — no separate monitor process.
 wait_for_cs2_process do_applaunch
 
 minimize_steam_windows

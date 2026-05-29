@@ -12,6 +12,8 @@ SCRIPT_TAG=run-demo
 # shellcheck disable=SC1091
 . "$LIB_DIR/stream.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/shader-cache.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/audio.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/steam.sh"
@@ -37,7 +39,15 @@ case "$CS2_DISPLAY_RES" in
   2560x1440) : "${VIDEO_KBPS:=20000}" ;;
   *)         : "${VIDEO_KBPS:=12000}" ;;
 esac
-: "${CS2_LAUNCH_TIMEOUT:=300}"
+# Batch-highlights defaults SHADER_PRECACHE=1 (clips MUST render from warm
+# shaders), which can add 5-13 min on a cold GLCache before cs2 spawns —
+# give wait_for_cs2_process a much longer leash in that mode. It also
+# pauses the countdown while shaders actively compile (see steam.sh).
+if [ "${SHADER_PRECACHE:-0}" = "1" ]; then
+  : "${CS2_LAUNCH_TIMEOUT:=1800}"
+else
+  : "${CS2_LAUNCH_TIMEOUT:=300}"
+fi
 : "${CS2_WINDOW_TIMEOUT:=300}"
 : "${DEMO_DOWNLOAD_TIMEOUT:=300}"
 : "${DEMO_FILE:=/tmp/game-streamer/demo.dem}"
@@ -57,6 +67,23 @@ rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
 
 report_status status=downloading_demo \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
+
+# Pulse wiring, needed before any (possibly early) capture. Steam's
+# -applaunch scrubs XDG_RUNTIME_DIR, so pin PULSE_SERVER over TCP.
+export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
+: "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
+export PULSE_SERVER
+
+# Start the capture stream EARLY so operators can watch the Steam boot,
+# the demo download, and the "Processing Vulkan shaders" screen live.
+# ximagesrc grabs the X root — no cs2 window needed. Idempotent with the
+# post-launch start_capture below. Skipped in batch-highlights mode (no
+# mediamtx publish there — clips capture per-job). Disable with
+# EARLY_STREAM=0.
+if [ "${EARLY_STREAM:-1}" = "1" ] && [ "${CLIP_BATCH_MODE:-0}" != "1" ]; then
+  start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
+    || warn "early start_capture failed — will retry after cs2 launches"
+fi
 
 # game-streamer.sh's `demo` flow downloads in parallel with setup-steam.
 # Wait on the marker files; fall back to inline if no parallel download
@@ -201,9 +228,6 @@ if [ -n "${WORKSHOP_ID:-}" ]; then
 fi
 
 report_status status=launching_cs2
-export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
-: "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
-export PULSE_SERVER
 
 do_applaunch() {
   # +playdemo on the launch line so cs2 starts loading the demo during
@@ -231,10 +255,15 @@ do_applaunch() {
     +fps_max 120
     +exec live_autoexec
     +playdemo "$DEMO_FILE")
+  # Scope the NVIDIA shader disk-cache env to cs2 (NOT the whole pod —
+  # that regressed Steam bring-up). cs2 inherits this exported env.
+  export_cs2_shader_cache_env
   local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
   spawn_logged cs2-launch "${cmd[@]}"
 }
 do_applaunch
+# wait_for_cs2_process reports "Processing Vulkan shaders" progress inline
+# while it waits — no separate monitor process.
 wait_for_cs2_process do_applaunch
 
 minimize_steam_windows
