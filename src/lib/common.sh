@@ -22,15 +22,9 @@ fi
 : "${STEAM_HOME:=/root/.local/share/Steam}"
 : "${STEAM_LIBRARY:=/mnt/game-streamer}"
 : "${CS2_DIR:=$STEAM_LIBRARY/steamapps/common/Counter-Strike Global Offensive}"
-# NVIDIA shader disk cache location. CS2's compiled Vulkan pipelines land
-# in the driver's GLCache (not Steam's .foz archives), so that's the cache
-# we persist on the library volume to make the slow first compile a
-# one-time cost. The __GL_SHADER_DISK_CACHE* env that actually enables it
-# is exported ONLY for the cs2 process (export_cs2_shader_cache_env in
-# shader-cache.sh, called from do_applaunch) — NOT globally. Applying it
-# to the whole pod regressed Steam bring-up (steamwebhelper / picom /
-# hud-manager all init GL and stalled). Override the path with
-# GL_SHADER_CACHE_DIR.
+# Persistent NVIDIA GLCache dir (holds cs2's compiled Vulkan shaders). The
+# __GL_SHADER_DISK_CACHE* env that enables it is exported per-cs2 only (see
+# shader-cache.sh) — pod-wide regressed Steam bring-up.
 : "${GL_SHADER_CACHE_DIR:=$STEAM_LIBRARY/nvcache}"
 : "${MEDIAMTX_SRT_BASE:=srt://mediamtx.5stack.svc.cluster.local:8890}"
 # mediamtx HTTP control API — start_capture polls to verify a publish
@@ -56,18 +50,11 @@ esac
 : "${CS2_VIDEO_SETTINGS:={}}"
 mkdir -p "$LOG_DIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
-# Driver won't create the GLCache dir itself; make it now (cheap, and the
-# cs2 launch points __GL_SHADER_DISK_CACHE_PATH here).
+# Driver won't create the GLCache dir itself.
 mkdir -p "$GL_SHADER_CACHE_DIR" 2>/dev/null || true
 
-# Vulkan shader pre-caching. When 1 (the default for ALL modes now), let
-# Steam's "Processing Vulkan shaders" pass run to completion instead of
-# Space-pressing the modal away — the persistent cache then warms so
-# gameplay/clip capture isn't stuttery. The first cold compile per (GPU,
-# driver, build) is slow but one-time; warm boots are ~seconds. Skip it on
-# demand at runtime (operator "Skip shaders" → $LOG_DIR/skip-shaders, read
-# by wait_for_cs2_process) or force off globally with SHADER_PRECACHE=0.
-# SHADER_PROGRESS surfaces the % as a processing_shaders stage.
+# Let Steam's shader compile run (vs skipping the modal) so the cache warms.
+# Default on for all modes; skip per-match at runtime or force off with =0.
 : "${SHADER_PRECACHE:=1}"
 
 export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \

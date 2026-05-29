@@ -18,11 +18,8 @@ ENV GTK_A11Y=none
 ENV NO_AT_BRIDGE=1
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
-# NOTE: the NVIDIA shader disk cache env (__GL_SHADER_DISK_CACHE*) is NOT
-# set globally here. Enabling it pod-wide regressed Steam bring-up
-# (steamwebhelper / picom / hud-manager init GL and stalled). It's now
-# exported only for the cs2 process — see export_cs2_shader_cache_env in
-# src/lib/shader-cache.sh.
+# NB: __GL_SHADER_DISK_CACHE* is NOT set globally — pod-wide it regressed
+# Steam bring-up. It's exported per-cs2 in src/lib/shader-cache.sh.
 
 # Common tools + i386 arch for 32-bit Steam client deps.
 #   curl       — download Steam bootstrap + steamcmd at image build

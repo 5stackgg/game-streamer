@@ -130,10 +130,7 @@ start_capture() {
     sleep 1
   done
 
-  # Print the watchable HLS URL so an operator can open the stream
-  # straight from the pod logs — handy during the early/boot phase
-  # (Steam UI, "Processing Vulkan shaders") before the match goes live.
-  # mediamtx serves the stream under the bare stream-id path. grep "WATCH".
+  # Log the watchable HLS URL (grep "WATCH") for the early/boot phase.
   local dom="${GAME_STREAM_DOMAIN:-hls.5stack.gg}"
   dom="${dom%/}"
   case "$dom" in

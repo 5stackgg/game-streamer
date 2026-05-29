@@ -975,12 +975,8 @@ ensure_steam_home_persist() {
   local target="$STEAM_LIBRARY/steam"
   mkdir -p "$target"
 
-  # Relink $STEAM_HOME → persisted cache unless it's already correct. NOTE:
-  # this is an if/else (NOT an early return) on purpose — the ~/.steam link
-  # repair below MUST run on every call, including warm reuse where
-  # $STEAM_HOME is already linked. ~/.steam lives in ephemeral /root, so a
-  # reused container can have a good $STEAM_HOME but a missing ~/.steam/steam
-  # → Steam crash-loops at launch ("sometimes stuck at launching_steam").
+  # if/else (not early-return): the ~/.steam repair below must run every
+  # call, including warm reuse where $STEAM_HOME is already linked.
   if [ -L "$STEAM_HOME" ] \
      && [ "$(readlink -f "$STEAM_HOME" 2>/dev/null)" = "$(readlink -f "$target" 2>/dev/null)" ]; then
     log "ensure_steam_home_persist: $STEAM_HOME already -> $target"
@@ -1003,15 +999,9 @@ ensure_steam_home_persist() {
     log "ensure_steam_home_persist: $STEAM_HOME -> $target"
   fi
 
-  # Steam crashes on launch with "Steam data link does not exist, client is
-  # misconfigured" and asserts in steamexe/main.cpp if ~/.steam/steam is
-  # missing — leaving a stale steam.pid/steam.pipe so wait_for_steam_pipe
-  # loops forever. The bootstrap does NOT reliably recreate these classic
-  # links when $STEAM_HOME is a symlink (observed in the wild: ~/.steam/root
-  # present but ~/.steam/steam absent → 15-min hang at launching_steam).
-  # Pin both to $STEAM_HOME every boot. rm first so a stale/wrong entry
-  # (incl. a non-symlink) is replaced cleanly; rm on a symlink drops only
-  # the link, never the target.
+  # Steam asserts "Steam data link does not exist" and crash-loops if
+  # ~/.steam/steam is missing; its bootstrap doesn't reliably recreate it
+  # when $STEAM_HOME is a symlink. Pin both classic links every boot.
   local dotsteam="$HOME/.steam"
   mkdir -p "$dotsteam"
   local lk
@@ -1020,23 +1010,6 @@ ensure_steam_home_persist() {
     ln -s "$STEAM_HOME" "$dotsteam/$lk"
   done
   log "ensure_steam_home_persist: $dotsteam/{steam,root} -> $STEAM_HOME"
-}
-
-# Steam reads steam_dev.cfg from its install root at startup.
-# unShaderBackgroundProcessingThreads controls how many fossilize_replay
-# forks Steam spawns to compile Vulkan shaders — by default it uses only
-# ~half the cores, so a cold CS2 compile is slower than it needs to be.
-# Pin it to all available cores (override with SHADER_THREADS). Only
-# matters when we actually let shaders process (SHADER_PRECACHE=1); the
-# key is harmless/ignored otherwise. Idempotent — rewritten each boot.
-write_steam_dev_cfg() {
-  local cfg="$STEAM_HOME/steam_dev.cfg"
-  local threads="${SHADER_THREADS:-$(nproc 2>/dev/null || echo 0)}"
-  if printf 'unShaderBackgroundProcessingThreads %s\n' "$threads" > "$cfg" 2>/dev/null; then
-    log "write_steam_dev_cfg: unShaderBackgroundProcessingThreads=$threads -> $cfg"
-  else
-    warn "write_steam_dev_cfg: could not write $cfg"
-  fi
 }
 
 fix_steam_perms() {
@@ -1229,19 +1202,12 @@ wait_for_steam_pipe() {
 # timeout (and dumps the tail of Steam's console-linux.txt first).
 #
 # Side effects on each iteration:
-#   - first 90s, every 5s: poke_steam_dialog (Space-press the focused
-#     button on any modal CEF dialog Steam pops — cloud-out-of-date,
-#     shader pre-cache, etc). SUPPRESSED when SHADER_PRECACHE=1: the poke
-#     is generic (it can't tell the shader modal from any other), and
-#     Space-pressing the "Processing Vulkan shaders" dialog is exactly
-#     what skips the compile we now want to keep. Cloud is already
-#     VDF-disabled in setup-steam, so there's no other modal to clear.
-#     Force the old always-poke behavior with POKE_SHADER_DIALOG=1.
-#   - each iteration calls shader_report_progress (inline) which reports the
-#     compile % and returns whether it's actively running; while it is, the
-#     applaunch-retry below is paused — Steam is busy precaching, not
-#     dropping the launch — and the caller raises CS2_LAUNCH_TIMEOUT so a
-#     legit multi-minute compile doesn't trip the die() at the bottom.
+#   - first 90s, every 5s: poke_steam_dialog (Space-press the focused CEF
+#     modal). Suppressed when SHADER_PRECACHE=1 (poking would skip the
+#     compile); force-on with POKE_SHADER_DIALOG=1.
+#   - shader_report_progress (inline) reports compile % and pauses the
+#     applaunch-retry while a compile is active (caller raises
+#     CS2_LAUNCH_TIMEOUT so a long compile doesn't trip die()).
 #   - first retry at 8s, then every 30s, up to 4 retries: re-invoke
 #     <applaunch_fn>. Steam sometimes silently drops the very first
 #     applaunch on a cold login (logs "Steam is already running,
@@ -1279,9 +1245,7 @@ wait_for_cs2_process() {
   rm -f "$skip_marker" 2>/dev/null || true
   local skip_logged=0
 
-  # Stall detection: once shaders start compiling, remember the last loop
-  # they were active. If the log then goes silent (wedged compile) and cs2
-  # never launches, recover instead of idling to CS2_LAUNCH_TIMEOUT.
+  # Track last loop a compile was active, to detect a wedged/stalled one.
   local shaders_seen=0 last_active_i=0
 
   for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
@@ -1291,11 +1255,8 @@ wait_for_cs2_process() {
       return 0
     fi
 
-    # Skip requested → dismiss the shader modal NOW (regardless of the
-    # normal 3-90s poke window, since a cold compile runs for minutes) and
-    # stop holding the launch open for it. NEVER honored in batch-highlights
-    # mode — rendered clips MUST come from warm shaders, so highlights have
-    # no skip (the UI doesn't offer it either).
+    # Skip requested → dismiss the modal now (any time, not just the poke
+    # window) and stop holding open. Never in batch (clips must be warm).
     local skip_now=0
     if [ -f "$skip_marker" ] && [ "${CLIP_BATCH_MODE:-0}" != "1" ]; then
       skip_now=1
@@ -1313,9 +1274,8 @@ wait_for_cs2_process() {
 
     [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
 
-    # Report shader-compile progress + learn whether it's actively running.
-    # Done INLINE here (this loop is always alive) rather than a background
-    # process that can die and freeze the UI at 0%.
+    # Report compile progress + whether it's actively running (inline — no
+    # bg process that can die and freeze the UI).
     local shaders_active=0
     if declare -F shader_report_progress >/dev/null 2>&1 && shader_report_progress; then
       shaders_active=1
@@ -1323,20 +1283,15 @@ wait_for_cs2_process() {
       last_active_i=$i
     fi
 
-    # Pause applaunch-retries while shaders are actively compiling — Steam
-    # is working, not stuck, and re-issuing would just be noise. Skipping
-    # overrides this so the launch proceeds immediately.
+    # Hold the launch open while a compile is active (don't re-issue applaunch).
     if [ "$skip_now" = 0 ] && [ "$shaders_active" = 1 ]; then
       [ $(( i % 30 )) -eq 0 ] && log "  shaders still compiling — holding launch open"
       sleep 1
       continue
     fi
 
-    # Stall recovery: shaders WERE compiling but the log has gone silent
-    # (compile wedged) and cs2 still hasn't appeared — don't idle all the
-    # way to CS2_LAUNCH_TIMEOUT (up to 30 min). live/demo: drop the skip
-    # marker so the next iteration dismisses the modal and launches cs2 with
-    # whatever compiled (may stutter). batch: clips MUST be warm — fail fast.
+    # Stalled compile (was active, log now silent, no cs2): recover instead
+    # of idling to CS2_LAUNCH_TIMEOUT. live/demo auto-skip; batch fails fast.
     if [ "$shaders_seen" = 1 ] && [ "$skip_now" = 0 ] \
        && [ $(( i - last_active_i )) -ge "${SHADER_STALL_GRACE:-180}" ]; then
       if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then

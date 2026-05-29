@@ -33,14 +33,9 @@ start_xorg
 start_pulseaudio
 start_spec_server
 
-# DEBUG_STREAM=1: start the capture the moment X + pulse are up — before
-# Steam even launches — so the pod is watchable while it boots. Normal
-# EARLY_STREAM only kicks in once run-live runs (i.e. after Steam is up),
-# which is no help when the hang is HERE in setup-steam (steam login / the
-# pipe wait). Publishes to the match stream id, so the usual HLS URL works
-# and run-live's idempotent start_capture just adopts this stream (no
-# restart). grep the logs for "WATCH" to get the URL. Mirrors the flows'
-# fps/bitrate so the adopted stream is live-quality.
+# DEBUG_STREAM=1: capture as soon as X+pulse are up (before Steam) so a boot
+# hang is watchable. Publishes to the match id; run-live's start_capture
+# adopts it. grep logs for "WATCH" for the URL.
 if [ "${DEBUG_STREAM:-0}" = "1" ]; then
   debug_sid="${DEBUG_STREAM_ID:-${MATCH_ID:-debug}}"
   case "$CS2_DISPLAY_RES" in
@@ -74,12 +69,6 @@ kill_steam
 # self-update rename across the two would fail with error 18.
 ensure_steam_home_persist
 fix_steam_perms
-
-# NOTE: steam_dev.cfg (unShaderBackgroundProcessingThreads) is intentionally
-# NOT written here. It (and a pod-wide GLCache env) regressed Steam pipe
-# bring-up, so shader tuning is now scoped to the cs2 process only
-# (export_cs2_shader_cache_env in do_applaunch). Re-introduce a steam_dev.cfg
-# write only if proven safe against the Steam client startup.
 
 mkdir -p "$STEAM_LIBRARY/steamapps/common"
 register_library "$STEAM_LIBRARY"
