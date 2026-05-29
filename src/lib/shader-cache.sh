@@ -72,23 +72,25 @@ _SHADER_LAST_REPORT=""
 shader_report_progress() {
   [ "${SHADER_PROGRESS:-1}" = "1" ] || return 1
 
-  local f line parsed pct done total
+  # NB: `compiled`, not `done` — `done` is a bash reserved word; harmless as
+  # a read target but a readability trap.
+  local f line parsed pct compiled total
   f="$(shader_log_file)"
   [ -f "$f" ] || return 1
   line=$(grep -a 'Still replaying 730 ' "$f" 2>/dev/null | tail -1)
   parsed=$(_parse_shader_line "$line")
   [ -n "$parsed" ] || return 1
-  read -r pct done total <<<"$parsed"
+  read -r pct compiled total <<<"$parsed"
 
-  # Precise percent from done/total. Steam nudges `total` up as it discovers
-  # more pipelines, so this wobbles slightly but climbs.
+  # Precise percent from compiled/total. Steam nudges `total` up as it
+  # discovers more pipelines, so this wobbles slightly but climbs.
   local precise
-  precise=$(awk -v d="${done:-0}" -v t="${total:-0}" \
+  precise=$(awk -v d="${compiled:-0}" -v t="${total:-0}" \
     'BEGIN{ if (t+0<=0){ printf "0.0" } else { p=d*100.0/t; if(p<0)p=0; if(p>100)p=100; printf "%.1f", p } }')
 
   if [ "$precise" != "${_SHADER_LAST_REPORT:-}" ]; then
     _SHADER_LAST_REPORT="$precise"
-    log "processing Vulkan shaders: ${precise}% (${done}/${total})"
+    log "processing Vulkan shaders: ${precise}% (${compiled}/${total})"
     # Dedicated processing_shaders stage. progress_stage carries the raw
     # pipeline count ("done / total") so the UI can show scale/ETA — the
     # web stepper already renders progress_stage in parens, and the api
@@ -98,7 +100,7 @@ shader_report_progress() {
     # Live: stored in status_history (same-status ticks coalesced — no
     # bloat). Batch: broadcast_batch_status folds it into boot_stage.
     report_status status=processing_shaders progress="$precise" \
-      progress_stage="${done} / ${total}" >/dev/null 2>&1 || true
+      progress_stage="${compiled} / ${total}" >/dev/null 2>&1 || true
   fi
 
   # "Actively compiling" = log written recently and not yet at 100%, so the

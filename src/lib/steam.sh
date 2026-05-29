@@ -1279,6 +1279,11 @@ wait_for_cs2_process() {
   rm -f "$skip_marker" 2>/dev/null || true
   local skip_logged=0
 
+  # Stall detection: once shaders start compiling, remember the last loop
+  # they were active. If the log then goes silent (wedged compile) and cs2
+  # never launches, recover instead of idling to CS2_LAUNCH_TIMEOUT.
+  local shaders_seen=0 last_active_i=0
+
   for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
     pid=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
     if [ -n "$pid" ]; then
@@ -1314,6 +1319,8 @@ wait_for_cs2_process() {
     local shaders_active=0
     if declare -F shader_report_progress >/dev/null 2>&1 && shader_report_progress; then
       shaders_active=1
+      shaders_seen=1
+      last_active_i=$i
     fi
 
     # Pause applaunch-retries while shaders are actively compiling — Steam
@@ -1323,6 +1330,21 @@ wait_for_cs2_process() {
       [ $(( i % 30 )) -eq 0 ] && log "  shaders still compiling — holding launch open"
       sleep 1
       continue
+    fi
+
+    # Stall recovery: shaders WERE compiling but the log has gone silent
+    # (compile wedged) and cs2 still hasn't appeared — don't idle all the
+    # way to CS2_LAUNCH_TIMEOUT (up to 30 min). live/demo: drop the skip
+    # marker so the next iteration dismisses the modal and launches cs2 with
+    # whatever compiled (may stutter). batch: clips MUST be warm — fail fast.
+    if [ "$shaders_seen" = 1 ] && [ "$skip_now" = 0 ] \
+       && [ $(( i - last_active_i )) -ge "${SHADER_STALL_GRACE:-180}" ]; then
+      if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
+        die "Vulkan shader compile stalled — no progress for ${SHADER_STALL_GRACE:-180}s and cs2 never launched"
+      elif [ ! -f "$skip_marker" ]; then
+        warn "  shader compile stalled (no progress ${SHADER_STALL_GRACE:-180}s) — auto-skipping to launch cs2"
+        : > "$skip_marker"
+      fi
     fi
 
     if [ "$i" -ge "$next_retry_at" ] && [ "$relaunch_count" -lt 4 ]; then
