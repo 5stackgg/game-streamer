@@ -1197,17 +1197,15 @@ wait_for_steam_pipe() {
 
 # wait_for_cs2_process <applaunch_fn>
 #
-# Block until a /linuxsteamrt64/cs2 process appears, up to
-# CS2_LAUNCH_TIMEOUT seconds. Sets CS2_PID for the caller. die()s on
-# timeout (and dumps the tail of Steam's console-linux.txt first).
+# Block until a /linuxsteamrt64/cs2 process appears, then set CS2_PID.
+# Waits indefinitely — a cold shader compile can take a long time, so we
+# never time out / die (operator cancels via pod delete).
 #
 # Side effects on each iteration:
-#   - first 90s, every 5s: poke_steam_dialog (Space-press the focused CEF
-#     modal). Suppressed when SHADER_PRECACHE=1 (poking would skip the
-#     compile); force-on with POKE_SHADER_DIALOG=1.
+#   - poke_steam_dialog ONLY on operator skip (auto-poking would dismiss
+#     the shader modal and skip the compile we always want).
 #   - shader_report_progress (inline) reports compile % and pauses the
-#     applaunch-retry while a compile is active (caller raises
-#     CS2_LAUNCH_TIMEOUT so a long compile doesn't trip die()).
+#     applaunch-retry while a compile is active.
 #   - first retry at 8s, then every 30s, up to 4 retries: re-invoke
 #     <applaunch_fn>. Steam sometimes silently drops the very first
 #     applaunch on a cold login (logs "Steam is already running,
@@ -1230,14 +1228,7 @@ wait_for_cs2_process() {
   local applaunch_fn="${1:?applaunch function name required}"
   local relaunch_count=0
   local next_retry_at=8
-  local pid="" i
-
-  # Skip the modal poke when we want shaders to actually compile.
-  local poke_dialogs=1
-  if [ "${SHADER_PRECACHE:-0}" = "1" ] && [ "${POKE_SHADER_DIALOG:-0}" != "1" ]; then
-    poke_dialogs=0
-    log "  SHADER_PRECACHE=1 — letting Vulkan shaders compile (modal poke disabled)"
-  fi
+  local pid="" i=0
 
   # Operator "Skip shaders" signal (spec-server writes this file). Clear any
   # stale marker from a prior run so we don't auto-skip this one.
@@ -1248,7 +1239,11 @@ wait_for_cs2_process() {
   # Track last loop a compile was active, to detect a wedged/stalled one.
   local shaders_seen=0 last_active_i=0
 
-  for i in $(seq 1 "$CS2_LAUNCH_TIMEOUT"); do
+  # Wait indefinitely — a cold shader compile can run well past any fixed
+  # timeout and killing it mid-compile wastes the work. Operator cancels by
+  # deleting the pod (same pattern as wait_for_steam_pipe).
+  while :; do
+    i=$(( i + 1 ))
     pid=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
     if [ -n "$pid" ]; then
       CS2_PID="$pid"
@@ -1266,11 +1261,9 @@ wait_for_cs2_process() {
       fi
     fi
 
-    if [ "$skip_now" = 1 ]; then
-      poke_steam_dialog
-    elif [ "$poke_dialogs" = 1 ] && [ "$i" -ge 3 ] && [ "$i" -le 90 ] && [ $(( i % 5 )) -eq 0 ]; then
-      poke_steam_dialog
-    fi
+    # Only poke (dismiss the modal) on operator skip — auto-poking would
+    # skip the shader compile we always want to run.
+    [ "$skip_now" = 1 ] && poke_steam_dialog
 
     [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
 
@@ -1291,7 +1284,7 @@ wait_for_cs2_process() {
     fi
 
     # Stalled compile (was active, log now silent, no cs2): recover instead
-    # of idling to CS2_LAUNCH_TIMEOUT. live/demo auto-skip; batch fails fast.
+    # of waiting forever. live/demo auto-skip; batch fails fast.
     if [ "$shaders_seen" = 1 ] && [ "$skip_now" = 0 ] \
        && [ $(( i - last_active_i )) -ge "${SHADER_STALL_GRACE:-180}" ]; then
       if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
@@ -1320,8 +1313,4 @@ wait_for_cs2_process() {
 
     sleep 1
   done
-
-  log "--- $STEAM_LIBRARY/steam/logs/console-linux.txt (last 20) ---"
-  tail -20 "$STEAM_LIBRARY/steam/logs/console-linux.txt" 2>/dev/null || true
-  die "Steam never spawned cs2 in ${CS2_LAUNCH_TIMEOUT}s"
 }

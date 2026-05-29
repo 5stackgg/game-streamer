@@ -56,12 +56,6 @@ case "$CS2_DISPLAY_RES" in
   2560x1440) : "${VIDEO_KBPS:=20000}" ;;
   *)         : "${VIDEO_KBPS:=12000}" ;;
 esac
-# Longer leash when shaders compile — a cold GLCache can take minutes.
-if [ "${SHADER_PRECACHE:-0}" = "1" ]; then
-  : "${CS2_LAUNCH_TIMEOUT:=1800}"
-else
-  : "${CS2_LAUNCH_TIMEOUT:=300}"
-fi
 : "${CS2_WINDOW_TIMEOUT:=300}"
 
 steam_pipe_up || die "Steam isn't running"

@@ -41,8 +41,6 @@ _SHADER_LAST_REPORT=""
 # compiled/total fraction so sub-1% movement shows (1% of CS2's ~723k
 # pipelines is ~7k). Must be set -u safe. `compiled` not `done` (reserved).
 shader_report_progress() {
-  [ "${SHADER_PROGRESS:-1}" = "1" ] || return 1
-
   local f line parsed pct compiled total
   f="$(shader_log_file)"
   [ -f "$f" ] || return 1

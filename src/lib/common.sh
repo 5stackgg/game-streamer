@@ -53,15 +53,11 @@ chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 # Driver won't create the GLCache dir itself.
 mkdir -p "$GL_SHADER_CACHE_DIR" 2>/dev/null || true
 
-# Let Steam's shader compile run (vs skipping the modal) so the cache warms.
-# Default on for all modes; skip per-match at runtime or force off with =0.
-: "${SHADER_PRECACHE:=1}"
-
 export DISPLAY XDG_RUNTIME_DIR STEAM_HOME STEAM_LIBRARY CS2_DIR \
        MEDIAMTX_SRT_BASE MEDIAMTX_API_BASE GAME_STREAM_DOMAIN \
        LOG_DIR XORG_CONFIG CS2_VIDEO_SETTINGS \
        CS2_DISPLAY_RES CS2_WIDTH CS2_HEIGHT \
-       GL_SHADER_CACHE_DIR SHADER_PRECACHE
+       GL_SHADER_CACHE_DIR
 
 say()  { printf '\n=== %s ===\n' "$*"; }
 log()  { printf '[%s] %s\n' "${SCRIPT_TAG:-game-streamer}" "$*"; }
