@@ -110,6 +110,16 @@ cl_drawhud 0
 r_drawviewmodel 0
 cl_show_observer_crosshair 0
 spec_show_xray 0
+// demo_interpolateview defaults to 1 (smooth camera between ticks); pinned
+// here so a config/build change can't silently reintroduce tick-stepping.
+demo_interpolateview 1
+// TrueView: reconstruct the observed player's real camera/aim by re-running
+// client-side prediction instead of showing tick-sampled server angles.
+// Off by default when the demo's build version != client; `2` overrides that
+// check so older 5stack demos still get the smooth predicted POV.
+cl_demo_predict 2
+// Hide assist credits in the kill feed during playback.
+mp_display_kill_assists 0
 EOF
 
 SPEC_BINDS_BLOCK="$(spec_static_binds_block)"
