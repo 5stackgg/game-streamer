@@ -75,19 +75,6 @@ rm -f /tmp/source_engine_*.lock
 rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
       "$CS2_DIR/game/bin/linuxsteamrt64/steam_appid.txt" 2>/dev/null || true
 
-# Pulse wiring, needed before the early capture. -applaunch scrubs
-# XDG_RUNTIME_DIR, so pin PULSE_SERVER over TCP.
-export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
-: "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
-export PULSE_SERVER
-
-# Capture early (X root, no cs2 window needed) so operators can watch the
-# boot/shader screen. Idempotent with the post-launch start_capture below.
-if [ "${EARLY_STREAM:-1}" = "1" ]; then
-  start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
-    || warn "early start_capture failed — will retry after cs2 launches"
-fi
-
 CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
 mkdir -p "$CS2_CFG_DIR"
 write_cs2_video_cfg live
@@ -182,6 +169,10 @@ CS2_BIN="$CS2_DIR/game/bin/linuxsteamrt64/cs2"
 cd "$(dirname "$CS2_BIN")"
 
 report_status status=launching_cs2
+# -applaunch scrubs XDG_RUNTIME_DIR, so pin PULSE_SERVER over TCP.
+export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
+: "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
+export PULSE_SERVER
 
 do_applaunch() {
   # -windowed -noborder required so the alwaysOnTop Electron overlay

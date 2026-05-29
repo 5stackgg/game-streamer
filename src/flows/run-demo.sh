@@ -65,19 +65,6 @@ rm -f "$CS2_DIR/game/csgo/steam_appid.txt" \
 report_status status=downloading_demo \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
 
-# Pulse wiring, needed before any (possibly early) capture. Steam's
-# -applaunch scrubs XDG_RUNTIME_DIR, so pin PULSE_SERVER over TCP.
-export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
-: "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
-export PULSE_SERVER
-
-# Capture early so operators can watch boot/shader screen. Idempotent with
-# the post-launch start_capture; skipped in batch (no mediamtx publish).
-if [ "${EARLY_STREAM:-1}" = "1" ] && [ "${CLIP_BATCH_MODE:-0}" != "1" ]; then
-  start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
-    || warn "early start_capture failed — will retry after cs2 launches"
-fi
-
 # game-streamer.sh's `demo` flow downloads in parallel with setup-steam.
 # Wait on the marker files; fall back to inline if no parallel download
 # was kicked off.
@@ -221,6 +208,10 @@ if [ -n "${WORKSHOP_ID:-}" ]; then
 fi
 
 report_status status=launching_cs2
+# -applaunch scrubs XDG_RUNTIME_DIR, so pin PULSE_SERVER over TCP.
+export PULSE_SINK="${PULSE_SINK_NAME:-cs2}"
+: "${PULSE_SERVER:=tcp:${PULSE_TCP_HOST:-127.0.0.1}:${PULSE_TCP_PORT:-4713}}"
+export PULSE_SERVER
 
 do_applaunch() {
   # +playdemo on the launch line so cs2 starts loading the demo during
