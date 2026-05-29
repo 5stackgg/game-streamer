@@ -1239,6 +1239,9 @@ wait_for_cs2_process() {
   # Track last loop a compile was active, to detect a wedged/stalled one.
   local shaders_seen=0 last_active_i=0
 
+  # Ignore stale progress from a prior run (persistent shader_log.txt).
+  declare -F shader_progress_reset >/dev/null 2>&1 && shader_progress_reset
+
   # Wait indefinitely — a cold shader compile can run well past any fixed
   # timeout and killing it mid-compile wastes the work. Operator cancels by
   # deleting the pod (same pattern as wait_for_steam_pipe).

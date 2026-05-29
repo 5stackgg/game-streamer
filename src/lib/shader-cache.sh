@@ -35,16 +35,32 @@ _parse_shader_line() {
 # In-process throttle (single-process loop → a global suffices, no bg
 # monitor that could die and freeze the UI).
 _SHADER_LAST_REPORT=""
+_SHADER_LOG_OFFSET=0
+
+# Snapshot the shader log size so we only read THIS run's lines.
+# shader_log.txt lives on the persistent volume and is appended across runs,
+# so without this the first reading shows a stale % from the previous run
+# (looks like "resumed then restarted"). Call once before wait_for_cs2_process.
+shader_progress_reset() {
+  local f
+  f="$(shader_log_file)"
+  _SHADER_LOG_OFFSET=$(stat -c %s "$f" 2>/dev/null || echo 0)
+  _SHADER_LAST_REPORT=""
+}
 
 # Report compile progress; return 0 while actively compiling, else 1. Called
 # inline once per wait_for_cs2_process iteration. Reports a precise
 # compiled/total fraction so sub-1% movement shows (1% of CS2's ~723k
 # pipelines is ~7k). Must be set -u safe. `compiled` not `done` (reserved).
 shader_report_progress() {
-  local f line parsed pct compiled total
+  local f line parsed pct compiled total size
   f="$(shader_log_file)"
   [ -f "$f" ] || return 1
-  line=$(grep -a 'Still replaying 730 ' "$f" 2>/dev/null | tail -1)
+  # Only this run's lines. If the file shrank, Steam rotated it — read all.
+  size=$(stat -c %s "$f" 2>/dev/null || echo 0)
+  [ "$size" -lt "${_SHADER_LOG_OFFSET:-0}" ] && _SHADER_LOG_OFFSET=0
+  line=$(tail -c "+$(( ${_SHADER_LOG_OFFSET:-0} + 1 ))" "$f" 2>/dev/null \
+    | grep -a 'Still replaying 730 ' | tail -1)
   parsed=$(_parse_shader_line "$line")
   [ -n "$parsed" ] || return 1
   read -r pct compiled total <<<"$parsed"
