@@ -17,6 +17,8 @@ usage: $(basename "$0") <command>
   demo              setup Steam + download \$DEMO_URL + play it back + capture
   batch-highlights  demo flow with CLIP_BATCH_MODE=1 — renders \$CLIP_BATCH_JOBS
                     sequentially against the same cs2 instance, then exits
+  warm-shaders      boot CS2, run the Vulkan shader precache to completion,
+                    then exit — pre-warms this node's cache (no match needed)
 EOF
 }
 
@@ -131,6 +133,11 @@ case "$cmd" in
   batch-highlights)
     export CLIP_BATCH_MODE=1
     run_demo_flow "$@"
+    ;;
+  warm-shaders)
+    # Pre-warm this node's shader cache (no match). Run as a per-node Job.
+    "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
+    exec "$FLOWS_DIR/warm-shaders.sh" "$@"
     ;;
   -h|--help|help|"") usage ;;
   *) echo "unknown command: $cmd" >&2; usage >&2; exit 2 ;;
