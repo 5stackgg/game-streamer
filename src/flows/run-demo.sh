@@ -39,17 +39,12 @@ start_status_reporter
 # without burning GPU/heat on 200+fps we'd never sample. The GPU clock-lock
 # (cs2_autotune) keeps it steady. 0 = uncapped; set lower only if heat-limited.
 : "${CS2_FPS_MAX:=120}"
-# Texture-streaming LOD bias — keeps the streamer ahead of first-visit full-res
-# texture pulls. Higher = smaller/softer textures. 3 = smoothest (the validated
-# default); 1 = stock/sharp. The vkcapture present-hook fixed the dominant
-# stutter, so this is now a mild safety bias — A/B toward 1 for max sharpness.
-# Applied in the demo autoexec (needs sv_cheats).
-: "${CS2_TEXTURE_LOD:=3}"
-# TrueView prediction for the spectated player's view. 2 = always re-run client
-# prediction (smoothest aim); 1 = predict only on build match; 0 = none. Re-
-# simulating every frame can hitch the render thread on a gunfight's heavy
-# command stream, so we default 0. Applied in the demo autoexec (needs sv_cheats).
-: "${CS2_DEMO_PREDICT:=0}"
+# TrueView prediction for the spectated player's view: reconstructs the observed
+# player's real camera/aim by re-running client-side prediction instead of showing
+# tick-sampled server angles. 2 = always predict (smoothest aim; overrides the
+# demo-build-version check so older 5stack demos still get the predicted POV),
+# 1 = predict only on build match, 0 = off. Applied in the demo autoexec.
+: "${CS2_DEMO_PREDICT:=2}"
 # Debug overlay: bake cl_showfps + net_graph into the captured clip (cs2's real
 # render fps + frametime, readable straight off the mp4). 0 = off (production,
 # clean clips); 1 = on to diagnose a capture/perf issue.
@@ -142,9 +137,6 @@ demo_interpolateview 1
 // live_autoexec below), not pinned here.
 // Hide assist credits in the kill feed during playback.
 mp_display_kill_assists 0
-// Demo jitter workaround; harmless no-op if the cvar isn't present on this cs2
-// build. Real motion smoothing is demo_interpolateview above + cl_demo_predict.
-demo_smooth 0
 // Don't let cs2 quit when a demo finishes — batch-highlights reuses the same
 // cs2 process across jobs, so an auto-quit would kill the remaining renders.
 demo_quitafterplayback 0
@@ -174,15 +166,11 @@ $(cs2_perf_autoexec_block)
 $EXEC_OBSERVER
 $SPEC_BINDS_BLOCK
 $DEMO_BINDS_BLOCK
-// Texture-streaming LOD bias (see CS2_TEXTURE_LOD above) — smaller textures so
-// the streamer keeps up on first visit to an area. cheat-flagged, so sv_cheats 1.
-sv_cheats 1
-r_texture_lod_scale ${CS2_TEXTURE_LOD}
-r_fallback_texture_lod_scale $((CS2_TEXTURE_LOD + 1))
 // TrueView prediction for the spectated view (see CS2_DEMO_PREDICT above).
 cl_demo_predict ${CS2_DEMO_PREDICT}
 // Brighten demo output (cs2 default fullscreen gamma is ~2.2; 2 lifts the
-// midtones so captured clips aren't dark). After sv_cheats 1 in case it's gated.
+// midtones so captured clips aren't dark). sv_cheats 1 first — it's cheat-gated.
+sv_cheats 1
 r_fullscreen_gamma 2
 // Debug overlay (CS2_DEBUG_OVERLAY=1): bake the fps counter + net_graph into the
 // clip so cs2's real render fps/frametime is visible. Emits nothing when off.
