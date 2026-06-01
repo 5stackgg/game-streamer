@@ -49,8 +49,8 @@ start_status_reporter
 # render fps + frametime, readable straight off the mp4). 0 = off (production,
 # clean clips); 1 = on to diagnose a capture/perf issue.
 : "${CS2_DEBUG_OVERLAY:=0}"
-# Per-node hardware tuning: sets CS2_THREADS + GS_GPU_SCALE from the
-# detected GPU class / CPU cores (explicit env still wins).
+# Per-node hardware tuning: GPU scale-offload (GS_GPU_SCALE) + GPU clock lock from
+# the detected GPU class (explicit env still wins; cs2 threads left to the engine).
 cs2_autotune
 # VIDEO_KBPS scales with the pixel count of CS2_DISPLAY_RES (1440p is
 # 1.78x 1080p) so encoder quality stays roughly constant across modes.
@@ -259,8 +259,9 @@ do_applaunch() {
   # kept firing with them set.
   #   -disable_loadingplaque   recommended Source 2 perf hint
   #   +cl_disablehtmlmotd 1    skip HTML MOTD subsystem init
-  # -threads from CS2_THREADS (cs2_autotune sets it from core count);
-  # CS2_THREADS=0 omits the flag so cs2 auto-detects.
+  # cs2 threads are left to the engine (auto-detect, Valve's recommendation);
+  # we pass -threads ONLY if CS2_THREADS is explicitly set — escape hatch for a
+  # misbehaving node. Unset/0 omits the flag.
   local thread_args=()
   [ "${CS2_THREADS:-0}" != 0 ] && thread_args=(-threads "$CS2_THREADS")
   local cs2_args=(

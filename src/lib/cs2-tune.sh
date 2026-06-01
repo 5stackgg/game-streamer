@@ -65,10 +65,11 @@ lock_gpu_clocks() {
   fi
 }
 
-# Detect hardware and fill in CS2_THREADS + GS_GPU_SCALE for this node.
+# Detect hardware and fill in GS_GPU_SCALE for this node (+ pin GPU clocks).
+# cs2's thread count is left to the engine (auto-detect) — we never pass -threads.
 # Safe to call once per flow after FPS is resolved.
 cs2_autotune() {
-  local gpu tier cores threads_desc
+  local gpu tier cores
   gpu="$(detect_gpu_name)"
   cores="$(nproc 2>/dev/null || echo 4)"
 
@@ -90,27 +91,12 @@ cs2_autotune() {
     *)   : "${GS_GPU_SCALE:=auto}" ;;
   esac
 
-  # Full-machine default: keep CS2_THREADS at 0 so we DON'T pass -threads and
-  # cs2's engine auto-detects across the whole box. These nodes aren't
-  # cpu-limited (cpu pinning is available but intentionally unused) and cs2
-  # is the heavy, latency-sensitive workload, so it gets the machine.
-  # IMPORTANT: this is NOT the same as forcing `-threads <core count>` —
-  # a high explicit -threads is a known cs2 stutter source; engine
-  # auto-detect is Valve's own recommendation. Pin CS2_THREADS=N only to cap
-  # a specific node.
-  : "${CS2_THREADS:=0}"
-  # CS2_THREADS=max forces -threads = this node's core count (per-node correct
-  # across a mixed fleet). A/B-test only: forcing a high -threads is a KNOWN cs2
-  # stutter source (see above) and usually makes things WORSE than auto-detect.
-  if [ "$CS2_THREADS" = max ]; then
-    CS2_THREADS="$cores"
-    warn "CS2_THREADS=max -> forcing -threads $cores (NOTE: explicit -threads is a known cs2 stutter source; this is an A/B test, not recommended)"
-  fi
-
-  export CS2_THREADS GS_GPU_SCALE
-  threads_desc="$CS2_THREADS"
-  [ "$CS2_THREADS" = 0 ] && threads_desc="auto-detect (whole box)"
-  log "autotune: gpu='${gpu:-unknown}' tier=$tier cores=$cores -> threads=$threads_desc GS_GPU_SCALE=$GS_GPU_SCALE"
+  # cs2 worker threads: left to the engine — we never pass -threads. Auto-detect
+  # is Valve's recommendation; a high explicit -threads is a known stutter source,
+  # and these dedicated nodes give cs2 the whole box anyway. (Escape hatch: the
+  # flows still honor an explicit CS2_THREADS=N to force -threads N on a bad node.)
+  export GS_GPU_SCALE
+  log "autotune: gpu='${gpu:-unknown}' tier=$tier cores=$cores GS_GPU_SCALE=$GS_GPU_SCALE (threads=engine auto-detect)"
 
   # Advisory only — too visible / playback-constrained to change silently.
   if [ "$tier" = low ]; then

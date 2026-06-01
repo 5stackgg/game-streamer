@@ -60,8 +60,8 @@ fi
 # makes every grabbed frame fresh and evenly spaced. Override with
 # CS2_FPS_MAX (e.g. an exact 2x of FPS) to A/B against the old behavior.
 : "${CS2_FPS_MAX:=$FPS}"
-# Per-node hardware tuning: sets CS2_THREADS + GS_GPU_SCALE from the
-# detected GPU class / CPU cores (explicit env still wins).
+# Per-node hardware tuning: GPU scale-offload (GS_GPU_SCALE) + GPU clock lock from
+# the detected GPU class (explicit env still wins; cs2 threads left to the engine).
 cs2_autotune
 # VIDEO_KBPS scales with the pixel count of CS2_DISPLAY_RES (1440p is
 # 1.78x 1080p) so encoder quality stays roughly constant across modes.
@@ -188,8 +188,9 @@ do_applaunch() {
   # stacking entirely.
   # Boot-trim flags — see run-demo.sh for the empirical pass that
   # narrowed this down from a larger experimental set.
-  # -threads from CS2_THREADS (cs2_autotune sets it from core count);
-  # CS2_THREADS=0 omits the flag so cs2 auto-detects.
+  # cs2 threads are left to the engine (auto-detect, Valve's recommendation);
+  # we pass -threads ONLY if CS2_THREADS is explicitly set — escape hatch for a
+  # misbehaving node. Unset/0 omits the flag.
   local thread_args=()
   [ "${CS2_THREADS:-0}" != 0 ] && thread_args=(-threads "$CS2_THREADS")
   local cs2_args=(
