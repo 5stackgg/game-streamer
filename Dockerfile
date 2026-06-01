@@ -95,30 +95,24 @@ RUN apt-get install -y --no-install-recommends cuda-nvrtc-12-6 \
 # dlopens the UNVERSIONED libnvrtc.so, so without this symlink cudaconvert/
 # cudascale/cudaconvertscale never register (cudaupload + nvenc still do).
 
-# obs-vkcapture: Vulkan present-hook capture for clips (CLIP_CAPTURE_METHOD=vkcapture,
-# the default). The LAYER (VkLayer_obs_vkcapture, loaded into cs2 via OBS_VKCAPTURE=1)
-# hooks vkQueuePresentKHR and shares cs2's swapchain image over a unix socket — it
-# never goes through the X server like ximagesrc's XShmGetImage, so it CANNOT
-# serialize with cs2's frame-present and stall the render (the proven cause of the
-# 9fps gunfight freezes). We build the LAYER ONLY: -DBUILD_PLUGIN=OFF drops the
-# libobs/OBS dependency (the layer target links Vulkan only). Our own consumer
-# (src/vkcapture/vkcapture-consumer.c, compiled after the src COPY below) binds the
-# socket and feeds frames into the existing NVENC pipeline. NOT best-effort: a build
-# break FAILS the image so we catch it (ximagesrc stays as the runtime fallback).
-#   HOST REQUIREMENT: nvidia-drm.modeset=1 on the host kernel cmdline — a SUPPORTED
-#   NVIDIA setting (needed for DRM/dmabuf), NOT a binary driver patch. Verify on the
-#   host with: cat /sys/module/nvidia_drm/parameters/modeset   (want Y)
+# obs-vkcapture Vulkan present-hook layer (CLIP_CAPTURE_METHOD=vkcapture). Loaded
+# into cs2 via OBS_VKCAPTURE=1, it hooks vkQueuePresentKHR and shares the swapchain
+# over a unix socket — capture never touches the X server, so it can't stall cs2's
+# present. Build the LAYER ONLY (-DBUILD_PLUGIN=OFF drops the libobs dependency);
+# vkcapture-consumer (compiled below) is the socket consumer. Pinned to a release
+# tag for reproducible builds. Requires nvidia-drm.modeset=1 on the host.
 RUN set -eux; \
       apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates cmake build-essential pkg-config \
         libvulkan-dev libgl-dev libegl-dev libx11-dev libxcb1-dev \
-      && git clone --depth=1 https://github.com/nowrep/obs-vkcapture /tmp/obs-vkcapture \
+      && git clone --depth=1 --branch v1.5.6 \
+           https://github.com/nowrep/obs-vkcapture /tmp/obs-vkcapture \
       && cmake -S /tmp/obs-vkcapture -B /tmp/obs-vkcapture/build \
            -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_PLUGIN=OFF \
       && cmake --build /tmp/obs-vkcapture/build --parallel \
       && cmake --install /tmp/obs-vkcapture/build \
       && test -f /usr/share/vulkan/implicit_layer.d/obs_vkcapture_64.json \
-      && rm -rf /tmp/obs-vkcapture
+      && rm -rf /tmp/obs-vkcapture /var/lib/apt/lists/*
 
 # Node.js — runs src/spectator/server.mjs (cs2 spectator-control HTTP
 # daemon, refactored from the single-file src/spec-server.mjs). Ubuntu
@@ -216,19 +210,19 @@ RUN chmod +x /opt/game-streamer/src/*.sh \
              /opt/game-streamer/src/actions/*.sh \
              /opt/game-streamer/src/dev/*.sh 2>/dev/null || true
 
-# Compile the obs-vkcapture socket consumer (CLIP_CAPTURE_METHOD=vkcapture). It
-# binds the layer's socket and pushes cs2's frames into a GStreamer NVENC pipeline.
-# Build-only dev headers; the GStreamer/glib RUNTIME libs are already in the image
-# (used by the existing capture pipelines), so the binary resolves at runtime.
+# Compile the obs-vkcapture socket consumer (binds the layer's socket, pushes cs2's
+# frames into a GStreamer NVENC pipeline). Build-only headers — the gstreamer/glib
+# runtime libs are already in the image — so purge them after the build.
 RUN set -eux; \
-      apt-get update && apt-get install -y --no-install-recommends \
-        gcc pkg-config libglib2.0-dev \
-        libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+      build_deps="gcc pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev"; \
+      apt-get update && apt-get install -y --no-install-recommends $build_deps \
       && gcc -O2 -Wall -Wextra -o /usr/local/bin/vkcapture-consumer \
            /opt/game-streamer/src/vkcapture/vkcapture-consumer.c \
            $(pkg-config --cflags --libs glib-2.0 gio-2.0 \
                gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0) \
-      && test -x /usr/local/bin/vkcapture-consumer
+      && test -x /usr/local/bin/vkcapture-consumer \
+      && apt-get purge -y $build_deps && apt-get autoremove -y \
+      && rm -rf /var/lib/apt/lists/*
 
 # Remotion motion project — owns the branded Outro (pre-rendered into
 # resources/video/ at build time) and the per-job PlayerChip overlay

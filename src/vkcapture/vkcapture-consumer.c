@@ -39,6 +39,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <linux/dma-buf.h>
 #include <glib.h>
 #include <glib-unix.h>
 #include <gst/gst.h>
@@ -132,12 +134,34 @@ static void release_frame(void)
     st.have_frame = false;
 }
 
+// Reject bogus geometry off the wire before it feeds size math / memcpy, so a
+// garbage frame can't overflow an allocation or read out of bounds.
+#define VKCAP_MAX_DIM   16384
+#define VKCAP_MAX_BYTES (256u * 1024 * 1024)
+static bool geometry_ok(const struct capture_texture_data *td, int nfd)
+{
+    if (nfd < 1) return false;
+    if (td->width  <= 0 || td->width  > VKCAP_MAX_DIM) return false;
+    if (td->height <= 0 || td->height > VKCAP_MAX_DIM) return false;
+    if (td->strides[0] < td->width * 4 || td->offsets[0] < 0) return false;
+    int64_t bytes = (int64_t)td->strides[0] * td->height + td->offsets[0];
+    return bytes > 0 && bytes <= VKCAP_MAX_BYTES;
+}
+
+// Bracket a CPU read of the dma-buf with DMA_BUF_IOCTL_SYNC for cache coherency
+// (the dma-buf CPU-access contract). Best-effort — not all drivers implement it.
+static void dmabuf_sync(int fd, bool start)
+{
+    struct dma_buf_sync s = {
+        .flags = (start ? DMA_BUF_SYNC_START : DMA_BUF_SYNC_END) | DMA_BUF_SYNC_READ,
+    };
+    ioctl(fd, DMA_BUF_IOCTL_SYNC, &s);
+}
+
 // ---- control: tell the layer to start producing --------------------------
-// We request linear + map_host so the layer hands back a LINEAR, HOST-VISIBLE
-// dmabuf we can mmap and read with the CPU. That is NOT zero-copy on the encode
-// side, but it is trivial and robust on NVIDIA, and crucially it does not go
-// through the X server — so the render stall is gone either way. (A follow-up can
-// switch to true zero-copy dmabuf import via gst glupload once this is proven.)
+// Request linear + map_host so the layer hands back a host-visible dmabuf we can
+// mmap and read with the CPU. Not zero-copy on the encode side, but robust on
+// NVIDIA and off the X server (the stall is gone either way).
 static void send_control(int fd, bool capturing)
 {
     struct capture_control_data c = {0};
@@ -178,15 +202,15 @@ static void set_caps_if_needed(void)
 static gboolean on_tick(gpointer user)
 {
     (void)user;
-    // Don't push until the pipeline is PLAYING (we delay PLAYING until the first
-    // frame so the pulsesrc audio branch starts in lockstep with video — otherwise
-    // audio would lead by however long the layer took to connect).
+    // Push only once PLAYING (delayed to the first frame so pulsesrc audio starts
+    // in lockstep with video).
     if (!st.playing || !st.have_frame || !st.map_ptr || !st.appsrc) return G_SOURCE_CONTINUE;
 
     set_caps_if_needed();
 
-    // Copy out of the shared host-mapped image into a fresh buffer (the layer is
-    // concurrently overwriting it on CS2's next present). Single plane assumed.
+    // Copy the shared host-mapped image into a fresh buffer. The layer overwrites it
+    // on cs2's next present, so this can tear under heavy motion (zero-copy dmabuf
+    // import is the real fix). Single plane assumed.
     const size_t row = (size_t)st.strides[0];
     const size_t sz  = row * (size_t)st.height;
     GstBuffer *buf = gst_buffer_new_allocate(NULL, sz, NULL);
@@ -194,20 +218,17 @@ static gboolean on_tick(gpointer user)
     if (!gst_buffer_map(buf, &mi, GST_MAP_WRITE)) { gst_buffer_unref(buf); return G_SOURCE_CONTINUE; }
 
     const uint8_t *src = (const uint8_t *)st.map_ptr + st.offsets[0];
+    dmabuf_sync(st.fds[0], true);
     if (st.flip) {
-        // bottom-up -> top-down
-        for (int y = 0; y < st.height; y++)
+        for (int y = 0; y < st.height; y++)   // bottom-up -> top-down
             memcpy(mi.data + (size_t)y * row, src + (size_t)(st.height - 1 - y) * row, row);
     } else {
         memcpy(mi.data, src, sz);
     }
+    dmabuf_sync(st.fds[0], false);
     gst_buffer_unmap(buf, &mi);
 
-    // PTS is stamped by appsrc (do-timestamp=TRUE) on the pipeline running clock,
-    // which keeps video aligned with the live pulsesrc audio. A downstream
-    // `videorate` (added in the pipeline string) regularizes to exact CFR $fps.
-    st.frame_no++;
-
+    // PTS is stamped by appsrc (do-timestamp=TRUE); downstream videorate locks CFR.
     GstFlowReturn fr = gst_app_src_push_buffer(st.appsrc, buf); // takes ownership
     if (fr != GST_FLOW_OK) {
         log_msg("appsrc push returned %d — stopping", fr);
@@ -300,6 +321,12 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
                 memcpy(got_fds, CMSG_DATA(c), nfd * sizeof(int));
                 break;
             }
+        }
+        if (!geometry_ok(td, nfd)) {
+            log_msg("ignoring texture: bad geometry %dx%d stride0=%d nfd=%d",
+                    td->width, td->height, td->strides[0], nfd);
+            for (int i = 0; i < nfd; i++) if (got_fds[i] >= 0) close(got_fds[i]);
+            break;
         }
         // new shared texture -> drop the old mapping/fds
         release_frame();
@@ -468,7 +495,9 @@ int main(int argc, char **argv)
     g_unix_signal_add(SIGINT,  on_sigint, NULL);
     g_unix_signal_add(SIGTERM, on_sigint, NULL);
     if (!st.test_mode) {
-        st.tick_src = g_timeout_add(1000 / st.fps, on_tick, NULL);
+        guint interval_ms = (guint)(1000 / st.fps);
+        if (interval_ms < 1) interval_ms = 1;   // clamp: absurd VKCAP_FPS -> 0 -> busy loop
+        st.tick_src = g_timeout_add(interval_ms, on_tick, NULL);
     } else {
         // TEST mode always terminates: the layer may send texture metadata only
         // ONCE (then you sample asynchronously), so don't rely on the frame count.

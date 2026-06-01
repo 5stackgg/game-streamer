@@ -24,6 +24,29 @@ start_clip_capture() {
   _start_clip_capture_gst "$@"
 }
 
+# Resolve the NVENC encoder fragment + parser for a clip, honoring CLIP_VIDEO_CODEC
+# (h265 default; falls back to h264 if no NVENC HEVC). Sets CLIP_ENC / CLIP_PARSE_CAPS
+# / CLIP_CODEC. The hvc1 caps on h265 are required for mp4 / Safari / iOS playback.
+_clip_resolve_encoder() {
+  local gop="$1" kbps="$2"
+  CLIP_CODEC="${CLIP_VIDEO_CODEC:-h265}"
+  CLIP_ENC="" CLIP_PARSE_CAPS=""
+  case "$CLIP_CODEC" in
+    h265|hevc)
+      if CLIP_ENC=$(pick_h265_pipeline "$gop" "$kbps" clip); then
+        CLIP_PARSE_CAPS="h265parse config-interval=1 ! video/x-h265,stream-format=hvc1,alignment=au"
+        return 0
+      fi
+      warn "CLIP_VIDEO_CODEC=$CLIP_CODEC but no NVENC HEVC encoder available — falling back to h264"
+      ;;
+    h264) : ;;
+    *) warn "CLIP_VIDEO_CODEC=$CLIP_CODEC unrecognized — using h264" ;;
+  esac
+  CLIP_CODEC=h264
+  CLIP_ENC=$(pick_h264_pipeline "$gop" "$kbps" clip)
+  CLIP_PARSE_CAPS="h264parse config-interval=1"
+}
+
 # vkcapture: feed cs2's Vulkan swapchain (obs-vkcapture layer -> our
 # vkcapture-consumer) into the SAME NVENC encode tail as the ximagesrc path. The
 # consumer runs a GStreamer pipeline whose source is `appsrc name=vksrc` and pushes
@@ -47,28 +70,8 @@ _start_clip_capture_vkcapture() {
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
 
-  # Codec/encoder selection — identical to _start_clip_capture_gst.
-  local codec="${CLIP_VIDEO_CODEC:-h265}"
-  local enc="" parse_caps=""
-  case "$codec" in
-    h265|hevc)
-      if enc=$(pick_h265_pipeline "$gop" "$kbps" clip); then
-        parse_caps="h265parse config-interval=1 ! video/x-h265,stream-format=hvc1,alignment=au"
-      else
-        warn "CLIP_VIDEO_CODEC=$codec but no NVENC HEVC encoder available — falling back to h264"
-        codec="h264"
-      fi
-      ;;
-    h264) : ;;
-    *)
-      warn "CLIP_VIDEO_CODEC=$codec unrecognized — using h264"
-      codec="h264"
-      ;;
-  esac
-  if [ "$codec" = "h264" ]; then
-    enc=$(pick_h264_pipeline "$gop" "$kbps" clip)
-    parse_caps="h264parse config-interval=1"
-  fi
+  _clip_resolve_encoder "$gop" "$kbps"
+  local codec="$CLIP_CODEC" enc="$CLIP_ENC" parse_caps="$CLIP_PARSE_CAPS"
 
   local convert
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
@@ -126,29 +129,8 @@ _start_clip_capture_gst() {
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
 
-  # CLIP_VIDEO_CODEC=h265|h264 (default h265, falls back to h264 if no NVENC HEVC).
-  # hvc1 tag is required for mp4 / Safari / iOS playback.
-  local codec="${CLIP_VIDEO_CODEC:-h265}"
-  local enc="" parse_caps=""
-  case "$codec" in
-    h265|hevc)
-      if enc=$(pick_h265_pipeline "$gop" "$kbps" clip); then
-        parse_caps="h265parse config-interval=1 ! video/x-h265,stream-format=hvc1,alignment=au"
-      else
-        warn "CLIP_VIDEO_CODEC=$codec but no NVENC HEVC encoder available — falling back to h264"
-        codec="h264"
-      fi
-      ;;
-    h264) : ;;
-    *)
-      warn "CLIP_VIDEO_CODEC=$codec unrecognized — using h264"
-      codec="h264"
-      ;;
-  esac
-  if [ "$codec" = "h264" ]; then
-    enc=$(pick_h264_pipeline "$gop" "$kbps" clip)
-    parse_caps="h264parse config-interval=1"
-  fi
+  _clip_resolve_encoder "$gop" "$kbps"
+  local codec="$CLIP_CODEC" enc="$CLIP_ENC" parse_caps="$CLIP_PARSE_CAPS"
 
   log "  clip capture: $out_file (${out_w}x${out_h}@${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
 
