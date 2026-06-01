@@ -3,19 +3,20 @@
 // Captures cs2's frames inside its Vulkan present instead of reading them back
 // through the X server (which serialized with cs2's render and stalled it). The
 // obs-vkcapture LAYER (loaded into cs2 via OBS_VKCAPTURE=1) hooks
-// vkQueuePresentKHR, copies the swapchain image into a shared dmabuf, and offers
-// it over a unix socket. This program binds that socket and feeds the frames into
-// our GStreamer NVENC pipeline — nothing touches the X server.
+// vkQueuePresentKHR, copies the swapchain image into a shared host-visible dmabuf,
+// and offers it over a unix socket. This program binds that socket, mmaps the
+// shared image, and feeds frames into our GStreamer NVENC pipeline — nothing
+// touches the X server, so it can't stall cs2's render.
 //
 // PROTOCOL (vendored in capture.h, from nowrep/obs-vkcapture, GPLv2):
 //   - We are the SERVER: bind abstract socket "\0/com/obsproject/vkcapture",
 //     listen()/accept4(). The layer is the client and retries connect() every 1s,
 //     so starting this consumer per-segment (after cs2 is up) is fine.
 //   - On connect the layer sends capture_client_data{exe}; we reply with
-//     capture_control_data{capturing=1, ...} to make it start producing.
-//   - It then sends capture_texture_data{w,h,fourcc,strides,offsets,modifier,flip}
-//     + the dmabuf fd(s) via SCM_RIGHTS, ONCE per swapchain (not per frame). We
-//     sample the shared image asynchronously on a fps timer.
+//     capture_control_data{capturing=1, linear, map_host} to make it start.
+//   - It then sends capture_texture_data{w,h,fourcc,strides,offsets,flip} + the
+//     dmabuf fd via SCM_RIGHTS, ONCE per swapchain (not per frame). We mmap it and
+//     sample asynchronously on a fps timer.
 //
 // USAGE:
 //   vkcapture-consumer '<gstreamer pipeline with appsrc name=vksrc>'
@@ -39,13 +40,10 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <linux/dma-buf.h>
 #include <glib.h>
 #include <glib-unix.h>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
-#include <gst/video/video.h>
 
 #include "capture.h"
 
@@ -75,7 +73,7 @@ struct state {
     int        fds[4];           // dmabuf fds we own (close on replace/exit)
     bool       flip;
 
-    // host-mapped path (map_host=1): mmap of fds[0]
+    // mmap of fds[0] (the host-visible shared image)
     void      *map_ptr;
     size_t     map_len;
 
@@ -148,29 +146,17 @@ static bool geometry_ok(const struct capture_texture_data *td, int nfd)
     return bytes > 0 && bytes <= VKCAP_MAX_BYTES;
 }
 
-// Bracket a CPU read of the dma-buf with DMA_BUF_IOCTL_SYNC for cache coherency
-// (the dma-buf CPU-access contract). Best-effort — not all drivers implement it.
-static void dmabuf_sync(int fd, bool start)
-{
-    struct dma_buf_sync s = {
-        .flags = (start ? DMA_BUF_SYNC_START : DMA_BUF_SYNC_END) | DMA_BUF_SYNC_READ,
-    };
-    ioctl(fd, DMA_BUF_IOCTL_SYNC, &s);
-}
-
 // ---- control: tell the layer to start producing --------------------------
-// Request linear + map_host so the layer hands back a host-visible dmabuf we can
-// mmap and read with the CPU. Not zero-copy on the encode side, but robust on
-// NVIDIA and off the X server (the stall is gone either way).
+// Request a LINEAR, host-visible, no-modifier dmabuf so we can mmap + memcpy it
+// with the CPU. (device_uuid left zero — single GPU; the layer allocates on its
+// own device.)
 static void send_control(int fd, bool capturing)
 {
     struct capture_control_data c = {0};
-    c.capturing   = capturing ? 1 : 0;
-    c.no_modifiers = 1;   // we don't negotiate DRM modifiers in the host-map path
+    c.capturing    = capturing ? 1 : 0;
+    c.no_modifiers = 1;
     c.linear       = 1;
-    c.map_host      = 1;
-    // device_uuid left zero: with map_host the layer copies into host memory, so
-    // we don't need to match a GL/EGL device. (Zero-copy path WOULD need it.)
+    c.map_host     = 1;
     ssize_t n = write(fd, &c, sizeof(c));
     if (n != (ssize_t)sizeof(c))
         log_msg("WARN: send_control short write (%zd/%zu): %s", n, sizeof(c), strerror(errno));
@@ -187,9 +173,9 @@ static void set_caps_if_needed(void)
         gfmt = "BGRx"; // best guess so we at least produce something
     }
     GstCaps *caps = gst_caps_new_simple("video/x-raw",
-        "format", G_TYPE_STRING, gfmt,
-        "width",  G_TYPE_INT, st.width,
-        "height", G_TYPE_INT, st.height,
+        "format",    G_TYPE_STRING, gfmt,
+        "width",     G_TYPE_INT, st.width,
+        "height",    G_TYPE_INT, st.height,
         "framerate", GST_TYPE_FRACTION, st.fps, 1,
         NULL);
     gst_app_src_set_caps(st.appsrc, caps);
@@ -208,9 +194,8 @@ static gboolean on_tick(gpointer user)
 
     set_caps_if_needed();
 
-    // Copy the shared host-mapped image into a fresh buffer. The layer overwrites it
-    // on cs2's next present, so this can tear under heavy motion (zero-copy dmabuf
-    // import is the real fix). Single plane assumed.
+    // Copy the shared host-mapped image into a fresh buffer (the layer overwrites
+    // it on cs2's next present). Single plane assumed.
     const size_t row = (size_t)st.strides[0];
     const size_t sz  = row * (size_t)st.height;
     GstBuffer *buf = gst_buffer_new_allocate(NULL, sz, NULL);
@@ -218,14 +203,12 @@ static gboolean on_tick(gpointer user)
     if (!gst_buffer_map(buf, &mi, GST_MAP_WRITE)) { gst_buffer_unref(buf); return G_SOURCE_CONTINUE; }
 
     const uint8_t *src = (const uint8_t *)st.map_ptr + st.offsets[0];
-    dmabuf_sync(st.fds[0], true);
     if (st.flip) {
         for (int y = 0; y < st.height; y++)   // bottom-up -> top-down
             memcpy(mi.data + (size_t)y * row, src + (size_t)(st.height - 1 - y) * row, row);
     } else {
         memcpy(mi.data, src, sz);
     }
-    dmabuf_sync(st.fds[0], false);
     gst_buffer_unmap(buf, &mi);
 
     // PTS is stamped by appsrc (do-timestamp=TRUE); downstream videorate locks CFR.
@@ -248,16 +231,14 @@ static void test_handle_frame(void)
             (unsigned long long)st.modifier, st.nfd, st.strides[0], st.offsets[0], st.flip);
     st.frame_no++;
 
-    // Try to mmap fds[0] to confirm the host-map path actually works on NVIDIA.
     if (!st.map_ptr && st.nfd > 0 && st.fds[0] >= 0) {
         st.map_len = (size_t)st.strides[0] * (size_t)st.height + (size_t)st.offsets[0];
         st.map_ptr = mmap(NULL, st.map_len, PROT_READ, MAP_SHARED, st.fds[0], 0);
         if (st.map_ptr == MAP_FAILED) {
             st.map_ptr = NULL;
-            log_msg("  mmap(fd0) FAILED: %s  -> host-map path unavailable, will need "
-                    "zero-copy dmabuf import instead", strerror(errno));
+            log_msg("  mmap(fd0) FAILED: %s", strerror(errno));
         } else {
-            log_msg("  mmap(fd0) OK (%zu bytes) -> host-map path works", st.map_len);
+            log_msg("  mmap(fd0) OK (%zu bytes)", st.map_len);
             FILE *f = fopen(st.test_dump_path, "wb");
             if (f) {
                 fwrite((uint8_t *)st.map_ptr + st.offsets[0], 1,
@@ -342,23 +323,21 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
             test_handle_frame();
             break;
         }
-        // encode mode: set up the host mmap so on_tick can sample it
-        if (st.nfd > 0 && st.fds[0] >= 0) {
-            st.map_len = (size_t)st.strides[0] * (size_t)st.height + (size_t)st.offsets[0];
-            st.map_ptr = mmap(NULL, st.map_len, PROT_READ, MAP_SHARED, st.fds[0], 0);
-            if (st.map_ptr == MAP_FAILED) {
-                st.map_ptr = NULL;
-                log_msg("ERROR: mmap(fd0) failed: %s — host-map unsupported, need zero-copy path",
-                        strerror(errno));
-            } else {
-                st.have_frame = true;
-                log_msg("shared texture ready: %dx%d, sampling at %dfps", st.width, st.height, st.fps);
-                // Go PLAYING now so audio (pulsesrc) starts in lockstep with video.
-                if (!st.playing) {
-                    gst_element_set_state(st.pipeline, GST_STATE_PLAYING);
-                    st.playing = true;
-                }
-            }
+        // encode mode: mmap the shared image so on_tick can sample it.
+        if (st.nfd < 1 || st.fds[0] < 0) break;
+        st.map_len = (size_t)st.strides[0] * (size_t)st.height + (size_t)st.offsets[0];
+        st.map_ptr = mmap(NULL, st.map_len, PROT_READ, MAP_SHARED, st.fds[0], 0);
+        if (st.map_ptr == MAP_FAILED) {
+            st.map_ptr = NULL;
+            log_msg("ERROR: mmap(fd0) failed: %s", strerror(errno));
+            break;
+        }
+        st.have_frame = true;
+        log_msg("shared texture ready: %dx%d, sampling at %dfps", st.width, st.height, st.fps);
+        // Go PLAYING now so audio (pulsesrc) starts in lockstep with video.
+        if (!st.playing) {
+            gst_element_set_state(st.pipeline, GST_STATE_PLAYING);
+            st.playing = true;
         }
         break;
     }
@@ -469,7 +448,9 @@ int main(int argc, char **argv)
         }
         gst_init(&argc, &argv);
         GError *err = NULL;
-        st.pipeline = gst_parse_launch(argv[1], &err);
+        // FATAL_ERRORS: a missing element must fail here so the shell falls back to
+        // ximagesrc, not return a half-linked pipeline that limps to "not-linked".
+        st.pipeline = gst_parse_launch_full(argv[1], NULL, GST_PARSE_FLAG_FATAL_ERRORS, &err);
         if (!st.pipeline) { log_msg("bad pipeline: %s", err ? err->message : "?"); return 2; }
         GstElement *src = gst_bin_get_by_name(GST_BIN(st.pipeline), "vksrc");
         if (!src) { log_msg("pipeline has no element named 'vksrc'"); return 2; }
@@ -505,7 +486,7 @@ int main(int argc, char **argv)
         g_timeout_add_seconds(secs, (GSourceFunc)g_main_loop_quit, st.loop);
     }
 
-    log_msg("listening on abstract socket %s (test=%d fps=%d) — waiting for CS2's vkcapture layer",
+    log_msg("listening on %s (test=%d fps=%d) — waiting for cs2's vkcapture layer",
             SOCK_NAME, st.test_mode, st.fps);
     g_main_loop_run(st.loop);
 

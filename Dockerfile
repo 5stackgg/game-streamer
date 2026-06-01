@@ -218,8 +218,7 @@ RUN set -eux; \
       apt-get update && apt-get install -y --no-install-recommends $build_deps \
       && gcc -O2 -Wall -Wextra -o /usr/local/bin/vkcapture-consumer \
            /opt/game-streamer/src/vkcapture/vkcapture-consumer.c \
-           $(pkg-config --cflags --libs glib-2.0 gio-2.0 \
-               gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0) \
+           $(pkg-config --cflags --libs glib-2.0 gio-2.0 gstreamer-1.0 gstreamer-app-1.0) \
       && test -x /usr/local/bin/vkcapture-consumer \
       && apt-get purge -y $build_deps && apt-get autoremove -y \
       && rm -rf /var/lib/apt/lists/*

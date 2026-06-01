@@ -169,8 +169,6 @@ $DEMO_BINDS_BLOCK
 // TrueView prediction for the spectated view (see CS2_DEMO_PREDICT above).
 cl_demo_predict ${CS2_DEMO_PREDICT}
 // Brighten demo output (cs2 default fullscreen gamma is ~2.2; 2 lifts the
-// midtones so captured clips aren't dark). sv_cheats 1 first — it's cheat-gated.
-sv_cheats 1
 r_fullscreen_gamma 2
 // Debug overlay (CS2_DEBUG_OVERLAY=1): bake the fps counter + net_graph into the
 // clip so cs2's real render fps/frametime is visible. Emits nothing when off.
@@ -270,9 +268,6 @@ do_applaunch() {
     -width "$CS2_WIDTH" -height "$CS2_HEIGHT"
     -novid -nojoy -high -console
     "${thread_args[@]}"
-    # Cheaper particle rendering (drops soft-feathering, keeps particles) — buys
-    # fps margin in the smoke/effects-heavy gunfight where first-view dips <60.
-    -softparticlesdefaultoff
     -insecure -condebug
     -disable_loadingplaque
     +cl_disablehtmlmotd 1
