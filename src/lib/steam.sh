@@ -775,6 +775,136 @@ disable_cs2_overlay() {
   return 0
 }
 
+# Set cs2's per-app LaunchOptions in localconfig.vdf. Idempotent. Mirrors
+# _vdf_disable_app_overlay's 3-case structure (existing key / existing app
+# block / no apps block) but writes a string value passed as argv[3].
+_vdf_set_app_launchoptions() {
+  local cfg="$1" value="$3"
+  [ -f "$cfg" ] || return 0
+  python3 - "$cfg" 730 "$value" <<'PY'
+import re, sys, pathlib
+
+cfg_path, appid, value = sys.argv[1], sys.argv[2], sys.argv[3]
+p = pathlib.Path(cfg_path)
+src = p.read_text()
+# VDF string escaping (our value has none, but be safe).
+val = value.replace('\\', '\\\\').replace('"', '\\"')
+
+pat = re.compile(r'(^|\n)([ \t]*)"' + re.escape(appid) + r'"[ \t\r\n]*\{', re.MULTILINE)
+m = pat.search(src)
+if m:
+    brace_open = m.end() - 1
+    depth, i = 1, brace_open + 1
+    while i < len(src) and depth > 0:
+        if src[i] == '{': depth += 1
+        elif src[i] == '}': depth -= 1
+        i += 1
+    if depth != 0:
+        print(f"  {cfg_path}: unbalanced braces — refusing to edit")
+        sys.exit(1)
+    brace_close = i - 1
+    block = src[brace_open + 1:brace_close]
+    indent = m.group(2) + "\t"
+    lo = re.search(r'(^|\n)([ \t]*)"([Ll]aunch[Oo]ptions)"[ \t]+"([^"]*)"', block)
+    if lo:
+        if lo.group(4) == value:
+            sys.exit(0)
+        new_block = block[:lo.start()] \
+            + f'{lo.group(1)}{lo.group(2)}"{lo.group(3)}"\t\t"{val}"' \
+            + block[lo.end():]
+        p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
+        print(f"  {cfg_path}: set LaunchOptions in existing {appid} block")
+    else:
+        new_block = f'\n{indent}"LaunchOptions"\t\t"{val}"' + block
+        p.write_text(src[:brace_open + 1] + new_block + src[brace_close:])
+        print(f"  {cfg_path}: inserted LaunchOptions in existing {appid} block")
+    sys.exit(0)
+
+apps = re.search(r'(\n[ \t]*)"apps"[ \t\r\n]*\{', src)
+if apps:
+    indent = apps.group(1).rstrip("\n")
+    insertion = (
+        f'{indent}\t"{appid}"\n{indent}\t{{\n'
+        f'{indent}\t\t"LaunchOptions"\t\t"{val}"\n{indent}\t}}\n'
+    )
+    p.write_text(src[:apps.end()] + insertion + src[apps.end():])
+    print(f"  {cfg_path}: inserted new {appid} block with LaunchOptions")
+    sys.exit(0)
+
+def find_block_open(src, key, start=0):
+    mm = re.compile(r'"' + re.escape(key) + r'"[ \t\r\n]*\{').search(src, start)
+    return mm.end() if mm else -1
+
+sw = find_block_open(src, "Software")
+if sw == -1:
+    print(f"  {cfg_path}: no Software block — leaving untouched"); sys.exit(0)
+valve = find_block_open(src, "Valve", sw)
+if valve == -1:
+    print(f"  {cfg_path}: no Valve block — leaving untouched"); sys.exit(0)
+steam = find_block_open(src, "Steam", valve)
+if steam == -1:
+    print(f"  {cfg_path}: no Steam block — leaving untouched"); sys.exit(0)
+
+sm = re.search(r'(\n)([ \t]*)"Steam"[ \t\r\n]*\{', src[:steam])
+steam_indent = sm.group(2) if sm else "\t\t\t"
+inner = steam_indent + "\t"
+insertion = (
+    f'\n{inner}"apps"\n{inner}{{\n'
+    f'{inner}\t"{appid}"\n{inner}\t{{\n'
+    f'{inner}\t\t"LaunchOptions"\t\t"{val}"\n{inner}\t}}\n'
+    f'{inner}}}'
+)
+p.write_text(src[:steam] + insertion + src[steam:])
+print(f"  {cfg_path}: synthesized apps/{appid}/LaunchOptions under Steam block")
+PY
+}
+
+# Force `__GL_SHADER_DISK_CACHE=1` onto the cs2 process via its Steam launch
+# options. WHY: cs2 uses Vulkan; the NVIDIA driver DISABLES the writable shader
+# disk cache when running as root unless that env var is set, so runtime-
+# compiled pipelines (e.g. the molotov fire shader) recompile every render —
+# a fixed-spot stutter. Steam manages the __GL_SHADER_DISK_CACHE_* env itself
+# and strips our exported enable flag, so exporting it before -applaunch
+# doesn't stick; launch options (`VAR=1 %command%`) ARE applied to the final
+# game process and survive. Steam clobbers localconfig.vdf on shutdown, so —
+# like disable_cs2_overlay — this must run while Steam is OFF.
+set_cs2_launch_options() {
+  if pgrep -f '/ubuntu12_32/steam' >/dev/null 2>&1; then
+    log "set_cs2_launch_options: Steam is running — skip (would be clobbered on shutdown)"
+    return 0
+  fi
+  # Env prepended to %command%: the shader-cache flag always, plus OBS_VKCAPTURE=1
+  # when clips capture via the Vulkan present-hook (CLIP_CAPTURE_METHOD=vkcapture,
+  # the default). Steam strips exported env before -applaunch, so the obs-vkcapture
+  # implicit Vulkan layer can ONLY be enabled here in the launch options.
+  local cap_env=""
+  case "${CLIP_CAPTURE_METHOD:-vkcapture}" in
+    vkcapture) cap_env="OBS_VKCAPTURE=1 " ;;
+  esac
+  local launch_opts="${CS2_LAUNCH_OPTIONS:-__GL_SHADER_DISK_CACHE=1 ${cap_env}%command%}"
+  local roots=("$STEAM_HOME/userdata" "$HOME/.steam/steam/userdata")
+  local seen=() root user_dir steamid edited=0
+  for root in "${roots[@]}"; do
+    [ -d "$root" ] || continue
+    local real
+    real=$(readlink -f "$root" 2>/dev/null || echo "$root")
+    case " ${seen[*]} " in *" $real "*) continue ;; esac
+    seen+=("$real")
+
+    shopt -s nullglob
+    for user_dir in "$root"/*/; do
+      steamid=$(basename "$user_dir")
+      case "$steamid" in ''|*[!0-9]*) continue ;; esac
+      log "set_cs2_launch_options: SteamID $steamid -> '$launch_opts'"
+      _vdf_set_app_launchoptions "$user_dir/config/localconfig.vdf" 730 "$launch_opts"
+      edited=1
+    done
+    shopt -u nullglob
+  done
+  [ "$edited" = 0 ] && log "set_cs2_launch_options: no userdata SteamIDs found yet — skip"
+  return 0
+}
+
 # The per-app `OverlayAppEnabled=0` only suppresses the overlay panel
 # inside cs2 — Steam still spawns GameOverlayUI and pops the "Press
 # Shift+Tab to begin" first-run toast over the captured stream. The

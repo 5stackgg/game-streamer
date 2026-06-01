@@ -36,7 +36,6 @@ start_capture() {
   local out_h="${live_out#*x}"
   [ -z "$out_w" ] && out_w=1920
   [ -z "$out_h" ] && out_h=1080
-  local scale_caps="video/x-raw,width=${out_w},height=${out_h},framerate=${fps}/1"
 
   if stream_running "$stream_id"; then
     return 0
@@ -69,12 +68,24 @@ start_capture() {
   fi
   log "  codec: $codec"
 
+  # Scale + colorspace convert. Runs on the GPU (cudaconvertscale) when the
+  # encoder is CUDA-based, off-loading it from the CPU that cs2 needs.
+  local convert
+  convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
+
   # Persist args so restart_capture can re-invoke us identically.
   local args_dir="${LOG_DIR:-/tmp/game-streamer}"
   mkdir -p "$args_dir"
   printf '%s\n%s\n%s\n%s\n%s\n' \
     "$stream_id" "$fps" "$kbps" "$pointer" "$audio" \
     > "${args_dir}/capture-${stream_id}.args"
+
+  # A leaky decoupling queue sits right after ximagesrc in both pipelines
+  # below. Without it the X-framebuffer grab runs synchronously with the
+  # CPU videoscale/videoconvert + NVENC: any downstream hitch back-pressures
+  # the grabber, so its cadence drifts and motion stutters. leaky=downstream
+  # drops the oldest buffer instead of stalling the grab, keeping capture
+  # timing steady (NVENC keeps up easily, so it rarely actually drops).
 
   if [ "$audio" = 1 ]; then
     # Pin to our named null sink's .monitor — pactl's default can drift
@@ -93,8 +104,8 @@ start_capture() {
     spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
         ! video/x-raw,framerate="$fps"/1 \
-        ! videoscale ! "$scale_caps" \
-        ! videoconvert ! video/x-raw,format=NV12 \
+        ! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
+        ! $convert \
         ! $enc \
         ! $parse \
         ! queue ! mux. \
@@ -111,8 +122,8 @@ start_capture() {
     spawn_logged "$gst_tag" gst-launch-1.0 -e \
       ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
         ! video/x-raw,framerate="$fps"/1 \
-        ! videoscale ! "$scale_caps" \
-        ! videoconvert ! video/x-raw,format=NV12 \
+        ! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
+        ! $convert \
         ! $enc \
         ! $parse \
         ! mpegtsmux alignment=7 \

@@ -5,7 +5,8 @@
 #
 # Note: video.cfg generation lives in cs2-options.sh (write_cs2_video_cfg),
 # driven by per-node CS2_VIDEO_SETTINGS. fps_max comes from the
-# +fps_max launch arg hardcoded in run-live.sh / run-demo.sh.
+# +fps_max launch arg in run-live.sh / run-demo.sh, which defaults to
+# CS2_FPS_MAX (= capture FPS) to keep render and capture rates aligned.
 
 # Lines to append to the generated autoexec.cfg. Caller stitches this
 # into the heredoc next to HIDE_UI_CMDS / SPEC_BINDS_BLOCK.

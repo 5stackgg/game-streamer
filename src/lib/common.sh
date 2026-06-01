@@ -119,7 +119,9 @@ pick_h264_pipeline() {
         clip) preset="p5"; tune="high-quality" ;;
         *)    preset="p4"; tune="low-latency"  ;;
       esac
-      printf 'cudaupload ! nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
+      # No leading `cudaupload` — pick_scale_convert owns the system->CUDA
+      # upload (and does the scale/convert on the GPU when possible).
+      printf 'nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
         "$preset" "$tune" "$gop" "$kbps"
       ;;
     nvh264enc:*)
@@ -225,7 +227,9 @@ pick_h265_pipeline() {
         clip) preset="p5"; tune="high-quality" ;;
         *)    preset="p4"; tune="low-latency"  ;;
       esac
-      printf 'cudaupload ! nvcudah265enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
+      # No leading `cudaupload` — pick_scale_convert owns the system->CUDA
+      # upload (and does the scale/convert on the GPU when possible).
+      printf 'nvcudah265enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
         "$preset" "$tune" "$gop" "$h265_kbps"
       ;;
     nvh265enc:*)
@@ -314,6 +318,66 @@ _probe_nvh265enc_preset() {
     fi
   done
   return 1
+}
+
+# True when the resolved NVENC element for $codec is the modern CUDA
+# encoder (nvcuda*), which consumes CUDA memory and so must be fed an
+# upload. Reads the cache that pick_h26{4,5}_pipeline already populated, so
+# call this only AFTER the encoder fragment has been resolved.
+_active_encoder_is_cuda() {
+  case "${1:-h264}" in
+    h265|hevc) [ "${GS_NVENC_PICK_H265:-}" = "nvcudah265enc" ] ;;
+    *)         [ "${GS_NVENC_PICK:-}" = "nvcudah264enc" ] ;;
+  esac
+}
+
+# True when GPU scale+convert is usable: not disabled via GS_GPU_SCALE, and
+# both cudaupload + cudaconvertscale exist on this pod. Cached per-process.
+_cuda_scale_available() {
+  case "${GS_GPU_SCALE:-auto}" in
+    0|off|false|no) return 1 ;;
+  esac
+  if [ -z "${GS_CUDASCALE_OK:-}" ]; then
+    if gst-inspect-1.0 cudaupload >/dev/null 2>&1 \
+       && gst-inspect-1.0 cudaconvertscale >/dev/null 2>&1; then
+      GS_CUDASCALE_OK=1
+    else
+      GS_CUDASCALE_OK=0
+    fi
+    export GS_CUDASCALE_OK
+  fi
+  [ "$GS_CUDASCALE_OK" = 1 ]
+}
+
+# Emit the scale + colorspace-convert fragment that feeds the encoder.
+# When the active encoder is a CUDA NVENC element and cudaconvertscale is
+# present, the scale (e.g. 1440p->1080p) and RGBx->NV12 convert run on the
+# GPU (cudaupload ! cudaconvertscale), removing the CPU videoscale +
+# videoconvert that otherwise competes with cs2 for cores. The CUDA encoder
+# fragments deliberately drop their own cudaupload — this fragment owns it.
+# Falls back to the all-CPU path for legacy nvenc / x264, and to a
+# CPU-convert-then-upload path if a CUDA encoder is paired with a pod that
+# lacks cudaconvertscale (so the encoder still receives CUDA memory).
+# Usage: pick_scale_convert <out_w> <out_h> <fps> <codec>
+pick_scale_convert() {
+  local w="${1:?width required}" h="${2:?height required}"
+  local fps="${3:?fps required}" codec="${4:-h264}"
+  local cpu="videoscale ! video/x-raw,width=${w},height=${h},framerate=${fps}/1 ! videoconvert ! video/x-raw,format=NV12"
+  if _active_encoder_is_cuda "$codec"; then
+    if _cuda_scale_available; then
+      log "  scaler: cudaconvertscale (GPU scale+convert)" >&2
+      printf 'cudaupload ! cudaconvertscale ! video/x-raw(memory:CUDAMemory),format=NV12,width=%s,height=%s,framerate=%s/1' \
+        "$w" "$h" "$fps"
+      return 0
+    fi
+    # CUDA encoder but no GPU scaler: convert on CPU, then upload so the
+    # encoder still gets the CUDA memory it requires.
+    log "  scaler: CPU videoscale+videoconvert then cudaupload (cudaconvertscale unavailable)" >&2
+    printf '%s ! cudaupload' "$cpu"
+    return 0
+  fi
+  log "  scaler: CPU videoscale+videoconvert" >&2
+  printf '%s' "$cpu"
 }
 
 # Trap-friendly verbose toggle. `GS_TRACE=1 ./game-streamer.sh ...` runs

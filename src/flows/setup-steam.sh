@@ -102,6 +102,12 @@ disable_overlay_globally
 disable_cs2_overlay
 print_overlay_state
 
+# Force __GL_SHADER_DISK_CACHE=1 onto cs2 via launch options so the NVIDIA
+# Vulkan shader disk cache works as root (else runtime pipelines recompile
+# every render — see set_cs2_launch_options). Same Steam-off timing as cloud/
+# overlay.
+set_cs2_launch_options
+
 report_status status=launching_steam
 start_steam
 
@@ -178,6 +184,7 @@ if [ "$HAD_USERDATA" = 0 ]; then
   disable_overlay_globally
   disable_cs2_overlay
   print_overlay_state
+  set_cs2_launch_options
   start_steam
   wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" \
     || die "pipe never came up after cycle"
