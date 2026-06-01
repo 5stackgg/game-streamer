@@ -21,7 +21,6 @@ export const EXEC_CFG_PATH = CS2_CFG_DIR ? `${CS2_CFG_DIR}/5stack_exec.cfg` : nu
 export const DEMO_FILE = process.env.DEMO_FILE ?? "/tmp/game-streamer/demo.dem";
 
 export const DEMO_SESSION_ID    = process.env.DEMO_SESSION_ID    ?? null;
-export const DEMO_SESSION_TOKEN = process.env.DEMO_SESSION_TOKEN ?? null;
 export const STATUS_API_BASE    = process.env.STATUS_API_BASE ?? process.env.API_BASE ?? null;
 
 export const HUD_HOST     = process.env.HUD_HOST || "127.0.0.1";

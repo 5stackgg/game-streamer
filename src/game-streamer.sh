@@ -26,6 +26,11 @@ run_demo_flow() {
   mkdir -p /tmp/game-streamer
   if [ -n "${DEMO_URL:-}" ]; then
     DEMO_FILE_BG="${DEMO_FILE:-/tmp/game-streamer/demo.dem}"
+    if [ -s "$DEMO_FILE_BG" ]; then
+      # Already on disk (e.g. a dev re-run in the same pod) — skip the
+      # re-download. run-demo.sh sees the file and skips its own fetch too.
+      log "demo already present at $DEMO_FILE_BG ($(stat -c%s "$DEMO_FILE_BG") bytes) — skipping download"
+    else
     rm -f "$DEMO_FILE_BG" "$DEMO_FILE_BG.failed" "$DEMO_FILE_BG.partial"
     (
       # shellcheck disable=SC1091
@@ -85,6 +90,7 @@ run_demo_flow() {
       kill "$HEARTBEAT_PID" 2>/dev/null || true
     ) > >(awk '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
     echo $! > /tmp/game-streamer/demo-download.pid
+    fi
   fi
   if [ -n "${WORKSHOP_ID:-}" ]; then
     WORKSHOP_TARGET="${STEAM_LIBRARY:-/mnt/game-streamer}/steamapps/workshop/content/730/${WORKSHOP_ID}"

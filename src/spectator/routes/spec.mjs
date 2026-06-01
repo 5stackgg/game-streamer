@@ -6,7 +6,9 @@ import {
   KEY_XRAY_TOGGLE,
   SLOT_KEYS,
 } from "../constants.mjs";
-import { DISPLAY, HUD_HOST, HUD_PORT } from "../env.mjs";
+import { existsSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { DISPLAY, HUD_HOST, HUD_PORT, LOG_DIR } from "../env.mjs";
 import { execCfgCommand } from "../cs2/exec-cfg.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
 import { sendKey } from "../cs2/input.mjs";
@@ -79,8 +81,21 @@ export async function autodirectorHandler(_req, res, body) {
   sendJson(res, 200, { ok: true, enabled: true });
 }
 
+// Path the compositor consumer polls for HUD show/hide (stream.sh seeds it in
+// composite mode). Mirror of VKCAP_HUD_CTL / $LOG_DIR/hud-visible.
+const HUD_CTL_PATH = path.join(LOG_DIR, "hud-visible");
+
 export async function hudHandler(_req, res, body) {
   const visible = Boolean(body.visible);
+  // Composite mode: the HUD is a separate gst compositor input, not part of
+  // cs2's frame. Toggle it via the consumer's alpha control file — unmapping
+  // the overlay window (the legacy path below) would break the ximagesrc xid
+  // grab and freeze the whole composite.
+  if (existsSync(HUD_CTL_PATH)) {
+    writeFileSync(HUD_CTL_PATH, visible ? "1\n" : "0\n");
+    sendJson(res, 200, { ok: true, visible, mode: "composite" });
+    return;
+  }
   const tree = await run(["xwininfo", "-display", DISPLAY, "-root", "-tree"]);
   let overlayId = null;
   let overlayArea = 0;

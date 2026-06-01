@@ -23,6 +23,44 @@ CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
 LOG_PREFIX="[clip ${CLIP_RENDER_JOB_ID:0:8}]"
 say() { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
 
+# --- Capture diagnostics --------------------------------------------------
+# While a segment records, sample GPU util/VRAM/clock + cs2 & capture-process CPU
+# every ~0.7s into the render log, timestamped from capture start (so the lines
+# line up with the clip's seconds). Distinguishes a GPU stall (gpu% low while fps
+# tanks) from VRAM thrash (vram near max) from cpu-bound (cs2cpu pegged) on any
+# API-triggered render. Gated by CLIP_CAPTURE_DIAG (on by default; set 0 to mute).
+CAPTURE_DIAG_PID=""
+start_capture_diag() {
+  [ "${CLIP_CAPTURE_DIAG:-1}" = "1" ] || return 0
+  command -v nvidia-smi >/dev/null 2>&1 || { say "DIAG: nvidia-smi missing — skipping"; return 0; }
+  local gst_pid="${1:-}"
+  (
+    cs2_pid=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
+    hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    jif() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null; }   # utime+stime
+    start_ms=$(date +%s%3N 2>/dev/null || echo 0)
+    pcs2=$(jif "$cs2_pid"); pgst=$(jif "$gst_pid"); pms=$start_ms
+    while :; do
+      sleep 0.7
+      now_ms=$(date +%s%3N 2>/dev/null || echo 0)
+      dt=$(( now_ms - pms )); [ "$dt" -le 0 ] && dt=700
+      g=$(nvidia-smi --query-gpu=utilization.gpu,utilization.memory,memory.used,memory.total,clocks.gr,temperature.gpu \
+            --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+      ccs2=$(jif "$cs2_pid"); cgst=$(jif "$gst_pid")
+      cs2cpu=$(awk -v a="${pcs2:-}" -v b="${ccs2:-}" -v dt="$dt" -v hz="$hz" 'BEGIN{ if(a==""||b==""){print "?"}else printf "%.0f",(b-a)*1000.0/hz/dt*100 }')
+      gstcpu=$(awk -v a="${pgst:-}" -v b="${cgst:-}" -v dt="$dt" -v hz="$hz" 'BEGIN{ if(a==""||b==""){print "?"}else printf "%.0f",(b-a)*1000.0/hz/dt*100 }')
+      el=$(( (now_ms - start_ms) / 1000 ))
+      say "DIAG +${el}s: gpu(util,memio,vramMiB,vramTot,clkMHz,tempC)=${g} | cs2cpu=${cs2cpu}% gstcpu=${gstcpu}%"
+      pcs2=$ccs2; pgst=$cgst; pms=$now_ms
+    done
+  ) &
+  CAPTURE_DIAG_PID=$!
+}
+stop_capture_diag() {
+  [ -n "${CAPTURE_DIAG_PID:-}" ] && kill "$CAPTURE_DIAG_PID" 2>/dev/null || true
+  CAPTURE_DIAG_PID=""
+}
+
 api_status() {
   local body
   body=$(node "$CLIP_HELPERS" status-body "$@")
@@ -104,6 +142,7 @@ on_exit() {
   # ProRes intermediates are ~20MB/s — drop the chip mov even on
   # error so a flapping pod doesn't fill its scratch dir.
   if [ -n "${CHIP_MOV:-}" ]; then rm -f "$CHIP_MOV"; fi
+  stop_capture_diag
   restore_user_playback
   # Belt-and-suspenders status report. If we exited without having
   # POSTed a terminal status (set -u trip, SIGTERM, early exit before
@@ -693,6 +732,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
+  start_capture_diag "${CLIP_CAPTURE_PID:-}"
 
   # STEP 7: record the segment's worth of ACTUAL playback. We budget by demo
   # advancement, not wall time — each poll where world_motion moved adds its
@@ -777,6 +817,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
     if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then sleep 0.25; else sleep 0.5; fi
   done
 
+  stop_capture_diag
   say "STEP 8: stop capture (segment $SEG_IDX)"
   stop_clip_capture
 

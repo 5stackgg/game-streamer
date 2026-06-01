@@ -4,3 +4,7 @@ src/.env
 
 # macOS
 .DS_Store
+
+# Dev k8s manifests carry inline secrets (STEAM_PASSWORD, DEMO_SESSION_TOKEN,
+# per-session data) — never commit them.
+dev/*.deployment.yaml

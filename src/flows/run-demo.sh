@@ -22,6 +22,8 @@ SCRIPT_TAG=run-demo
 # shellcheck disable=SC1091
 . "$LIB_DIR/cs2-options.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/cs2-tune.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/hud-manager.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
@@ -32,6 +34,24 @@ require_env MATCH_ID DEMO_URL
 start_status_reporter
 
 : "${FPS:=60}"
+# Demo playback render cap. We capture at 60Hz, so 120 gives a 2x buffer — cs2
+# stays comfortably above 60 so every capture sample lands on a fresh frame,
+# without burning GPU/heat on 200+fps we'd never sample. The GPU clock-lock
+# (cs2_autotune) keeps it steady. 0 = uncapped; set lower only if heat-limited.
+: "${CS2_FPS_MAX:=120}"
+# TrueView prediction for the spectated player's view: reconstructs the observed
+# player's real camera/aim by re-running client-side prediction instead of showing
+# tick-sampled server angles. 2 = always predict (smoothest aim; overrides the
+# demo-build-version check so older 5stack demos still get the predicted POV),
+# 1 = predict only on build match, 0 = off. Applied in the demo autoexec.
+: "${CS2_DEMO_PREDICT:=2}"
+# Debug overlay: bake cl_showfps + net_graph into the captured clip (cs2's real
+# render fps + frametime, readable straight off the mp4). 0 = off (production,
+# clean clips); 1 = on to diagnose a capture/perf issue.
+: "${CS2_DEBUG_OVERLAY:=0}"
+# Per-node hardware tuning: GPU scale-offload (GS_GPU_SCALE) + GPU clock lock from
+# the detected GPU class (explicit env still wins; cs2 threads left to the engine).
+cs2_autotune
 # VIDEO_KBPS scales with the pixel count of CS2_DISPLAY_RES (1440p is
 # 1.78x 1080p) so encoder quality stays roughly constant across modes.
 # An explicit override (env or pod spec) still wins via `:=` semantics.
@@ -109,17 +129,16 @@ volume 1.0
 cl_drawhud 0
 r_drawviewmodel 0
 cl_show_observer_crosshair 0
-spec_show_xray 0
 // demo_interpolateview defaults to 1 (smooth camera between ticks); pinned
 // here so a config/build change can't silently reintroduce tick-stepping.
 demo_interpolateview 1
-// TrueView: reconstruct the observed player's real camera/aim by re-running
-// client-side prediction instead of showing tick-sampled server angles.
-// Off by default when the demo's build version != client; `2` overrides that
-// check so older 5stack demos still get the smooth predicted POV.
-cl_demo_predict 2
+// cl_demo_predict is env-tunable via CS2_DEMO_PREDICT (injected into
+// live_autoexec below), not pinned here.
 // Hide assist credits in the kill feed during playback.
 mp_display_kill_assists 0
+// Don't let cs2 quit when a demo finishes — batch-highlights reuses the same
+// cs2 process across jobs, so an auto-quit would kill the remaining renders.
+demo_quitafterplayback 0
 EOF
 
 SPEC_BINDS_BLOCK="$(spec_static_binds_block)"
@@ -146,6 +165,16 @@ $(cs2_perf_autoexec_block)
 $EXEC_OBSERVER
 $SPEC_BINDS_BLOCK
 $DEMO_BINDS_BLOCK
+// TrueView prediction for the spectated view (see CS2_DEMO_PREDICT above).
+cl_demo_predict ${CS2_DEMO_PREDICT}
+// X-ray (player outlines through walls): default ON for live demo spectating,
+// OFF for batch-highlights (clips are POV — x-ray would look wrong).
+spec_show_xray $([ "${CLIP_BATCH_MODE:-0}" = "1" ] && echo 0 || echo 1)
+// Brighten demo output (cs2 default fullscreen gamma is ~2.2; 2 lifts the
+r_fullscreen_gamma 2
+// Debug overlay (CS2_DEBUG_OVERLAY=1): bake the fps counter + net_graph into the
+// clip so cs2's real render fps/frametime is visible. Emits nothing when off.
+$([ "${CS2_DEBUG_OVERLAY:-0}" = "1" ] && printf 'cl_showfps 1\nnet_graph 1')
 EOF
 
 # Pre-create empty so cs2's `exec 5stack_exec` doesn't error before
@@ -232,15 +261,20 @@ do_applaunch() {
   # kept firing with them set.
   #   -disable_loadingplaque   recommended Source 2 perf hint
   #   +cl_disablehtmlmotd 1    skip HTML MOTD subsystem init
+  # cs2 threads are left to the engine (auto-detect, Valve's recommendation);
+  # we pass -threads ONLY if CS2_THREADS is explicitly set — escape hatch for a
+  # misbehaving node. Unset/0 omits the flag.
+  local thread_args=()
+  [ "${CS2_THREADS:-0}" != 0 ] && thread_args=(-threads "$CS2_THREADS")
   local cs2_args=(
     -windowed -noborder
     -width "$CS2_WIDTH" -height "$CS2_HEIGHT"
     -novid -nojoy -high -console
-    -threads 4
+    "${thread_args[@]}"
     -insecure -condebug
     -disable_loadingplaque
     +cl_disablehtmlmotd 1
-    +fps_max 120
+    +fps_max "$CS2_FPS_MAX"
     +exec live_autoexec
     +playdemo "$DEMO_FILE")
   export_cs2_shader_cache_env  # cs2-only GLCache env (pod-wide broke Steam)

@@ -119,7 +119,9 @@ pick_h264_pipeline() {
         clip) preset="p5"; tune="high-quality" ;;
         *)    preset="p4"; tune="low-latency"  ;;
       esac
-      printf 'cudaupload ! nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
+      # No leading `cudaupload` — pick_scale_convert owns the system->CUDA
+      # upload (and does the scale/convert on the GPU when possible).
+      printf 'nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
         "$preset" "$tune" "$gop" "$kbps"
       ;;
     nvh264enc:*)
@@ -225,7 +227,9 @@ pick_h265_pipeline() {
         clip) preset="p5"; tune="high-quality" ;;
         *)    preset="p4"; tune="low-latency"  ;;
       esac
-      printf 'cudaupload ! nvcudah265enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
+      # No leading `cudaupload` — pick_scale_convert owns the system->CUDA
+      # upload (and does the scale/convert on the GPU when possible).
+      printf 'nvcudah265enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
         "$preset" "$tune" "$gop" "$h265_kbps"
       ;;
     nvh265enc:*)
@@ -314,6 +318,122 @@ _probe_nvh265enc_preset() {
     fi
   done
   return 1
+}
+
+# Populate the NVENC pick cache for $codec if cold. pick_h26{4,5}_pipeline runs
+# in a `$(...)` subshell so its cached export never reaches the parent;
+# re-resolve here (same probe, stderr muted) so the scaler's CUDA-vs-CPU choice
+# matches the chosen encoder — else the scaler picks CPU for a CUDA encoder.
+_ensure_nvenc_pick() {
+  case "${1:-h264}" in
+    h265|hevc)
+      [ -n "${GS_NVENC_PICK_H265:-}" ] && return 0
+      GS_NVENC_PICK_H265=$(_resolve_h265_method 2>/dev/null) || true
+      export GS_NVENC_PICK_H265 ;;
+    *)
+      [ -n "${GS_NVENC_PICK:-}" ] && return 0
+      GS_NVENC_PICK=$(_resolve_h264_method 2>/dev/null) || true
+      export GS_NVENC_PICK ;;
+  esac
+}
+
+# True when the resolved NVENC element for $codec is the modern CUDA
+# encoder (nvcuda*), which consumes CUDA memory and so must be fed an upload.
+# Self-heals a cold cache via _ensure_nvenc_pick so it's correct even when
+# called from a different subshell than the one that picked the encoder.
+_active_encoder_is_cuda() {
+  _ensure_nvenc_pick "${1:-h264}"
+  case "${1:-h264}" in
+    h265|hevc) [ "${GS_NVENC_PICK_H265:-}" = "nvcudah265enc" ] ;;
+    *)         [ "${GS_NVENC_PICK:-}" = "nvcudah264enc" ] ;;
+  esac
+}
+
+# True when GPU scale+convert is usable: not disabled via GS_GPU_SCALE, and
+# both cudaupload + cudaconvertscale exist on this pod. Cached per-process.
+_cuda_scale_available() {
+  case "${GS_GPU_SCALE:-auto}" in
+    0|off|false|no) return 1 ;;
+  esac
+  if [ -z "${GS_CUDASCALE_OK:-}" ]; then
+    if gst-inspect-1.0 cudaupload >/dev/null 2>&1 \
+       && gst-inspect-1.0 cudaconvertscale >/dev/null 2>&1; then
+      GS_CUDASCALE_OK=1
+    else
+      GS_CUDASCALE_OK=0
+    fi
+    export GS_CUDASCALE_OK
+  fi
+  [ "$GS_CUDASCALE_OK" = 1 ]
+}
+
+# Emit the scale + colorspace-convert fragment that feeds the encoder.
+# When the active encoder is a CUDA NVENC element and cudaconvertscale is
+# present, the scale (e.g. 1440p->1080p) and RGBx->NV12 convert run on the
+# GPU (cudaupload ! cudaconvertscale), removing the CPU videoscale +
+# videoconvert that otherwise competes with cs2 for cores. The CUDA encoder
+# fragments deliberately drop their own cudaupload — this fragment owns it.
+# Falls back to the all-CPU path for legacy nvenc / x264, and to a
+# CPU-convert-then-upload path if a CUDA encoder is paired with a pod that
+# lacks cudaconvertscale (so the encoder still receives CUDA memory).
+# Usage: pick_scale_convert <out_w> <out_h> <fps> <codec>
+pick_scale_convert() {
+  local w="${1:?width required}" h="${2:?height required}"
+  local fps="${3:?fps required}" codec="${4:-h264}"
+  local cpu="videoscale ! video/x-raw,width=${w},height=${h},framerate=${fps}/1 ! videoconvert ! video/x-raw,format=NV12"
+  if _active_encoder_is_cuda "$codec"; then
+    if _cuda_scale_available; then
+      log "  scaler: cudaconvertscale (GPU scale+convert)" >&2
+      printf 'cudaupload ! cudaconvertscale ! video/x-raw(memory:CUDAMemory),format=NV12,width=%s,height=%s,framerate=%s/1' \
+        "$w" "$h" "$fps"
+      return 0
+    fi
+    # CUDA encoder but no GPU scaler: convert on CPU, then upload so the
+    # encoder still gets the CUDA memory it requires.
+    log "  scaler: CPU videoscale+videoconvert then cudaupload (cudaconvertscale unavailable)" >&2
+    printf '%s ! cudaupload' "$cpu"
+    return 0
+  fi
+  log "  scaler: CPU videoscale+videoconvert" >&2
+  printf '%s' "$cpu"
+}
+
+# Contract guard for the pick_scale_convert -> encoder pairing: a CUDA NVENC
+# element (nvcudah26{4,5}enc) consumes CUDA memory, which pick_scale_convert
+# supplies (cudaupload / cudaconvertscale). Warns loudly if a caller paired a CUDA
+# encoder with a convert fragment that doesn't produce CUDA memory — i.e. built a
+# pipeline without pick_scale_convert in front of the encoder. Usage:
+# _assert_cuda_chain "<convert fragment>" "<encoder fragment>".
+_assert_cuda_chain() {
+  case "$2" in
+    *nvcudah264enc*|*nvcudah265enc*)
+      case "$1" in
+        *cudaupload*|*CUDAMemory*) ;;
+        *) warn "BUG: CUDA encoder fed non-CUDA memory — pick_scale_convert must precede the encoder (convert='$1')" ;;
+      esac ;;
+  esac
+}
+
+# obs-vkcapture present-hook needs nvidia-drm modeset on (its dmabuf sharing).
+# True unless we have POSITIVE evidence it's off — the host kernel param is visible
+# via the shared /sys; unreadable/absent -> assume on (don't block the default path
+# on a missing sysfs).
+_drm_modeset_on() {
+  local f=/sys/module/nvidia_drm/parameters/modeset v
+  [ -r "$f" ] || return 0
+  v=$(cat "$f" 2>/dev/null)
+  [ "$v" != "N" ] && [ "$v" != "0" ]
+}
+
+# True when CLIP_CAPTURE_METHOD selects vkcapture AND it can run here (consumer
+# binary built + modeset on). Drives the present-hook for clips, and for the
+# live/demo composite (cs2 via present-hook + HUD overlay) in stream.sh. A miss =>
+# the ximagesrc fallback, which needs no DRM. NOTE: does not check cs2-running —
+# callers that capture pre-cs2 (DEBUG_STREAM boot) gate on that separately.
+vkcapture_available() {
+  [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] || return 1
+  command -v vkcapture-consumer >/dev/null 2>&1 || return 1
+  _drm_modeset_on
 }
 
 # Trap-friendly verbose toggle. `GS_TRACE=1 ./game-streamer.sh ...` runs

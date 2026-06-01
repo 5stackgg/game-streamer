@@ -102,17 +102,30 @@ disable_overlay_globally
 disable_cs2_overlay
 print_overlay_state
 
+# Force __GL_SHADER_DISK_CACHE=1 onto cs2 via launch options so the NVIDIA
+# Vulkan shader disk cache works as root (else runtime pipelines recompile
+# every render — see set_cs2_launch_options). Same Steam-off timing as cloud/
+# overlay.
+set_cs2_launch_options
+
 report_status status=launching_steam
 start_steam
 
 wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" || die "pipe never came up"
 
 if [ "$HUD_DEFERRED" = "1" ]; then
-  if wait_for_hud_server 60; then
+  if ! wait_for_hud_server 60; then
+    # Wedged or never bound — restart once before giving up (boot continues
+    # either way; the overlay also self-heals via position_hud_overlay later).
+    warn "restarting hud-manager and waiting once more"
+    stop_hud; sleep 1; start_hud
+    wait_for_hud_server 30 || true
+  fi
+  if hud_server_up; then
     hide_hud_admin_window
     position_hud_overlay || warn "early overlay positioning failed — will retry after cs2"
   else
-    warn "hud-manager server didn't come up"
+    warn "hud-manager server didn't come up — continuing (overlay retried after cs2)"
   fi
 fi
 
@@ -178,6 +191,7 @@ if [ "$HAD_USERDATA" = 0 ]; then
   disable_overlay_globally
   disable_cs2_overlay
   print_overlay_state
+  set_cs2_launch_options
   start_steam
   wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" \
     || die "pipe never came up after cycle"

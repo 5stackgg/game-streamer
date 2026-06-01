@@ -78,6 +78,42 @@ RUN apt-get install -y --no-install-recommends \
       ffmpeg \
       python3
 
+# CUDA NVRTC runtime — REQUIRED for GStreamer's cudaconvert/cudascale/
+# cudaconvertscale elements, which JIT-compile their colour-convert + scale
+# kernels via libnvrtc at element registration. The `-base` CUDA image
+# doesn't ship it, so those elements silently fail to register while
+# cudaupload (pure memcpy) and nvcudah265enc (libnvidia-encode, injected by
+# the container runtime) still work — which forces capture onto the CPU
+# videoconvert path (the cs2 firefight-judder source). Installed from the
+# CUDA apt repo already configured in the base image; the version component
+# must match the base (12.6 -> cuda-nvrtc-12-6).
+RUN apt-get install -y --no-install-recommends cuda-nvrtc-12-6 \
+ && ln -sf libnvrtc.so.12 \
+      /usr/local/cuda/targets/x86_64-linux/lib/libnvrtc.so \
+ && ldconfig
+# ^ the runtime package ships only libnvrtc.so.12; GStreamer's cuda converter
+# dlopens the UNVERSIONED libnvrtc.so, so without this symlink cudaconvert/
+# cudascale/cudaconvertscale never register (cudaupload + nvenc still do).
+
+# obs-vkcapture Vulkan present-hook layer (CLIP_CAPTURE_METHOD=vkcapture). Loaded
+# into cs2 via OBS_VKCAPTURE=1, it hooks vkQueuePresentKHR and shares the swapchain
+# over a unix socket — capture never touches the X server, so it can't stall cs2's
+# present. Build the LAYER ONLY (-DBUILD_PLUGIN=OFF drops the libobs dependency);
+# vkcapture-consumer (compiled below) is the socket consumer. Pinned to a release
+# tag for reproducible builds. Requires nvidia-drm.modeset=1 on the host.
+RUN set -eux; \
+      apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates cmake build-essential pkg-config \
+        libvulkan-dev libgl-dev libegl-dev libx11-dev libxcb1-dev \
+      && git clone --depth=1 --branch v1.5.6 \
+           https://github.com/nowrep/obs-vkcapture /tmp/obs-vkcapture \
+      && cmake -S /tmp/obs-vkcapture -B /tmp/obs-vkcapture/build \
+           -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_PLUGIN=OFF \
+      && cmake --build /tmp/obs-vkcapture/build --parallel \
+      && cmake --install /tmp/obs-vkcapture/build \
+      && test -f /usr/share/vulkan/implicit_layer.d/obs_vkcapture_64.json \
+      && rm -rf /tmp/obs-vkcapture /var/lib/apt/lists/*
+
 # Node.js — runs src/spectator/server.mjs (cs2 spectator-control HTTP
 # daemon, refactored from the single-file src/spec-server.mjs). Ubuntu
 # 24.04's apt ships Node 18; the daemon uses only built-in modules
@@ -173,6 +209,19 @@ RUN chmod +x /opt/game-streamer/src/*.sh \
              /opt/game-streamer/src/*.mjs \
              /opt/game-streamer/src/actions/*.sh \
              /opt/game-streamer/src/dev/*.sh 2>/dev/null || true
+
+# Compile the obs-vkcapture socket consumer (binds the layer's socket, pushes cs2's
+# frames into a GStreamer NVENC pipeline). Build-only headers — the gstreamer/glib
+# runtime libs are already in the image — so purge them after the build.
+RUN set -eux; \
+      build_deps="gcc pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev"; \
+      apt-get update && apt-get install -y --no-install-recommends $build_deps \
+      && gcc -O2 -Wall -Wextra -o /usr/local/bin/vkcapture-consumer \
+           /opt/game-streamer/src/vkcapture/vkcapture-consumer.c \
+           $(pkg-config --cflags --libs glib-2.0 gio-2.0 gstreamer-1.0 gstreamer-app-1.0) \
+      && test -x /usr/local/bin/vkcapture-consumer \
+      && apt-get purge -y $build_deps && apt-get autoremove -y \
+      && rm -rf /var/lib/apt/lists/*
 
 # Remotion motion project — owns the branded Outro (pre-rendered into
 # resources/video/ at build time) and the per-job PlayerChip overlay

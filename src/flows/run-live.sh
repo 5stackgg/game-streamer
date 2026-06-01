@@ -24,6 +24,8 @@ SCRIPT_TAG=run-live
 # shellcheck disable=SC1091
 . "$LIB_DIR/cs2-options.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/cs2-tune.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/hud-manager.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
@@ -49,6 +51,19 @@ else
 fi
 
 : "${FPS:=60}"
+# Live capture is the cs2-present-hook + HUD composite when available (see
+# stream.sh): the consumer samples cs2's swapchain at the capture rate, so cs2 must
+# render ABOVE it for every sample to be fresh -> 2x headroom. The ximagesrc
+# fallback instead wants cs2 at the capture rate (evenly-spaced grabs). Explicit
+# CS2_FPS_MAX env wins either way.
+if vkcapture_available; then
+  : "${CS2_FPS_MAX:=$(( FPS * 2 ))}"
+else
+  : "${CS2_FPS_MAX:=$FPS}"
+fi
+# Per-node hardware tuning: GPU scale-offload (GS_GPU_SCALE) + GPU clock lock from
+# the detected GPU class (explicit env still wins; cs2 threads left to the engine).
+cs2_autotune
 # VIDEO_KBPS scales with the pixel count of CS2_DISPLAY_RES (1440p is
 # 1.78x 1080p) so encoder quality stays roughly constant across modes.
 # An explicit override (env or pod spec) still wins via `:=` semantics.
@@ -174,14 +189,19 @@ do_applaunch() {
   # stacking entirely.
   # Boot-trim flags — see run-demo.sh for the empirical pass that
   # narrowed this down from a larger experimental set.
+  # cs2 threads are left to the engine (auto-detect, Valve's recommendation);
+  # we pass -threads ONLY if CS2_THREADS is explicitly set — escape hatch for a
+  # misbehaving node. Unset/0 omits the flag.
+  local thread_args=()
+  [ "${CS2_THREADS:-0}" != 0 ] && thread_args=(-threads "$CS2_THREADS")
   local cs2_args=(
     -windowed -noborder
     -width "$CS2_WIDTH" -height "$CS2_HEIGHT"
     -novid -nojoy -high -console
-    -threads 4
+    "${thread_args[@]}"
     -disable_loadingplaque
     +cl_disablehtmlmotd 1
-    +fps_max 120
+    +fps_max "$CS2_FPS_MAX"
     +exec live_autoexec)
   if [ "$CS2_CONNECT_MODE" = "playcast" ]; then
     cs2_args+=(+playcast "$PLAYCAST_URL")

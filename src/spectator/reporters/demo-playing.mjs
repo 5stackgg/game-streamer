@@ -1,11 +1,7 @@
 import process from "node:process";
 
 import { execCfgCommand } from "../cs2/exec-cfg.mjs";
-import {
-  DEMO_SESSION_ID,
-  DEMO_SESSION_TOKEN,
-  STATUS_API_BASE,
-} from "../env.mjs";
+import { DEMO_SESSION_ID, STATUS_API_BASE } from "../env.mjs";
 import { demoState } from "../state/demo.mjs";
 
 export const playingState = {
@@ -40,15 +36,12 @@ export async function reportDemoPlayingOnce() {
   demoState.lastTickAtSeek = 0;
   demoState.lastSeekRealMs = Date.now();
 
-  if (!DEMO_SESSION_ID || !DEMO_SESSION_TOKEN || !STATUS_API_BASE) return;
+  if (!DEMO_SESSION_ID || !STATUS_API_BASE) return;
   const url = `${STATUS_API_BASE}/demo-sessions/${DEMO_SESSION_ID}/status`;
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type":  "application/json",
-        "x-origin-auth": `${DEMO_SESSION_ID}:${DEMO_SESSION_TOKEN}`,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "playing" }),
       signal: AbortSignal.timeout(5_000),
     });
