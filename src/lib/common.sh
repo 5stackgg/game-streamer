@@ -380,6 +380,22 @@ pick_scale_convert() {
   printf '%s' "$cpu"
 }
 
+# Contract guard for the pick_scale_convert -> encoder pairing: a CUDA NVENC
+# element (nvcudah26{4,5}enc) consumes CUDA memory, which pick_scale_convert
+# supplies (cudaupload / cudaconvertscale). Warns loudly if a caller paired a CUDA
+# encoder with a convert fragment that doesn't produce CUDA memory — i.e. built a
+# pipeline without pick_scale_convert in front of the encoder. Usage:
+# _assert_cuda_chain "<convert fragment>" "<encoder fragment>".
+_assert_cuda_chain() {
+  case "$2" in
+    *nvcudah264enc*|*nvcudah265enc*)
+      case "$1" in
+        *cudaupload*|*CUDAMemory*) ;;
+        *) warn "BUG: CUDA encoder fed non-CUDA memory — pick_scale_convert must precede the encoder (convert='$1')" ;;
+      esac ;;
+  esac
+}
+
 # Trap-friendly verbose toggle. `GS_TRACE=1 ./game-streamer.sh ...` runs
 # under `set -x` so every command is echoed.
 [ "${GS_TRACE:-0}" = "1" ] && set -x

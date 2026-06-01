@@ -75,6 +75,7 @@ _start_clip_capture_vkcapture() {
 
   local convert
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
+  _assert_cuda_chain "$convert" "$enc"
 
   log "  clip capture: $out_file (vkcapture/present-hook -> ${out_w}x${out_h}@${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
 
@@ -137,6 +138,7 @@ _start_clip_capture_gst() {
   # GPU scale+convert when the encoder is CUDA-based (see pick_scale_convert).
   local convert
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
+  _assert_cuda_chain "$convert" "$enc"
 
   # qtmux faststart=true puts moov first so the api streams uploads to S3 without buffering.
   if [ "$audio" = "1" ]; then

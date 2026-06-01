@@ -72,6 +72,7 @@ start_capture() {
   # encoder is CUDA-based, off-loading it from the CPU that cs2 needs.
   local convert
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
+  _assert_cuda_chain "$convert" "$enc"
 
   # Persist args so restart_capture can re-invoke us identically.
   local args_dir="${LOG_DIR:-/tmp/game-streamer}"
