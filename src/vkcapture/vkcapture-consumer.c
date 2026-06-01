@@ -86,10 +86,9 @@ struct state {
     bool        playing;         // pipeline moved to PLAYING (on first frame)
     int         fps;
     guint64     frame_no;
-    GstBuffer  *last_buf;        // last good frame (CPU copy) — repeated while the
-                                 // layer is transiently gone (e.g. cs2 rebuilds its
-                                 // swapchain on a demo seek) so the stream holds
-                                 // instead of dying and tripping client reconnects
+    GstBuffer  *last_buf;        // last good frame, repeated while the layer is
+                                 // gone (cs2 swapchain rebuild on seek) so the
+                                 // stream holds instead of dying
 
     // optional HUD-overlay toggle (composite mode): poll VKCAP_HUD_CTL and
     // set the compositor's HUD pad alpha, so the operator can hide/show the
@@ -199,13 +198,9 @@ static void set_caps_if_needed(void)
             gfmt, st.width, st.height, st.fps, st.strides[0], st.flip);
 }
 
-// MOVNTDQA (streaming load) copy. The source is the layer's host-mapped GPU
-// buffer, which is write-combined: normal cached loads off WC memory crawl
-// (~1GB/s), so a plain memcpy of the frame pegged a core at 60fps. Streaming
-// loads read WC at near-DRAM bandwidth. Built with an explicit sse4.1 target so
-// no global -msse4.1 is needed; gated at the call site by a cpu-feature check.
-// Requires 16-byte-aligned src (page-aligned dmabuf + 16-aligned stride rows
-// satisfy this) and n a multiple of 16 (our frame/row sizes are).
+// Streaming-load (MOVNTDQA) copy for the layer's write-combined GPU buffer:
+// cached loads off WC memory crawl (~1GB/s) and pegged a core; MOVNTDQA reads it
+// near DRAM speed. Needs 16-byte-aligned src; sse4.1 gated at the caller.
 __attribute__((target("sse4.1")))
 static void wc_memcpy_sse41(uint8_t *dst, const uint8_t *src, size_t n)
 {
@@ -228,9 +223,8 @@ static void wc_memcpy_sse41(uint8_t *dst, const uint8_t *src, size_t n)
     if (i < n) memcpy(dst + i, src + i, n - i);  // unaligned tail (rare)
 }
 
-// Copy a frame/row out of the write-combined GPU mapping. Uses the streaming-
-// load path when the CPU has SSE4.1 and src is 16-byte aligned; otherwise plain
-// memcpy (correct, just slow — same as before).
+// Copy from the WC GPU mapping: streaming-load path when SSE4.1 + aligned, else
+// plain memcpy.
 static void wc_copy(void *dst, const void *src, size_t n)
 {
     static int sse41 = -1;
@@ -275,10 +269,8 @@ static gboolean on_tick(gpointer user)
         st.last_buf = gst_buffer_ref(buf);
         out = buf;  // push (transfers ownership)
     } else if (st.last_buf) {
-        // Layer transiently gone (cs2 rebuilt its swapchain on a demo seek):
-        // repeat the last good frame so the stream HOLDS instead of going dead.
-        // A dead stream stalls the client's video clock and trips its reconnect
-        // watchdog; a held frame keeps time advancing until cs2 comes back.
+        // Layer transiently gone (cs2 swapchain rebuild on seek): repeat the last
+        // frame so the stream holds instead of dying + tripping client reconnects.
         out = gst_buffer_ref(st.last_buf);
     } else {
         return G_SOURCE_CONTINUE;  // nothing captured yet
@@ -504,10 +496,8 @@ static int make_listen_socket(void)
     return fd;
 }
 
-// Composite HUD toggle: read VKCAP_HUD_CTL (first char "1"/"0") and, on change,
-// set the compositor HUD pad's alpha. The grabbed overlay window stays mapped
-// (unmapping it would break the ximagesrc xid grab), so this is purely a
-// mix-level show/hide. No-op until the file's value changes.
+// HUD show/hide: read VKCAP_HUD_CTL ("1"/"0") and set the compositor HUD pad's
+// alpha on change. (Unmapping the window would break the ximagesrc grab.)
 static gboolean poll_hud_ctl(gpointer user)
 {
     (void)user;
@@ -554,9 +544,8 @@ int main(int argc, char **argv)
         GstBus *bus = gst_element_get_bus(st.pipeline);
         gst_bus_add_watch(bus, on_bus, NULL);
         gst_object_unref(bus);
-        // Composite HUD toggle (optional): if the pipeline has a compositor
-        // named 'comp' and VKCAP_HUD_CTL is set, grab its HUD pad (sink_1 =
-        // overlay; sink_0 = cs2, see stream.sh) so poll_hud_ctl can alpha it.
+        // HUD toggle: grab the compositor's HUD pad (sink_1) for poll_hud_ctl,
+        // when a 'comp' element + VKCAP_HUD_CTL exist.
         const char *hud_ctl = getenv("VKCAP_HUD_CTL");
         if (hud_ctl && *hud_ctl) {
             GstElement *comp = gst_bin_get_by_name(GST_BIN(st.pipeline), "comp");

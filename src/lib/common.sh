@@ -320,14 +320,10 @@ _probe_nvh265enc_preset() {
   return 1
 }
 
-# Populate the NVENC pick cache for $codec in THIS shell if it's cold.
-# pick_h26{4,5}_pipeline is invoked as `enc=$(pick_… )`, so the export it does
-# happens in a SUBSHELL and never reaches the parent — and pick_scale_convert
-# then runs in its own subshell with a cold cache. Re-resolve here (the same
-# deterministic gst probe, stderr muted so the "encoder:" line isn't logged a
-# second time) so the scaler's CUDA-vs-CPU choice matches the encoder actually
-# selected. Without this the scaler picked CPU for a CUDA encoder → the
-# "CUDA encoder fed non-CUDA memory" warning + needless CPU scaling.
+# Populate the NVENC pick cache for $codec if cold. pick_h26{4,5}_pipeline runs
+# in a `$(...)` subshell so its cached export never reaches the parent;
+# re-resolve here (same probe, stderr muted) so the scaler's CUDA-vs-CPU choice
+# matches the chosen encoder — else the scaler picks CPU for a CUDA encoder.
 _ensure_nvenc_pick() {
   case "${1:-h264}" in
     h265|hevc)

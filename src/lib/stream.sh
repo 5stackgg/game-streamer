@@ -99,24 +99,15 @@ start_capture() {
   fi
 
   # COMPOSITE (cs2 present-hook + HUD overlay): capture cs2's swapchain via the
-  # vkcapture consumer (no X-server contention -> no gunfight stall) and overlay the
-  # JTs HUD on top in gst — instead of grabbing the picom-composited framebuffer
-  # (which stalls cs2). Used for live + demo playback when vkcapture is available,
-  # cs2 is running, and the fullscreen HUD overlay window exists. The HUD is grabbed
-  # at a low rate (it barely changes) so its X contention stays negligible. Any miss
-  # -> the plain ximagesrc grab below, which still includes the HUD (via picom).
-  # HUD grab rate. cs2's frames come off the present-hook (no X grab), so the
-  # only capture load on the X server is this HUD ximagesrc — a fraction of the
-  # old full-screen-fallback grab that caused the stutters. cs2 still PRESENTS
-  # through X (Vulkan X11), so a fullscreen HUD grab can still contend with
-  # cs2's present, but much less. 30fps is the smooth-HUD default; if a node
-  # stutters on kills/switches, lower HUD_CAPTURE_FPS or move to obs-glcapture.
+  # vkcapture consumer (no X-server contention) and overlay the JTs HUD in gst.
+  # Used for live + demo when vkcapture + cs2 + the HUD window are present; any
+  # miss falls back to the plain ximagesrc grab below (HUD via picom).
+  # HUD grab rate: cs2 renders via the present-hook (not X), so this HUD ximagesrc
+  # is the only X-server capture load. 30fps is smooth; tune via HUD_CAPTURE_FPS.
   local hud_xid="" used_composite=0 hud_fps="${HUD_CAPTURE_FPS:-30}"
-  # HUD show/hide control file (composite only): the consumer polls it and
-  # alphas the compositor's HUD pad, so the operator's hide/show toggle works
-  # without unmapping the grabbed window. Its presence also tells the spec-server
-  # we're in composite mode (so /spec/hud writes here instead of windowunmap).
-  # Clear any stale copy so a non-composite path doesn't look composite.
+  # HUD show/hide control file (composite only): the consumer polls it to alpha
+  # the HUD pad; its presence tells the spec-server we're compositing. Clear any
+  # stale copy so a non-composite path doesn't look composite.
   local hud_ctl="${LOG_DIR:-/tmp/game-streamer}/hud-visible"
   rm -f "$hud_ctl"
   if vkcapture_available \
@@ -132,13 +123,9 @@ start_capture() {
     # leaky=downstream: a slow/blocked HUD grab drops its own frames instead of
     # back-pressuring the compositor (which would stall the cs2 leg too).
     local hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
-    # queue right after the compositor = a thread boundary: the software blend
-    # runs on the compositor's thread, while cudaupload+convert+encode-submit run
-    # on the queue's downstream thread. Without it the whole chain serializes on
-    # ONE core (profiled: that core pegs 100% while cs2 is fine, dropping the odd
-    # output frame -> micro-judder). Bounded by buffers only (these are big raw
-    # frames, so the default byte cap would throttle); non-leaky since NVENC keeps
-    # up — the queue just decouples cores, it stays near-empty.
+    # queue after the compositor = a thread boundary so the software blend and the
+    # upload/encode run on separate cores (else they serialize on one). Bounded by
+    # buffer count — raw frames are big, so the default byte cap would throttle.
     local outchain="compositor name=comp background=black ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
     local pipeline
     if [ "$audio" = 1 ]; then
@@ -156,21 +143,16 @@ $hud_src"
     # Seed visible=1; consumer reads VKCAP_HUD_CTL and polls it for show/hide.
     printf '1\n' > "$hud_ctl"
     export VKCAP_HUD_CTL="$hud_ctl"
-    # Pin the capture pipeline to a dedicated set of high cores. Its many small
-    # gst threads otherwise pile (kernel wake-affinity) onto whatever core cs2 is
-    # using and peg it — profiled: one core at 100% while others idle, no single
-    # thread >65%, i.e. scheduling churn, not a hot op -> the odd dropped frame
-    # -> micro-judder. Reserve ~1/3 of cores (min 2) for capture; cs2 + the rest
-    # float on the low cores. Tunable/skippable via CAPTURE_CPUS (empty = no pin).
+    # Pin the capture pipeline to dedicated high cores so its gst threads don't
+    # pile (wake-affinity) onto a core cs2 is using and peg it. CAPTURE_CPUS
+    # overrides the list (empty = no pin).
     local capture_pin=()
     if [ -z "${CAPTURE_CPUS+x}" ] && command -v taskset >/dev/null 2>&1; then
       local _ncpu _capn _caplo
       _ncpu=$(nproc 2>/dev/null || echo 0)
       if [ "$_ncpu" -ge 4 ]; then
-        # Reserve a SMALL dedicated set for capture and give cs2 the rest. The
-        # pipeline measures ~1.7 cores (gst%cpu ~170%), so 2 is the floor — 1
-        # would bottleneck capture itself. Override the count with CAPTURE_CORES
-        # (e.g. once GPU compositing drops capture under 1 core, set it to 1).
+        # Capture needs ~1.7 cores, so 2 is the floor (1 bottlenecks it).
+        # Override the count with CAPTURE_CORES.
         _capn="${CAPTURE_CORES:-2}"
         [ "$_capn" -lt 1 ] && _capn=1
         [ "$_capn" -ge "$_ncpu" ] && _capn=$(( _ncpu - 1 ))

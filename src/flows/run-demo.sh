@@ -129,7 +129,6 @@ volume 1.0
 cl_drawhud 0
 r_drawviewmodel 0
 cl_show_observer_crosshair 0
-spec_show_xray 0
 // demo_interpolateview defaults to 1 (smooth camera between ticks); pinned
 // here so a config/build change can't silently reintroduce tick-stepping.
 demo_interpolateview 1
@@ -168,6 +167,9 @@ $SPEC_BINDS_BLOCK
 $DEMO_BINDS_BLOCK
 // TrueView prediction for the spectated view (see CS2_DEMO_PREDICT above).
 cl_demo_predict ${CS2_DEMO_PREDICT}
+// X-ray (player outlines through walls): default ON for live demo spectating,
+// OFF for batch-highlights (clips are POV — x-ray would look wrong).
+spec_show_xray $([ "${CLIP_BATCH_MODE:-0}" = "1" ] && echo 0 || echo 1)
 // Brighten demo output (cs2 default fullscreen gamma is ~2.2; 2 lifts the
 r_fullscreen_gamma 2
 // Debug overlay (CS2_DEBUG_OVERLAY=1): bake the fps counter + net_graph into the
