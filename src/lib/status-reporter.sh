@@ -53,8 +53,17 @@ _promote_demo_session_env() {
   fi
 }
 
+# warm-shaders has no MATCH_PASSWORD; route its progress to the node endpoint.
+_promote_bake_env() {
+  if [ -z "$STATUS_REPORT_URL" ] && [ -n "${BAKE_NODE_ID:-}" ]; then
+    export STATUS_REPORT_URL="${STATUS_API_BASE}/game-server-nodes/${BAKE_NODE_ID}/bake-status"
+    export STATUS_AUTH_TOKEN="${BAKE_NODE_ID}"
+  fi
+}
+
 _status_reporter_configured() {
   _promote_demo_session_env
+  _promote_bake_env
   if [ -n "$STATUS_REPORT_URL" ] && [ -n "$STATUS_AUTH_TOKEN" ]; then
     return 0
   fi

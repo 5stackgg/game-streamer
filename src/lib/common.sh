@@ -51,7 +51,9 @@ case "$CS2_DISPLAY_RES" in
   2560x1440) : "${XORG_CONFIG:=xorg-dummy-1440p.conf}" ;;
   *)         : "${XORG_CONFIG:=xorg-dummy-1080p.conf}" ;;
 esac
-: "${CS2_VIDEO_SETTINGS:={}}"
+# Escaped closing brace: `${VAR:={}}` mis-parses to a bare `{` (invalid
+# JSON); escaping yields the literal `{}` default.
+: "${CS2_VIDEO_SETTINGS:={\}}"
 mkdir -p "$LOG_DIR" "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 # Driver won't create the GLCache dir itself.

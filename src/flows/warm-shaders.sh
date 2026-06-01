@@ -17,8 +17,12 @@ SCRIPT_TAG=warm-shaders
 . "$LIB_DIR/cs2-options.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/shader-cache.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/status-reporter.sh"
 
 load_env
+
+start_status_reporter
 
 steam_pipe_up || die "Steam isn't running"
 xorg_running  || die "Xorg isn't up"
@@ -52,6 +56,7 @@ export PULSE_SERVER
 
 do_applaunch() {
   # No +connect / +playdemo — just boot CS2 so Steam runs the precache.
+  report_status status=launching_cs2
   local cs2_args=(
     -windowed -noborder
     -width "$CS2_WIDTH" -height "$CS2_HEIGHT"

@@ -54,6 +54,8 @@ fi
 HUD_DEFERRED=0
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
   log "CLIP_BATCH_MODE=1 — skipping hud-manager"
+elif [ -n "${BAKE_NODE_ID:-}" ]; then
+  log "shader bake — skipping hud-manager"
 elif [ -x "$HUD_BIN" ]; then
   start_picom || warn "continuing without picom (HUD background won't be transparent)"
   start_hud
@@ -75,6 +77,8 @@ mkdir -p "$STEAM_LIBRARY/steamapps/common"
 register_library "$STEAM_LIBRARY"
 
 # Steam is OFF here so steamcmd and Steam don't fight over appmanifest.
+# A fresh install re-registers the library at the end (steamcmd rewrites
+# libraryfolders.vdf) — see install_cs2_via_steamcmd.
 install_cs2_via_steamcmd
 
 # Warm boot = userdata + loginusers.vdf cached → Steam reuses the

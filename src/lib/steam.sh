@@ -72,54 +72,89 @@ restore_real_steamclient() {
         "$STEAM_LIBRARY/cs2/game/bin/linuxsteamrt64/steam_appid.txt" 2>/dev/null || true
 }
 
-# Write libraryfolders.vdf so Steam treats $STEAM_LIBRARY as a real library
-# the moment it boots. Idempotent — leaves an existing entry alone.
+# Register $lib as a Steam library so CS2 (installed there by steamcmd) is
+# recognized on boot — no interactive Install dialog, no re-download.
+#
+# CRITICAL: Steam READS and rewrites $STEAM_HOME/steamapps/libraryfolders.vdf,
+# NOT $STEAM_HOME/config/libraryfolders.vdf. Proven via content_log.txt:
+#   "Loaded Steam library folders configuration: .../steam/steamapps/libraryfolders.vdf"
+# The long-standing bug seeded only config/, which Steam ignores, so on a fresh
+# (or reset) library $lib was never registered in the file Steam reads → Steam
+# loaded "1 libraries", never loaded CS2 from $lib/steamapps → "not installed".
+# Working pods only worked because Steam had adopted the library into the
+# steamapps/ copy long ago and it persisted. Seed BOTH copies (Steam keeps them
+# in sync once it adopts); the steamapps/ one is load-bearing.
 register_library() {
   local lib="${1:-$STEAM_LIBRARY}"
   mkdir -p "$lib/steamapps/common"
 
-  cat > "$lib/libraryfolder.vdf" <<EOF
+  # Stable per-library contentid: reuse an existing non-zero one (Steam stamps a
+  # real value once it adopts the library), else generate. Matches the adopted
+  # state on working pods.
+  local cid=""
+  [ -f "$lib/libraryfolder.vdf" ] && \
+    cid=$(grep -oE '"contentid"[^0-9]*"[0-9]+"' "$lib/libraryfolder.vdf" 2>/dev/null \
+          | grep -oE '[0-9]+' | head -1)
+  if [ -z "$cid" ] || [ "$cid" = "0" ]; then
+    cid=$(od -An -tu8 -N8 /dev/urandom 2>/dev/null | tr -d ' ')
+    [ -n "$cid" ] || cid=$(( (RANDOM << 30) ^ (RANDOM << 15) ^ RANDOM ))
+  fi
+
+  # Per-library marker. Working pods carry it at the library root.
+  local marker
+  for marker in "$lib/libraryfolder.vdf" "$lib/steamapps/libraryfolder.vdf"; do
+    cat > "$marker" <<EOF
 "libraryfolder"
 {
-    "contentid"        "0"
-    "label"            ""
+    "contentid"        "$cid"
+    "label"            "game-streamer hostpath"
 }
 EOF
+  done
 
-  local lf="$STEAM_HOME/config/libraryfolders.vdf"
-  mkdir -p "$(dirname "$lf")"
-  if [ ! -f "$lf" ]; then
-    cat > "$lf" <<EOF
+  # Register $lib in the file Steam reads (steamapps/) AND the config/ mirror.
+  # Idempotent: leave an existing entry for $lib alone, else append one.
+  local lf
+  for lf in "$STEAM_HOME/steamapps/libraryfolders.vdf" "$STEAM_HOME/config/libraryfolders.vdf"; do
+    mkdir -p "$(dirname "$lf")"
+    if [ ! -f "$lf" ]; then
+      cat > "$lf" <<EOF
 "libraryfolders"
 {
     "0"
     {
         "path"        "$STEAM_HOME"
-        "label"       ""
-        "contentid"   "0"
+        "label"        ""
+        "contentid"        "0"
+        "apps"
+        {
+        }
     }
     "1"
     {
         "path"        "$lib"
-        "label"       "game-streamer hostpath"
-        "contentid"   "0"
+        "label"        "game-streamer hostpath"
+        "contentid"        "$cid"
+        "apps"
+        {
+        }
     }
 }
 EOF
-    log "wrote fresh $lf with $lib"
-    return 0
-  fi
-
-  if grep -q "\"$lib\"" "$lf"; then
-    log "$lib already registered in $lf"
-    return 0
-  fi
-
-  log "appending $lib to existing $lf"
-  python3 - "$lf" "$lib" <<'PY'
+      log "wrote fresh $lf with $lib (contentid $cid)"
+      continue
+    fi
+    # Match the exact path entry — "$lib" must not match "$lib/steam" (the home).
+    if grep -qE "\"path\"[[:space:]]*\"${lib}\"" "$lf"; then
+      log "$lib already registered in $lf"
+      continue
+    fi
+    log "appending $lib to existing $lf"
+    python3 - "$lf" "$lib" "$cid" <<'PY'
 import re, sys, pathlib
 lf = pathlib.Path(sys.argv[1])
 path = sys.argv[2]
+cid = sys.argv[3]
 src = lf.read_text()
 idxs = [int(m.group(1)) for m in re.finditer(r'"(\d+)"\s*\{', src)]
 nxt = max(idxs) + 1 if idxs else 0
@@ -127,8 +162,11 @@ entry = f'''
     "{nxt}"
     {{
         "path"        "{path}"
-        "label"       "game-streamer hostpath"
-        "contentid"   "0"
+        "label"        "game-streamer hostpath"
+        "contentid"        "{cid}"
+        "apps"
+        {{
+        }}
     }}
 '''
 src = src.rstrip()
@@ -136,6 +174,7 @@ if src.endswith("}"):
     src = src[:-1] + entry + "}\n"
 lf.write_text(src)
 PY
+  done
 }
 
 # Forwards steamcmd "Update state ... progress: X.YY" lines through
@@ -229,6 +268,14 @@ install_cs2_via_steamcmd() {
     local bid
     bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
     log "CS2 install OK — ${bid:-buildid unknown}"
+    # Re-register the library now that the appmanifest is in place. steamcmd
+    # (force_install_dir) rewrites $STEAM_HOME/steamapps/libraryfolders.vdf
+    # during the install, dropping the registration setup-steam wrote before
+    # this ran — so without re-registering here Steam boots with only the home
+    # library, loads 0 apps, and -applaunch 730 no-ops (cs2 never spawns; black
+    # stream). Only fresh installs need it; the "already installed" early-return
+    # above leaves an already-adopted library untouched.
+    register_library "$STEAM_LIBRARY"
     return 0
   fi
 
@@ -1431,16 +1478,12 @@ wait_for_cs2_process() {
       continue
     fi
 
-    # Stalled compile (was active, log now silent, no cs2): recover instead
-    # of waiting forever. live/demo auto-skip; batch fails fast.
+    # Quiet/slow compile: never auto-skip or die — only the UI skip button
+    # skips. Wait indefinitely; operator cancels a wedged job from the UI.
     if [ "$shaders_seen" = 1 ] && [ "$skip_now" = 0 ] \
-       && [ $(( i - last_active_i )) -ge "${SHADER_STALL_GRACE:-180}" ]; then
-      if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
-        die "Vulkan shader compile stalled — no progress for ${SHADER_STALL_GRACE:-180}s and cs2 never launched"
-      elif [ ! -f "$skip_marker" ]; then
-        warn "  shader compile stalled (no progress ${SHADER_STALL_GRACE:-180}s) — auto-skipping to launch cs2"
-        : > "$skip_marker"
-      fi
+       && [ $(( i - last_active_i )) -ge "${SHADER_STALL_GRACE:-180}" ] \
+       && [ $(( i % 60 )) -eq 0 ]; then
+      warn "  shader compile quiet ${SHADER_STALL_GRACE:-180}s+ (cs2 not up yet) — still waiting; cancel the job in the UI if it's truly stuck"
     fi
 
     if [ "$i" -ge "$next_retry_at" ] && [ "$relaunch_count" -lt 4 ]; then
