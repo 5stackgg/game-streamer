@@ -40,6 +40,8 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/mman.h>
+#include <stdint.h>
+#include <immintrin.h>   // MOVNTDQA streaming loads for write-combined GPU memory
 #include <glib.h>
 #include <glib-unix.h>
 #include <gst/gst.h>
@@ -84,6 +86,18 @@ struct state {
     bool        playing;         // pipeline moved to PLAYING (on first frame)
     int         fps;
     guint64     frame_no;
+    GstBuffer  *last_buf;        // last good frame (CPU copy) — repeated while the
+                                 // layer is transiently gone (e.g. cs2 rebuilds its
+                                 // swapchain on a demo seek) so the stream holds
+                                 // instead of dying and tripping client reconnects
+
+    // optional HUD-overlay toggle (composite mode): poll VKCAP_HUD_CTL and
+    // set the compositor's HUD pad alpha, so the operator can hide/show the
+    // overlay without unmapping the grabbed window (which would break the
+    // ximagesrc xid grab). NULL pad => feature inactive.
+    GstPad     *hud_pad;
+    char       *hud_ctl_path;
+    int         hud_visible;      // last applied (1 visible / 0 hidden)
 };
 
 static struct state st = { .listen_fd = -1, .client_fd = -1 };
@@ -185,34 +199,93 @@ static void set_caps_if_needed(void)
             gfmt, st.width, st.height, st.fps, st.strides[0], st.flip);
 }
 
+// MOVNTDQA (streaming load) copy. The source is the layer's host-mapped GPU
+// buffer, which is write-combined: normal cached loads off WC memory crawl
+// (~1GB/s), so a plain memcpy of the frame pegged a core at 60fps. Streaming
+// loads read WC at near-DRAM bandwidth. Built with an explicit sse4.1 target so
+// no global -msse4.1 is needed; gated at the call site by a cpu-feature check.
+// Requires 16-byte-aligned src (page-aligned dmabuf + 16-aligned stride rows
+// satisfy this) and n a multiple of 16 (our frame/row sizes are).
+__attribute__((target("sse4.1")))
+static void wc_memcpy_sse41(uint8_t *dst, const uint8_t *src, size_t n)
+{
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        __m128i a = _mm_stream_load_si128((const __m128i *)(src + i));
+        __m128i b = _mm_stream_load_si128((const __m128i *)(src + i + 16));
+        __m128i c = _mm_stream_load_si128((const __m128i *)(src + i + 32));
+        __m128i d = _mm_stream_load_si128((const __m128i *)(src + i + 48));
+        _mm_storeu_si128((__m128i *)(dst + i),      a);
+        _mm_storeu_si128((__m128i *)(dst + i + 16), b);
+        _mm_storeu_si128((__m128i *)(dst + i + 32), c);
+        _mm_storeu_si128((__m128i *)(dst + i + 48), d);
+    }
+    for (; i + 16 <= n; i += 16) {
+        __m128i v = _mm_stream_load_si128((const __m128i *)(src + i));
+        _mm_storeu_si128((__m128i *)(dst + i), v);
+    }
+    _mm_sfence();
+    if (i < n) memcpy(dst + i, src + i, n - i);  // unaligned tail (rare)
+}
+
+// Copy a frame/row out of the write-combined GPU mapping. Uses the streaming-
+// load path when the CPU has SSE4.1 and src is 16-byte aligned; otherwise plain
+// memcpy (correct, just slow — same as before).
+static void wc_copy(void *dst, const void *src, size_t n)
+{
+    static int sse41 = -1;
+    if (sse41 < 0) sse41 = __builtin_cpu_supports("sse4.1");
+    if (sse41 && (((uintptr_t)src & 15u) == 0))
+        wc_memcpy_sse41((uint8_t *)dst, (const uint8_t *)src, n);
+    else
+        memcpy(dst, src, n);
+}
+
 static gboolean on_tick(gpointer user)
 {
     (void)user;
     // Push only once PLAYING (delayed to the first frame so pulsesrc audio starts
     // in lockstep with video).
-    if (!st.playing || !st.have_frame || !st.map_ptr || !st.appsrc) return G_SOURCE_CONTINUE;
+    if (!st.playing || !st.appsrc) return G_SOURCE_CONTINUE;
 
-    set_caps_if_needed();
+    GstBuffer *out = NULL;
 
-    // Copy the shared host-mapped image into a fresh buffer (the layer overwrites
-    // it on cs2's next present). Single plane assumed.
-    const size_t row = (size_t)st.strides[0];
-    const size_t sz  = row * (size_t)st.height;
-    GstBuffer *buf = gst_buffer_new_allocate(NULL, sz, NULL);
-    GstMapInfo mi;
-    if (!gst_buffer_map(buf, &mi, GST_MAP_WRITE)) { gst_buffer_unref(buf); return G_SOURCE_CONTINUE; }
+    if (st.have_frame && st.map_ptr) {
+        set_caps_if_needed();
 
-    const uint8_t *src = (const uint8_t *)st.map_ptr + st.offsets[0];
-    if (st.flip) {
-        for (int y = 0; y < st.height; y++)   // bottom-up -> top-down
-            memcpy(mi.data + (size_t)y * row, src + (size_t)(st.height - 1 - y) * row, row);
+        // Copy the shared host-mapped image into a fresh buffer (the layer
+        // overwrites it on cs2's next present). Single plane assumed.
+        const size_t row = (size_t)st.strides[0];
+        const size_t sz  = row * (size_t)st.height;
+        GstBuffer *buf = gst_buffer_new_allocate(NULL, sz, NULL);
+        GstMapInfo mi;
+        if (!gst_buffer_map(buf, &mi, GST_MAP_WRITE)) { gst_buffer_unref(buf); return G_SOURCE_CONTINUE; }
+
+        const uint8_t *src = (const uint8_t *)st.map_ptr + st.offsets[0];
+        if (st.flip) {
+            for (int y = 0; y < st.height; y++)   // bottom-up -> top-down
+                wc_copy(mi.data + (size_t)y * row, src + (size_t)(st.height - 1 - y) * row, row);
+        } else {
+            wc_copy(mi.data, src, sz);
+        }
+        gst_buffer_unmap(buf, &mi);
+
+        // Keep this as the "last good frame" to repeat if the layer blips.
+        if (st.last_buf) gst_buffer_unref(st.last_buf);
+        st.last_buf = gst_buffer_ref(buf);
+        out = buf;  // push (transfers ownership)
+    } else if (st.last_buf) {
+        // Layer transiently gone (cs2 rebuilt its swapchain on a demo seek):
+        // repeat the last good frame so the stream HOLDS instead of going dead.
+        // A dead stream stalls the client's video clock and trips its reconnect
+        // watchdog; a held frame keeps time advancing until cs2 comes back.
+        out = gst_buffer_ref(st.last_buf);
     } else {
-        memcpy(mi.data, src, sz);
+        return G_SOURCE_CONTINUE;  // nothing captured yet
     }
-    gst_buffer_unmap(buf, &mi);
 
     // PTS is stamped by appsrc (do-timestamp=TRUE); downstream videorate locks CFR.
-    GstFlowReturn fr = gst_app_src_push_buffer(st.appsrc, buf); // takes ownership
+    GstFlowReturn fr = gst_app_src_push_buffer(st.appsrc, out); // takes ownership
     if (fr != GST_FLOW_OK) {
         log_msg("appsrc push returned %d — stopping", fr);
         g_main_loop_quit(st.loop);
@@ -431,6 +504,27 @@ static int make_listen_socket(void)
     return fd;
 }
 
+// Composite HUD toggle: read VKCAP_HUD_CTL (first char "1"/"0") and, on change,
+// set the compositor HUD pad's alpha. The grabbed overlay window stays mapped
+// (unmapping it would break the ximagesrc xid grab), so this is purely a
+// mix-level show/hide. No-op until the file's value changes.
+static gboolean poll_hud_ctl(gpointer user)
+{
+    (void)user;
+    if (!st.hud_pad || !st.hud_ctl_path) return G_SOURCE_REMOVE;
+    FILE *f = fopen(st.hud_ctl_path, "r");
+    if (!f) return G_SOURCE_CONTINUE;
+    int c = fgetc(f);
+    fclose(f);
+    int v = (c == '0') ? 0 : (c == '1') ? 1 : st.hud_visible;
+    if (v != st.hud_visible) {
+        st.hud_visible = v;
+        g_object_set(st.hud_pad, "alpha", v ? 1.0 : 0.0, NULL);
+        log_msg("hud overlay %s (compositor alpha)", v ? "shown" : "hidden");
+    }
+    return G_SOURCE_CONTINUE;
+}
+
 int main(int argc, char **argv)
 {
     st.test_mode = getenv("VKCAP_TEST") && atoi(getenv("VKCAP_TEST")) != 0;
@@ -460,6 +554,24 @@ int main(int argc, char **argv)
         GstBus *bus = gst_element_get_bus(st.pipeline);
         gst_bus_add_watch(bus, on_bus, NULL);
         gst_object_unref(bus);
+        // Composite HUD toggle (optional): if the pipeline has a compositor
+        // named 'comp' and VKCAP_HUD_CTL is set, grab its HUD pad (sink_1 =
+        // overlay; sink_0 = cs2, see stream.sh) so poll_hud_ctl can alpha it.
+        const char *hud_ctl = getenv("VKCAP_HUD_CTL");
+        if (hud_ctl && *hud_ctl) {
+            GstElement *comp = gst_bin_get_by_name(GST_BIN(st.pipeline), "comp");
+            if (comp) {
+                st.hud_pad = gst_element_get_static_pad(comp, "sink_1");
+                gst_object_unref(comp);
+                if (st.hud_pad) {
+                    st.hud_ctl_path = g_strdup(hud_ctl);
+                    st.hud_visible = 1;   // stream.sh seeds the file to "1"
+                    log_msg("hud toggle armed (compositor sink_1 alpha <- %s)", hud_ctl);
+                } else {
+                    log_msg("hud toggle: compositor 'comp' has no sink_1 pad — toggle disabled");
+                }
+            }
+        }
         // READY (not PLAYING): we flip to PLAYING when the first frame arrives, so
         // the live pulsesrc audio starts together with video (no audio lead-in).
         gst_element_set_state(st.pipeline, GST_STATE_READY);
@@ -479,6 +591,7 @@ int main(int argc, char **argv)
         guint interval_ms = (guint)(1000 / st.fps);
         if (interval_ms < 1) interval_ms = 1;   // clamp: absurd VKCAP_FPS -> 0 -> busy loop
         st.tick_src = g_timeout_add(interval_ms, on_tick, NULL);
+        if (st.hud_pad) g_timeout_add(250, poll_hud_ctl, NULL);
     } else {
         // TEST mode always terminates: the layer may send texture metadata only
         // ONCE (then you sample asynchronously), so don't rely on the frame count.
@@ -491,6 +604,9 @@ int main(int argc, char **argv)
     g_main_loop_run(st.loop);
 
     // teardown
+    if (st.last_buf) gst_buffer_unref(st.last_buf);
+    if (st.hud_pad) gst_object_unref(st.hud_pad);
+    g_free(st.hud_ctl_path);
     if (st.pipeline) {
         gst_element_set_state(st.pipeline, GST_STATE_NULL);
         gst_object_unref(st.pipeline);

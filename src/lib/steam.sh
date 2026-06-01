@@ -874,9 +874,10 @@ set_cs2_launch_options() {
     return 0
   fi
   # Env prepended to %command%: the shader-cache flag always, plus OBS_VKCAPTURE=1
-  # when clips capture via the Vulkan present-hook (CLIP_CAPTURE_METHOD=vkcapture,
-  # the default). Steam strips exported env before -applaunch, so the obs-vkcapture
-  # implicit Vulkan layer can ONLY be enabled here in the launch options.
+  # when CLIP rendering uses the Vulkan present-hook (CLIP_CAPTURE_METHOD=vkcapture,
+  # the default). The layer also loads in live cs2 but is unused there (live
+  # captures cs2+HUD via ximagesrc) — harmless. Steam strips exported env before
+  # -applaunch, so the obs-vkcapture implicit Vulkan layer can ONLY be enabled here.
   local cap_env=""
   case "${CLIP_CAPTURE_METHOD:-vkcapture}" in
     vkcapture) cap_env="OBS_VKCAPTURE=1 " ;;

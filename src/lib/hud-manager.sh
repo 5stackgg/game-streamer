@@ -62,7 +62,23 @@ start_hud() {
     warn "HUD binary not found at $HUD_BIN"
     return 1
   fi
-  if hud_running; then return 0; fi
+  # A hud-manager from a prior run (dev re-run in the same pod) may still be
+  # alive but with its :$HUD_PORT server wedged — that holds the port so a
+  # fresh instance can't bind, and the old one never serves. Reuse it only if
+  # it's actually serving; otherwise kill the stale one and start clean.
+  if hud_running; then
+    if hud_server_up; then
+      log "hud-manager already running"
+      return 0
+    fi
+    local i=0
+    while [ "$i" -lt 5 ]; do
+      hud_server_up && { log "hud-manager already running"; return 0; }
+      sleep 1; i=$(( i + 1 ))
+    done
+    warn "existing hud-manager not serving on :$HUD_PORT — restarting it"
+    stop_hud; sleep 1
+  fi
   mkdir -p "$HUD_USERDATA"
   log "starting hud-manager"
   # HUD_AUTO_OVERLAY=1 → auto-overlay.patch opens the bundled `default`
@@ -77,12 +93,14 @@ start_hud() {
     spawn_logged hud-manager "$HUD_BIN" --no-sandbox --disable-gpu-sandbox --mute-audio
 }
 
-# Waits indefinitely — the only abort is the hud-manager process exiting.
-# Arg accepted for callsite compatibility but unused.
+# Wait up to <timeout>s (default 60) for the server to bind. Returns 1 on
+# timeout or if the process exits — callers recover (restart) rather than
+# hang forever waiting on a wedged instance.
 wait_for_hud_server() {
-  log "waiting for HUD server on :${HUD_PORT}"
+  local timeout="${1:-60}"
+  log "waiting for HUD server on :${HUD_PORT} (timeout ${timeout}s)"
   local i=0
-  while :; do
+  while [ "$i" -lt "$timeout" ]; do
     if hud_server_up; then
       log "  hud server up after ${i}s"
       return 0
@@ -95,6 +113,8 @@ wait_for_hud_server() {
     [ $(( i % 30 )) -eq 0 ] && log "  still waiting (${i}s)"
     sleep 1
   done
+  warn "hud server didn't come up within ${timeout}s"
+  return 1
 }
 
 stop_hud() { pkill -f "$HUD_BIN" 2>/dev/null || true; }

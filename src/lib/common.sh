@@ -320,11 +320,33 @@ _probe_nvh265enc_preset() {
   return 1
 }
 
+# Populate the NVENC pick cache for $codec in THIS shell if it's cold.
+# pick_h26{4,5}_pipeline is invoked as `enc=$(pick_… )`, so the export it does
+# happens in a SUBSHELL and never reaches the parent — and pick_scale_convert
+# then runs in its own subshell with a cold cache. Re-resolve here (the same
+# deterministic gst probe, stderr muted so the "encoder:" line isn't logged a
+# second time) so the scaler's CUDA-vs-CPU choice matches the encoder actually
+# selected. Without this the scaler picked CPU for a CUDA encoder → the
+# "CUDA encoder fed non-CUDA memory" warning + needless CPU scaling.
+_ensure_nvenc_pick() {
+  case "${1:-h264}" in
+    h265|hevc)
+      [ -n "${GS_NVENC_PICK_H265:-}" ] && return 0
+      GS_NVENC_PICK_H265=$(_resolve_h265_method 2>/dev/null) || true
+      export GS_NVENC_PICK_H265 ;;
+    *)
+      [ -n "${GS_NVENC_PICK:-}" ] && return 0
+      GS_NVENC_PICK=$(_resolve_h264_method 2>/dev/null) || true
+      export GS_NVENC_PICK ;;
+  esac
+}
+
 # True when the resolved NVENC element for $codec is the modern CUDA
-# encoder (nvcuda*), which consumes CUDA memory and so must be fed an
-# upload. Reads the cache that pick_h26{4,5}_pipeline already populated, so
-# call this only AFTER the encoder fragment has been resolved.
+# encoder (nvcuda*), which consumes CUDA memory and so must be fed an upload.
+# Self-heals a cold cache via _ensure_nvenc_pick so it's correct even when
+# called from a different subshell than the one that picked the encoder.
 _active_encoder_is_cuda() {
+  _ensure_nvenc_pick "${1:-h264}"
   case "${1:-h264}" in
     h265|hevc) [ "${GS_NVENC_PICK_H265:-}" = "nvcudah265enc" ] ;;
     *)         [ "${GS_NVENC_PICK:-}" = "nvcudah264enc" ] ;;
@@ -394,6 +416,28 @@ _assert_cuda_chain() {
         *) warn "BUG: CUDA encoder fed non-CUDA memory — pick_scale_convert must precede the encoder (convert='$1')" ;;
       esac ;;
   esac
+}
+
+# obs-vkcapture present-hook needs nvidia-drm modeset on (its dmabuf sharing).
+# True unless we have POSITIVE evidence it's off — the host kernel param is visible
+# via the shared /sys; unreadable/absent -> assume on (don't block the default path
+# on a missing sysfs).
+_drm_modeset_on() {
+  local f=/sys/module/nvidia_drm/parameters/modeset v
+  [ -r "$f" ] || return 0
+  v=$(cat "$f" 2>/dev/null)
+  [ "$v" != "N" ] && [ "$v" != "0" ]
+}
+
+# True when CLIP_CAPTURE_METHOD selects vkcapture AND it can run here (consumer
+# binary built + modeset on). Drives the present-hook for clips, and for the
+# live/demo composite (cs2 via present-hook + HUD overlay) in stream.sh. A miss =>
+# the ximagesrc fallback, which needs no DRM. NOTE: does not check cs2-running —
+# callers that capture pre-cs2 (DEBUG_STREAM boot) gate on that separately.
+vkcapture_available() {
+  [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] || return 1
+  command -v vkcapture-consumer >/dev/null 2>&1 || return 1
+  _drm_modeset_on
 }
 
 # Trap-friendly verbose toggle. `GS_TRACE=1 ./game-streamer.sh ...` runs

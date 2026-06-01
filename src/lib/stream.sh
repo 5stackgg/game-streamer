@@ -81,17 +81,12 @@ start_capture() {
     "$stream_id" "$fps" "$kbps" "$pointer" "$audio" \
     > "${args_dir}/capture-${stream_id}.args"
 
-  # A leaky decoupling queue sits right after ximagesrc in both pipelines
-  # below. Without it the X-framebuffer grab runs synchronously with the
-  # CPU videoscale/videoconvert + NVENC: any downstream hitch back-pressures
-  # the grabber, so its cadence drifts and motion stutters. leaky=downstream
-  # drops the oldest buffer instead of stalling the grab, keeping capture
-  # timing steady (NVENC keeps up easily, so it rarely actually drops).
-
+  # Resolve the audio source up front (both capture paths use it). Pin to our
+  # named null sink's .monitor — pactl's default can drift to hud-manager's Pulse
+  # client / silence.
+  local pulse_source=""
   if [ "$audio" = 1 ]; then
-    # Pin to our named null sink's .monitor — pactl's default can drift
-    # to hud-manager's Pulse client / silence.
-    local pulse_source="${pulse_sink}.monitor"
+    pulse_source="${pulse_sink}.monitor"
     if ! pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qx "$pulse_source"; then
       warn "  ${pulse_source} not present — falling back to default source"
       if command -v get_default_source >/dev/null 2>&1; then
@@ -101,34 +96,138 @@ start_capture() {
       fi
       [ -n "$pulse_source" ] || pulse_source="${pulse_sink}.monitor"
     fi
-    # Opus: mediamtx forwards straight to WebRTC without per-viewer transcode.
-    spawn_logged "$gst_tag" gst-launch-1.0 -e \
-      ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
-        ! video/x-raw,framerate="$fps"/1 \
-        ! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
-        ! $convert \
-        ! $enc \
-        ! $parse \
-        ! queue ! mux. \
-      pulsesrc device="$pulse_source" \
-        ! audio/x-raw,rate=48000,channels=2 \
-        ! audioconvert \
-        ! audioresample \
-        ! opusenc bitrate=128000 \
-        ! opusparse \
-        ! queue ! mux. \
-      mpegtsmux name=mux alignment=7 \
-        ! srtsink uri="$url" latency=200
-  else
-    spawn_logged "$gst_tag" gst-launch-1.0 -e \
-      ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
-        ! video/x-raw,framerate="$fps"/1 \
-        ! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
-        ! $convert \
-        ! $enc \
-        ! $parse \
-        ! mpegtsmux alignment=7 \
-        ! srtsink uri="$url" latency=200
+  fi
+
+  # COMPOSITE (cs2 present-hook + HUD overlay): capture cs2's swapchain via the
+  # vkcapture consumer (no X-server contention -> no gunfight stall) and overlay the
+  # JTs HUD on top in gst — instead of grabbing the picom-composited framebuffer
+  # (which stalls cs2). Used for live + demo playback when vkcapture is available,
+  # cs2 is running, and the fullscreen HUD overlay window exists. The HUD is grabbed
+  # at a low rate (it barely changes) so its X contention stays negligible. Any miss
+  # -> the plain ximagesrc grab below, which still includes the HUD (via picom).
+  # HUD grab rate. cs2's frames come off the present-hook (no X grab), so the
+  # only capture load on the X server is this HUD ximagesrc — a fraction of the
+  # old full-screen-fallback grab that caused the stutters. cs2 still PRESENTS
+  # through X (Vulkan X11), so a fullscreen HUD grab can still contend with
+  # cs2's present, but much less. 30fps is the smooth-HUD default; if a node
+  # stutters on kills/switches, lower HUD_CAPTURE_FPS or move to obs-glcapture.
+  local hud_xid="" used_composite=0 hud_fps="${HUD_CAPTURE_FPS:-30}"
+  # HUD show/hide control file (composite only): the consumer polls it and
+  # alphas the compositor's HUD pad, so the operator's hide/show toggle works
+  # without unmapping the grabbed window. Its presence also tells the spec-server
+  # we're in composite mode (so /spec/hud writes here instead of windowunmap).
+  # Clear any stale copy so a non-composite path doesn't look composite.
+  local hud_ctl="${LOG_DIR:-/tmp/game-streamer}/hud-visible"
+  rm -f "$hud_ctl"
+  if vkcapture_available \
+     && pgrep -f '/linuxsteamrt64/cs2' >/dev/null 2>&1 \
+     && command -v find_hud_overlay_window >/dev/null 2>&1; then
+    hud_xid=$(find_hud_overlay_window 2>/dev/null || true)
+  fi
+  if [ -n "$hud_xid" ]; then
+    log "  composite: cs2 present-hook + HUD overlay (xid=$hud_xid, hud=${hud_fps}fps)"
+    # sink_0 = cs2 (base), sink_1 = HUD on top. The HUD ximagesrc MUST carry alpha
+    # (BGRA) or it paints opaque over cs2 — verify this on-node first.
+    local cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
+    # leaky=downstream: a slow/blocked HUD grab drops its own frames instead of
+    # back-pressuring the compositor (which would stall the cs2 leg too).
+    local hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
+    # queue right after the compositor = a thread boundary: the software blend
+    # runs on the compositor's thread, while cudaupload+convert+encode-submit run
+    # on the queue's downstream thread. Without it the whole chain serializes on
+    # ONE core (profiled: that core pegs 100% while cs2 is fine, dropping the odd
+    # output frame -> micro-judder). Bounded by buffers only (these are big raw
+    # frames, so the default byte cap would throttle); non-leaky since NVENC keeps
+    # up — the queue just decouples cores, it stays near-empty.
+    local outchain="compositor name=comp background=black ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
+    local pipeline
+    if [ "$audio" = 1 ]; then
+      pipeline="$outchain ! queue ! mux. \
+$cs2_src \
+$hud_src \
+pulsesrc device=$pulse_source ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue ! mux. \
+mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=200"
+    else
+      pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=200 \
+$cs2_src \
+$hud_src"
+    fi
+    export VKCAP_FPS="$fps"
+    # Seed visible=1; consumer reads VKCAP_HUD_CTL and polls it for show/hide.
+    printf '1\n' > "$hud_ctl"
+    export VKCAP_HUD_CTL="$hud_ctl"
+    # Pin the capture pipeline to a dedicated set of high cores. Its many small
+    # gst threads otherwise pile (kernel wake-affinity) onto whatever core cs2 is
+    # using and peg it — profiled: one core at 100% while others idle, no single
+    # thread >65%, i.e. scheduling churn, not a hot op -> the odd dropped frame
+    # -> micro-judder. Reserve ~1/3 of cores (min 2) for capture; cs2 + the rest
+    # float on the low cores. Tunable/skippable via CAPTURE_CPUS (empty = no pin).
+    local capture_pin=()
+    if [ -z "${CAPTURE_CPUS+x}" ] && command -v taskset >/dev/null 2>&1; then
+      local _ncpu _capn _caplo
+      _ncpu=$(nproc 2>/dev/null || echo 0)
+      if [ "$_ncpu" -ge 4 ]; then
+        # Reserve a SMALL dedicated set for capture and give cs2 the rest. The
+        # pipeline measures ~1.7 cores (gst%cpu ~170%), so 2 is the floor — 1
+        # would bottleneck capture itself. Override the count with CAPTURE_CORES
+        # (e.g. once GPU compositing drops capture under 1 core, set it to 1).
+        _capn="${CAPTURE_CORES:-2}"
+        [ "$_capn" -lt 1 ] && _capn=1
+        [ "$_capn" -ge "$_ncpu" ] && _capn=$(( _ncpu - 1 ))
+        _caplo=$(( _ncpu - _capn ))
+        CAPTURE_CPUS="${_caplo}-$(( _ncpu - 1 ))"
+      fi
+    fi
+    if [ -n "${CAPTURE_CPUS:-}" ]; then
+      capture_pin=(taskset -c "$CAPTURE_CPUS")
+      log "  capture pinned to cores $CAPTURE_CPUS (off cs2's cores)"
+    fi
+    spawn_logged "$gst_tag" "${capture_pin[@]}" vkcapture-consumer "$pipeline"
+    sleep 1
+    if kill -0 "$SPAWNED_PID" 2>/dev/null; then
+      used_composite=1
+    else
+      warn "composite consumer died on spawn — falling back to ximagesrc"
+      rm -f "$hud_ctl"
+      unset VKCAP_HUD_CTL
+    fi
+  fi
+
+  # ximagesrc fallback — grabs the composited X display (cs2 + HUD via picom). Used
+  # when the composite is unavailable (no vkcapture / no cs2 / no HUD window, e.g.
+  # the DEBUG_STREAM boot watch) or its consumer died. leaky=downstream decouples
+  # the grab from convert+NVENC so a downstream hitch can't back-pressure the grab.
+  if [ "$used_composite" = 0 ]; then
+    if [ "$audio" = 1 ]; then
+      # Opus: mediamtx forwards straight to WebRTC without per-viewer transcode.
+      spawn_logged "$gst_tag" gst-launch-1.0 -e \
+        ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
+          ! video/x-raw,framerate="$fps"/1 \
+          ! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
+          ! $convert \
+          ! $enc \
+          ! $parse \
+          ! queue ! mux. \
+        pulsesrc device="$pulse_source" \
+          ! audio/x-raw,rate=48000,channels=2 \
+          ! audioconvert \
+          ! audioresample \
+          ! opusenc bitrate=128000 \
+          ! opusparse \
+          ! queue ! mux. \
+        mpegtsmux name=mux alignment=7 \
+          ! srtsink uri="$url" latency=200
+    else
+      spawn_logged "$gst_tag" gst-launch-1.0 -e \
+        ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
+          ! video/x-raw,framerate="$fps"/1 \
+          ! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 \
+          ! $convert \
+          ! $enc \
+          ! $parse \
+          ! mpegtsmux alignment=7 \
+          ! srtsink uri="$url" latency=200
+    fi
   fi
 
   # Liveness check — must survive pulse / NVENC init / srt handshake.

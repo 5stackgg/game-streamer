@@ -28,8 +28,12 @@ ITERS=$(( DURATION / INTERVAL )); [ "$ITERS" -lt 1 ] && ITERS=1
 CLK=$(getconf CLK_TCK 2>/dev/null || echo 100)
 NCPU=$(nproc 2>/dev/null || echo 1)
 
-# Prefer the live capture (ximagesrc); fall back to any gst-launch.
-GST_PID=$(pgrep -f 'gst-launch-1.0.*ximagesrc' | head -1)
+# Prefer the present-hook consumer (composite / clip path embeds the gst
+# pipeline in vkcapture-consumer), then the live ximagesrc capture, then any
+# gst-launch. The consumer's process CPU == the capture pipeline CPU
+# (compositor + convert + mux threads).
+GST_PID=$(pgrep -f 'vkcapture-consumer' | head -1)
+[ -z "$GST_PID" ] && GST_PID=$(pgrep -f 'gst-launch-1.0.*ximagesrc' | head -1)
 [ -z "$GST_PID" ] && GST_PID=$(pgrep -f 'gst-launch-1.0' | head -1)
 CS2_PID=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
 
@@ -43,7 +47,7 @@ if [ -n "$GST_PID" ]; then
     log "  scaler in use : videoscale/videoconvert (CPU)"
   fi
 else
-  warn "no gst-launch capture process found — is a stream running?"
+  warn "no capture process found (vkcapture-consumer / gst-launch) — is a stream running?"
 fi
 [ -n "$CS2_PID" ] && log "cs2 pid         : $CS2_PID" || warn "no cs2 process found"
 log "host            : ${NCPU} logical cores, CLK_TCK=${CLK}"

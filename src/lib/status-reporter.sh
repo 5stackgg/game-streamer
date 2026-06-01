@@ -8,8 +8,9 @@
 # auth: x-origin-auth: ${MATCH_ID}:${MATCH_PASSWORD}
 # body: flat JSON, e.g. {"status":"live","stream_url":"..."}
 #
-# Demo flow uses STATUS_REPORT_URL + STATUS_AUTH_TOKEN override (session
-# id + token, POSTs to /demo-sessions/:id/status instead).
+# Demo flow uses STATUS_REPORT_URL override (POSTs to
+# /demo-sessions/:id/status instead). That endpoint is cluster-internal
+# and unauthenticated, so no per-session token is sent.
 
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
@@ -44,11 +45,11 @@ fi
 # Auto-promote demo-session env to the override channel — whichever
 # script starts the reporter first picks up the right wiring.
 _promote_demo_session_env() {
-  if [ -z "$STATUS_REPORT_URL" ] \
-     && [ -n "${DEMO_SESSION_ID:-}" ] \
-     && [ -n "${DEMO_SESSION_TOKEN:-}" ]; then
+  if [ -z "$STATUS_REPORT_URL" ] && [ -n "${DEMO_SESSION_ID:-}" ]; then
     export STATUS_REPORT_URL="${STATUS_API_BASE}/demo-sessions/${DEMO_SESSION_ID}/status"
-    export STATUS_AUTH_TOKEN="${DEMO_SESSION_ID}:${DEMO_SESSION_TOKEN}"
+    # Endpoint is unauthenticated; send the session id as the auth value
+    # only so the daemon's config gate (needs a non-empty token) passes.
+    export STATUS_AUTH_TOKEN="${DEMO_SESSION_ID}"
   fi
 }
 

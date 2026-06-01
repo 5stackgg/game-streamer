@@ -114,11 +114,18 @@ start_steam
 wait_for_steam_pipe "$STEAM_PIPE_TIMEOUT" || die "pipe never came up"
 
 if [ "$HUD_DEFERRED" = "1" ]; then
-  if wait_for_hud_server 60; then
+  if ! wait_for_hud_server 60; then
+    # Wedged or never bound — restart once before giving up (boot continues
+    # either way; the overlay also self-heals via position_hud_overlay later).
+    warn "restarting hud-manager and waiting once more"
+    stop_hud; sleep 1; start_hud
+    wait_for_hud_server 30 || true
+  fi
+  if hud_server_up; then
     hide_hud_admin_window
     position_hud_overlay || warn "early overlay positioning failed — will retry after cs2"
   else
-    warn "hud-manager server didn't come up"
+    warn "hud-manager server didn't come up — continuing (overlay retried after cs2)"
   fi
 fi
 

@@ -51,15 +51,16 @@ else
 fi
 
 : "${FPS:=60}"
-# Cap cs2's render rate to the capture rate. ximagesrc grabs the X
-# framebuffer at $FPS on its own clock; if cs2 renders faster and
-# unsynchronized (the old +fps_max 120), the grabber samples a 120fps
-# source at 60fps and consecutive frames advance by an inconsistent
-# 8ms/16ms of game-time — beat-frequency judder that reads as stutter
-# even with the GPU far from saturated. Rendering at the capture rate
-# makes every grabbed frame fresh and evenly spaced. Override with
-# CS2_FPS_MAX (e.g. an exact 2x of FPS) to A/B against the old behavior.
-: "${CS2_FPS_MAX:=$FPS}"
+# Live capture is the cs2-present-hook + HUD composite when available (see
+# stream.sh): the consumer samples cs2's swapchain at the capture rate, so cs2 must
+# render ABOVE it for every sample to be fresh -> 2x headroom. The ximagesrc
+# fallback instead wants cs2 at the capture rate (evenly-spaced grabs). Explicit
+# CS2_FPS_MAX env wins either way.
+if vkcapture_available; then
+  : "${CS2_FPS_MAX:=$(( FPS * 2 ))}"
+else
+  : "${CS2_FPS_MAX:=$FPS}"
+fi
 # Per-node hardware tuning: GPU scale-offload (GS_GPU_SCALE) + GPU clock lock from
 # the detected GPU class (explicit env still wins; cs2 threads left to the engine).
 cs2_autotune

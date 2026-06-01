@@ -12,21 +12,10 @@
 #               gunfight-stutter fix). Needs nvidia-drm.modeset=1 on the host.
 #   ximagesrc — the gstreamer X11-grab pipeline; fallback if vkcapture can't start.
 # vkcapture is gated on three preflight checks (binary present, nvidia-drm modeset
-# on, consumer survives spawn); any miss => ximagesrc, which needs no DRM and
-# always works. The modeset gate matters because a modeset-off node would spawn the
-# consumer fine but never receive a dmabuf — so without it we'd produce empty
-# segments instead of degrading cleanly.
-
-# True unless we have POSITIVE evidence nvidia-drm modeset is off (vkcapture's
-# dmabuf sharing needs it). The host kernel param is visible via the shared /sys;
-# unreadable/absent -> assume on (don't block the default path on a missing sysfs).
-_drm_modeset_on() {
-  local f=/sys/module/nvidia_drm/parameters/modeset v
-  [ -r "$f" ] || return 0
-  v=$(cat "$f" 2>/dev/null)
-  [ "$v" != "N" ] && [ "$v" != "0" ]
-}
-
+# on — _drm_modeset_on in common.sh, consumer survives spawn); any miss => ximagesrc,
+# which needs no DRM and always works. The modeset gate matters because a modeset-off
+# node would spawn the consumer fine but never receive a dmabuf — so without it we'd
+# produce empty segments instead of degrading cleanly.
 start_clip_capture() {
   local method="${CLIP_CAPTURE_METHOD:-vkcapture}"
   if [ "$method" = "vkcapture" ]; then
