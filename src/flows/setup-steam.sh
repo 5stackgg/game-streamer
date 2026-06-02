@@ -101,6 +101,13 @@ disable_cloud_in_config_vdf
 disable_cs2_cloud
 print_cloud_state
 
+# Wipe Steam logs we detect from — never rotated, so stale lines get re-detected
+# every run (cloud conflict, shader + validate progress).
+for _lg in cloud_log shader_log content_log; do
+  rm -f "$STEAM_HOME/logs/${_lg}.txt" 2>/dev/null
+done
+log "wiped stale Steam detection logs (cloud/shader/content)"
+
 disable_overlay_globally
 disable_cs2_overlay
 print_overlay_state

@@ -1464,11 +1464,12 @@ validate_report_progress() {
   esac
 }
 
-# True if cloud_log shows a 730 conflict (the "Cloud Out of Date" modal trigger).
+# True if the FRESH (boot-wiped) cloud_log shows a 730 conflict — the "Cloud Out
+# of Date" trigger. Log is wiped on boot, so any hit is this run (not stale).
 cloud_conflict_active() {
   local f="${STEAM_HOME:-/root/.local/share/Steam}/logs/cloud_log.txt"
   [ -f "$f" ] || return 1
-  grep -aqE '\[AppID 730\].*creating a conflict' "$f" 2>/dev/null
+  grep -aqiE '\[AppID 730\].*conflict' "$f" 2>/dev/null
 }
 
 # wait_for_cs2_process <applaunch_fn>
@@ -1535,17 +1536,6 @@ wait_for_cs2_process() {
     # skip the shader compile we always want to run.
     [ "$skip_now" = 1 ] && poke_steam_dialog
 
-    # Auto-dismiss the "Cloud Out of Date" modal if it's blocking the launch.
-    # Gated on the cloud_log signature; capped; throttled ~4s (each does a grab).
-    if [ "$cloud_pokes" -lt "${CLOUD_DISMISS_MAX:-8}" ] && [ $(( i % 4 )) -eq 0 ] \
-       && declare -F cloud_conflict_active >/dev/null 2>&1 && cloud_conflict_active \
-       && declare -F dismiss_cloud_dialog >/dev/null 2>&1; then
-      if dismiss_cloud_dialog; then
-        cloud_pokes=$(( cloud_pokes + 1 ))
-        log "  dismissed Cloud Out of Date modal (attempt ${cloud_pokes}/${CLOUD_DISMISS_MAX:-8})"
-      fi
-    fi
-
     [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
 
     # Surface a Steam game-file validation pass (corrupt-files repair / partial
@@ -1566,6 +1556,16 @@ wait_for_cs2_process() {
       [ $(( i % 30 )) -eq 0 ] && log "  shaders still compiling — holding launch open"
       sleep 1
       continue
+    fi
+
+    # Cloud "Out of Date" modal: gate on the FRESH (boot-wiped) cloud_log — a 730
+    # conflict line means the modal is actually up THIS run. Only then dismiss.
+    # Fresh log = no stale false-positives (won't fire on the shader screen).
+    if [ "$cloud_pokes" -lt "${CLOUD_DISMISS_MAX:-1}" ] && [ $(( i % 4 )) -eq 0 ] \
+       && declare -F cloud_conflict_active >/dev/null 2>&1 && cloud_conflict_active \
+       && declare -F dismiss_cloud_dialog >/dev/null 2>&1 && dismiss_cloud_dialog; then
+      cloud_pokes=$(( cloud_pokes + 1 ))
+      log "  dismissed Cloud Out of Date modal"
     fi
 
     # Quiet/slow compile: never auto-skip or die — only the UI skip button
