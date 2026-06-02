@@ -218,7 +218,24 @@ install_cs2_via_steamcmd() {
   if [ -f "$manifest" ] && [ -x "$cs2_bin" ]; then
     local bid
     bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
-    log "CS2 already installed at $CS2_DIR (${bid:-buildid unknown}) — skip steamcmd"
+    # Live spectate stays pinned to the game-server build (skip updates to keep
+    # client/server in sync). Demo playback has no live server to match, and
+    # Steam refuses to launch an out-of-date build ("Update required"), so for
+    # demos bring CS2 current with a fast app_update (no validate; a no-op when
+    # already on the current build).
+    if [ -z "${DEMO_URL:-}" ]; then
+      log "CS2 already installed at $CS2_DIR (${bid:-buildid unknown}), skip steamcmd (pinned for live)"
+      return 0
+    fi
+    log "CS2 already installed (${bid:-buildid unknown}); demo render, updating to the current build"
+    report_status status=downloading_cs2
+    /opt/steamcmd/steamcmd.sh \
+      +@sSteamCmdForcePlatformType linux \
+      +force_install_dir "$CS2_DIR" \
+      +login "$STEAM_USER" "$STEAM_PASSWORD" \
+      +app_update 730 \
+      +quit 2>&1 | tee -a "$LOG_DIR/steamcmd-cs2-update.log" | _emit_cs2_progress_from_stdin
+    register_library "$STEAM_LIBRARY"
     return 0
   fi
 
@@ -1540,7 +1557,10 @@ wait_for_cs2_process() {
 
     # Surface a Steam game-file validation pass (corrupt-files repair / partial
     # update) as status=validating. Self-throttles; no-op when not validating.
-    validate_report_progress
+    # Capture whether it is actively validating so the no-launch timeout below
+    # never aborts a long but legitimate integrity check.
+    local validating_active=0
+    validate_report_progress && validating_active=1
 
     # Report compile progress + whether it's actively running (inline — no
     # bg process that can die and freeze the UI).
@@ -1566,6 +1586,19 @@ wait_for_cs2_process() {
        && declare -F dismiss_cloud_dialog >/dev/null 2>&1 && dismiss_cloud_dialog; then
       cloud_pokes=$(( cloud_pokes + 1 ))
       log "  dismissed Cloud Out of Date modal"
+    fi
+
+    # Fail fast on a genuine no-launch so the node frees instead of hanging
+    # forever. A cold shader compile may run well past any timeout, so we only
+    # bail when NO compile was ever seen (shaders_seen=0): cs2 never started and
+    # nothing is compiling means launch is blocked, most often Steam refusing an
+    # out-of-date build ("Update required"). die() reports status=error to every
+    # batch job (the UI shows it) and exits so the pod is reaped and the GPU node
+    # frees. The default is generous so a slow Steam first-boot (cs2 can spawn
+    # ~2 min in) is never clipped.
+    if [ "$shaders_seen" = 0 ] && [ "$validating_active" = 0 ] \
+       && [ "$i" -ge "${CS2_LAUNCH_TIMEOUT:-360}" ]; then
+      die "cs2 did not launch within ${CS2_LAUNCH_TIMEOUT:-360}s (no shader compile or game-file validation running); the CS2 build may need an update"
     fi
 
     # Quiet/slow compile: never auto-skip or die — only the UI skip button
