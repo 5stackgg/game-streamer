@@ -268,13 +268,7 @@ install_cs2_via_steamcmd() {
     local bid
     bid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" | head -1 || true)
     log "CS2 install OK — ${bid:-buildid unknown}"
-    # Re-register the library now that the appmanifest is in place. steamcmd
-    # (force_install_dir) rewrites $STEAM_HOME/steamapps/libraryfolders.vdf
-    # during the install, dropping the registration setup-steam wrote before
-    # this ran — so without re-registering here Steam boots with only the home
-    # library, loads 0 apps, and -applaunch 730 no-ops (cs2 never spawns; black
-    # stream). Only fresh installs need it; the "already installed" early-return
-    # above leaves an already-adopted library untouched.
+    # Re-register: steamcmd rewrote libraryfolders.vdf, dropping the pre-install entry.
     register_library "$STEAM_LIBRARY"
     return 0
   fi
@@ -471,6 +465,49 @@ print(f"  {cfg_path}: synthesized apps/{appid}/CloudEnabled=0 under Steam block"
 PY
 }
 
+# Print the userdata/<id> account id for the login account (STEAM_USER in
+# loginusers.vdf, else MostRecent); empty if unresolved.
+active_steam_accountid() {
+  local f
+  for f in "$STEAM_HOME/config/loginusers.vdf" "$HOME/.steam/steam/config/loginusers.vdf"; do
+    [ -f "$f" ] || continue
+    python3 - "$f" "${STEAM_USER:-}" <<'PY' && return 0
+import re, sys, pathlib
+src = pathlib.Path(sys.argv[1]).read_text(errors="ignore")
+want = (sys.argv[2] or "").strip().lower()
+best = None
+for m in re.finditer(r'"(7656\d{13})"\s*\{([^{}]*)\}', src):
+    sid, body = m.group(1), m.group(2)
+    am = re.search(r'"AccountName"\s*"([^"]*)"', body, re.I)
+    acct = am.group(1).lower() if am else ""
+    if want and acct == want:
+        best = sid; break
+    if re.search(r'"MostRecent"\s*"1"', body) and best is None:
+        best = sid
+if best:
+    print(int(best) - 76561197960265728)
+PY
+  done
+  return 1
+}
+
+# True if the login account still has CS2 cloud on (leftover 730 ledger, or no
+# CloudEnabled=0 in its localconfig). Unknown id → dirty.
+cs2_cloud_dirty_for_active() {
+  local aid lc
+  aid=$(active_steam_accountid 2>/dev/null) || return 0
+  [ -n "$aid" ] || return 0
+  [ -e "$STEAM_HOME/userdata/$aid/730/remotecache.vdf" ] && return 0
+  lc="$STEAM_HOME/userdata/$aid/config/localconfig.vdf"
+  [ -f "$lc" ] || return 0
+  # CloudEnabled "0" anywhere in the apps/730 block → clean. (Coarse 40-line
+  # window after the "730" key; good enough — the block is small.)
+  if grep -A40 '"730"' "$lc" 2>/dev/null | grep -qiE '"CloudEnabled"[[:space:]]+"0"'; then
+    return 1
+  fi
+  return 0
+}
+
 # Set Steam Cloud sync to OFF for CS2 in every user's per-account VDFs:
 #   localconfig.vdf  — local-only (rewritten on Steam shutdown)
 #   sharedconfig.vdf — synced across PCs (under userdata/<id>/7/remote)
@@ -505,6 +542,11 @@ disable_cs2_cloud() {
       log "disable_cs2_cloud: SteamID $steamid (under $root)"
       _vdf_disable_app_cloud "$user_dir/config/localconfig.vdf"
       _vdf_disable_app_cloud "$user_dir/7/remote/sharedconfig.vdf"
+      # Nuke the stale 730 cloud conflict state (local only; Steam-off).
+      if [ -d "$user_dir/730" ]; then
+        rm -rf "$user_dir/730" \
+          && log "disable_cs2_cloud:   cleared local 730 cloud state (userdata/$steamid/730)"
+      fi
       edited=1
     done
     shopt -u nullglob
@@ -1387,6 +1429,48 @@ wait_for_steam_pipe() {
   done
 }
 
+# Report status=validating while Steam verifies 730 game files (no % — CEF-only).
+# Parsed from content_log.txt. Returns 0 while validating, else 1.
+_VALIDATE_LOG_OFFSET=0
+_VALIDATE_LAST=""
+_validate_log_file() { printf '%s/logs/content_log.txt' "${STEAM_HOME:-/root/.local/share/Steam}"; }
+
+# Snapshot log size so we only read this run's lines. Call before the wait loop.
+validate_progress_reset() {
+  _VALIDATE_LOG_OFFSET=$(stat -c %s "$(_validate_log_file)" 2>/dev/null || echo 0)
+  _VALIDATE_LAST=""
+}
+
+validate_report_progress() {
+  local f line size
+  f="$(_validate_log_file)"
+  [ -f "$f" ] || return 1
+  size=$(stat -c %s "$f" 2>/dev/null || echo 0)
+  [ "$size" -lt "${_VALIDATE_LOG_OFFSET:-0}" ] && _VALIDATE_LOG_OFFSET=0
+  # Latest app-update state line for 730 this run.
+  line=$(tail -c "+$(( ${_VALIDATE_LOG_OFFSET:-0} + 1 ))" "$f" 2>/dev/null \
+    | grep -a 'AppID 730 App update changed' | tail -1)
+  case "$line" in
+    *Verifying*)
+      if [ "$_VALIDATE_LAST" != "validating" ]; then
+        _VALIDATE_LAST="validating"
+        log "validating CS2 game files (Steam integrity check)"
+        report_status status=validating >/dev/null 2>&1 || true
+      fi
+      return 0 ;;
+    *)
+      _VALIDATE_LAST=""
+      return 1 ;;
+  esac
+}
+
+# True if cloud_log shows a 730 conflict (the "Cloud Out of Date" modal trigger).
+cloud_conflict_active() {
+  local f="${STEAM_HOME:-/root/.local/share/Steam}/logs/cloud_log.txt"
+  [ -f "$f" ] || return 1
+  grep -aqE '\[AppID 730\].*creating a conflict' "$f" 2>/dev/null
+}
+
 # wait_for_cs2_process <applaunch_fn>
 #
 # Block until a /linuxsteamrt64/cs2 process appears, then set CS2_PID.
@@ -1396,19 +1480,10 @@ wait_for_steam_pipe() {
 # Side effects on each iteration:
 #   - poke_steam_dialog ONLY on operator skip (auto-poking would dismiss
 #     the shader modal and skip the compile we always want).
-#   - shader_report_progress (inline) reports compile % and pauses the
-#     applaunch-retry while a compile is active.
-#   - first retry at 8s, then every 30s, up to 4 retries: re-invoke
-#     <applaunch_fn>. Steam sometimes silently drops the very first
-#     applaunch on a cold login (logs "Steam is already running,
-#     command line was forwarded" but no cs2 follows). The 8s first
-#     retry covers that fast-drop path — empirically Steam either
-#     spawns cs2 within ~7s of a successful applaunch or never does.
-#     The 30s back-off on later retries covers the slower cases where
-#     Steam is still doing first-cold init (auth refresh, manifest
-#     sync) past the 30s mark — observed in the wild on a pod where
-#     cs2 only spawned after Steam finished its background update
-#     check ~2 min in.
+#   - shader_report_progress (inline) reports compile %.
+#   - we do NOT re-issue -applaunch — duplicate cs2 instances clash on the engine
+#     lock and wedge Steam in a phantom "running" state. <applaunch_fn> is kept
+#     for signature compat but no longer called.
 #   - at 60s/120s/180s: dump open X windows + console-linux.txt tail
 #     so a future failure leaves evidence (which dialog was up, what
 #     Steam was doing) instead of a silent 5-min wait.
@@ -1417,10 +1492,8 @@ wait_for_steam_pipe() {
 # export it). It must be a defined shell function in the caller's
 # scope; we invoke it as `"$1"`.
 wait_for_cs2_process() {
-  local applaunch_fn="${1:?applaunch function name required}"
-  local relaunch_count=0
-  local next_retry_at=8
-  local pid="" i=0
+  local applaunch_fn="${1:?applaunch function name required}"  # kept for signature compat; no longer re-invoked
+  local pid="" i=0 cloud_pokes=0
 
   # Operator "Skip shaders" signal (spec-server writes this file). Clear any
   # stale marker from a prior run so we don't auto-skip this one.
@@ -1431,8 +1504,10 @@ wait_for_cs2_process() {
   # Track last loop a compile was active, to detect a wedged/stalled one.
   local shaders_seen=0 last_active_i=0
 
-  # Ignore stale progress from a prior run (persistent shader_log.txt).
+  # Ignore stale progress from a prior run (persistent shader_log.txt /
+  # content_log.txt both append across runs).
   declare -F shader_progress_reset >/dev/null 2>&1 && shader_progress_reset
+  validate_progress_reset
 
   # Wait indefinitely — a cold shader compile can run well past any fixed
   # timeout and killing it mid-compile wastes the work. Operator cancels by
@@ -1460,7 +1535,22 @@ wait_for_cs2_process() {
     # skip the shader compile we always want to run.
     [ "$skip_now" = 1 ] && poke_steam_dialog
 
+    # Auto-dismiss the "Cloud Out of Date" modal if it's blocking the launch.
+    # Gated on the cloud_log signature; capped; throttled ~4s (each does a grab).
+    if [ "$cloud_pokes" -lt "${CLOUD_DISMISS_MAX:-8}" ] && [ $(( i % 4 )) -eq 0 ] \
+       && declare -F cloud_conflict_active >/dev/null 2>&1 && cloud_conflict_active \
+       && declare -F dismiss_cloud_dialog >/dev/null 2>&1; then
+      if dismiss_cloud_dialog; then
+        cloud_pokes=$(( cloud_pokes + 1 ))
+        log "  dismissed Cloud Out of Date modal (attempt ${cloud_pokes}/${CLOUD_DISMISS_MAX:-8})"
+      fi
+    fi
+
     [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
+
+    # Surface a Steam game-file validation pass (corrupt-files repair / partial
+    # update) as status=validating. Self-throttles; no-op when not validating.
+    validate_report_progress
 
     # Report compile progress + whether it's actively running (inline — no
     # bg process that can die and freeze the UI).
@@ -1484,13 +1574,6 @@ wait_for_cs2_process() {
        && [ $(( i - last_active_i )) -ge "${SHADER_STALL_GRACE:-180}" ] \
        && [ $(( i % 60 )) -eq 0 ]; then
       warn "  shader compile quiet ${SHADER_STALL_GRACE:-180}s+ (cs2 not up yet) — still waiting; cancel the job in the UI if it's truly stuck"
-    fi
-
-    if [ "$i" -ge "$next_retry_at" ] && [ "$relaunch_count" -lt 4 ]; then
-      relaunch_count=$(( relaunch_count + 1 ))
-      log "  ${i}s without cs2 — re-issuing -applaunch (retry ${relaunch_count}/4)"
-      "$applaunch_fn"
-      next_retry_at=$(( i + 30 ))
     fi
 
     case "$i" in

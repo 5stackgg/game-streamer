@@ -188,3 +188,58 @@ poke_steam_dialog() {
   sleep 0.1
   xdotool key --clearmodifiers space 2>/dev/null || true
 }
+
+# Steam-blue "Play anyway" button colour; override if a build's accent differs.
+: "${STEAM_BLUE:=#1a9fff}"
+
+# Click "Play anyway" on the "Cloud Out of Date" CEF modal (it ignores keystrokes,
+# so poke_steam_dialog won't work). Colour-finds the button in the Steam window's
+# centre region; clicks only if found. Returns 0 if clicked, else 1.
+dismiss_cloud_dialog() {
+  command -v xdotool >/dev/null 2>&1 || return 1
+  local wid
+  wid=$(wmctrl -lx 2>/dev/null | awk '$3=="steamwebhelper.steam" && $NF=="Steam"{print $1; exit}')
+  [ -z "$wid" ] && wid=$(find_main_steam_window 2>/dev/null)
+  [ -z "$wid" ] && return 1
+
+  local X Y WIDTH HEIGHT
+  eval "$(xdotool getwindowgeometry --shell "$wid" 2>/dev/null)" || return 1
+  [ "${WIDTH:-0}" -gt 0 ] && [ "${HEIGHT:-0}" -gt 0 ] || return 1
+
+  # Centre region where the modal lives.
+  local cw ch cx cy
+  cw=$(( WIDTH  * 60 / 100 )); ch=$(( HEIGHT * 55 / 100 ))
+  cx=$(( WIDTH  * 20 / 100 )); cy=$(( HEIGHT * 25 / 100 ))
+
+  # No ImageMagick → click by fixed offset from window centre (modal is centred).
+  if ! command -v import >/dev/null 2>&1 || ! command -v convert >/dev/null 2>&1; then
+    xdotool mousemove --sync $(( X + WIDTH/2 + ${CLOUD_BTN_DX:-90} )) $(( Y + HEIGHT/2 + ${CLOUD_BTN_DY:-104} )) click 1 2>/dev/null
+    return 0
+  fi
+
+  local shot="${LOG_DIR:-/tmp}/cloud-modal.png"
+  import -window "$wid" -crop "${cw}x${ch}+${cx}+${cy}" +repage "$shot" 2>/dev/null || return 1
+
+  # Blue button → white, rest → black; read the blob bbox (WxH+X+Y in the crop).
+  local geom bw bh bx by
+  geom=$(convert "$shot" -fuzz 18% -fill white -opaque "$STEAM_BLUE" \
+                 -fill black +opaque white -format '%@' info: 2>/dev/null)
+  case "$geom" in *x*+*+*) : ;; *) return 1 ;; esac
+  bw=${geom%%x*}; geom=${geom#*x}
+  bh=${geom%%+*}; geom=${geom#*+}
+  bx=${geom%%+*}; by=${geom##*+}
+
+  # Reject a stray pixel or a region-filling match (= no distinct button).
+  if ! { [ "${bw:-0}" -ge 24 ] && [ "${bw:-0}" -le $(( cw*70/100 )) ] \
+         && [ "${bh:-0}" -ge 10 ] && [ "${bh:-0}" -le $(( ch*40/100 )); }; then
+    log "dismiss_cloud_dialog: no Play-anyway button in modal region (blob ${bw:-?}x${bh:-?}) — not clicking"
+    return 1
+  fi
+
+  local clickx clicky
+  clickx=$(( X + cx + bx + bw/2 ))
+  clicky=$(( Y + cy + by + bh/2 ))
+  log "dismiss_cloud_dialog: clicking Play anyway at ${clickx},${clicky} (button ${bw}x${bh})"
+  xdotool mousemove --sync "$clickx" "$clicky" click 1 2>/dev/null
+  return 0
+}

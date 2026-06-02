@@ -76,9 +76,8 @@ write_steam_dev_cfg   # pin fossilize fork count to the pod's cores
 mkdir -p "$STEAM_LIBRARY/steamapps/common"
 register_library "$STEAM_LIBRARY"
 
-# Steam is OFF here so steamcmd and Steam don't fight over appmanifest.
-# A fresh install re-registers the library at the end (steamcmd rewrites
-# libraryfolders.vdf) — see install_cs2_via_steamcmd.
+# Steam OFF so steamcmd and Steam don't fight over appmanifest. A fresh install
+# re-registers the library at the end — see install_cs2_via_steamcmd.
 install_cs2_via_steamcmd
 
 # Warm boot = userdata + loginusers.vdf cached → Steam reuses the
@@ -179,10 +178,12 @@ report_status status=logging_in
 wait_for_main_steam_window "${STEAM_WINDOW_TIMEOUT:-300}" \
   || die "main Steam window not visible — Steam may still be downloading runtimes"
 
-# First-boot auto-cycle: Steam has now written a fresh localconfig.vdf
-# with cloud sync re-ENABLED. SIGKILL (in kill_steam) avoids a graceful
-# shutdown rewriting our edits from in-memory state.
-if [ "$HAD_USERDATA" = 0 ]; then
+# Post-login: re-disable cloud for the login account (boot-time pass misses an
+# account Steam only creates at login), then restart so Steam reads it. Runs on
+# COLD boot or when cloud's still dirty for the account. SIGKILL avoids a
+# graceful-shutdown rewrite of our edits.
+if [ "$HAD_USERDATA" = 0 ] || cs2_cloud_dirty_for_active; then
+  log "post-login cloud cycle: disabling CS2 cloud for the logged-in account + restarting"
   for _ in $(seq 1 20); do
     [ -d "$STEAM_HOME/userdata" ] && break
     sleep 0.5
