@@ -2,8 +2,8 @@
 {
 	"setting.defaultres"		"1920"
 	"setting.defaultresheight"		"1080"
-	"setting.refreshrate_numerator"		"0"
-	"setting.refreshrate_denominator"		"0"
+	"setting.refreshrate_numerator"		"60"
+	"setting.refreshrate_denominator"		"1"
 	"setting.fullscreen"		"0"
 	"setting.mat_vsync"		"0"
 	"setting.monitor_index"		"0"
