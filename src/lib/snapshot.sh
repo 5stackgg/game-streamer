@@ -1,42 +1,27 @@
 # shellcheck shell=bash
-# Periodic JPEG snapshots of the X display while a live match is being
-# captured. No sidecar — runs as a background bash loop inside this pod,
-# grabbing one frame from the SAME $DISPLAY ximagesrc the live encoder
-# already reads. mediamtx has no built-in snapshot endpoint, so we
-# produce the thumbnail in the producer pod and post it to the api,
-# which caches it briefly in Redis for any web client to fetch.
-#
-# Tunables (env, all optional):
-#   SNAPSHOT_INTERVAL_SECONDS  cadence between captures (default 30)
-#   SNAPSHOT_WIDTH             output JPEG width   (default 640)
-#   SNAPSHOT_HEIGHT            output JPEG height  (default 360)
-#   SNAPSHOT_QUALITY           jpegenc quality 0-100 (default 70)
-#
-# Auth: x-origin-auth: ${MATCH_ID}:${MATCH_PASSWORD} — same shape as
-# status-reporter, so MATCH_PASSWORD is already populated by the time
-# run-live.sh sources us.
 
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 : "${STATUS_API_BASE:=http://api:5585}"
 : "${SNAPSHOT_INTERVAL_SECONDS:=30}"
-: "${SNAPSHOT_WIDTH:=640}"
-: "${SNAPSHOT_HEIGHT:=360}"
+: "${SNAPSHOT_BOOT_INTERVAL_SECONDS:=5}"
+: "${SNAPSHOT_WIDTH:=1920}"
+: "${SNAPSHOT_HEIGHT:=1080}"
 : "${SNAPSHOT_QUALITY:=70}"
 : "${SNAPSHOT_PID_FILE:=$LOG_DIR/snapshot.pid}"
 : "${SNAPSHOT_FILE:=$LOG_DIR/snapshot.jpg}"
-: "${SNAPSHOT_INITIAL_DELAY_SECONDS:=5}"
+: "${STATUS_LAST_FILE:=$LOG_DIR/status.last}"
 
 # One-shot frame grab via gst-launch num-buffers=1 — independent of the
 # live encode pipeline, so a hiccup here can't drop the broadcast.
 _snapshot_capture_one() {
   local out="$1"
   local tmp="${out}.tmp.$$"
-  if gst-launch-1.0 -q \
+  if nice -n 19 gst-launch-1.0 -q \
        ximagesrc display-name="$DISPLAY" use-damage=0 num-buffers=1 show-pointer=false \
        ! videoconvert \
-       ! videoscale method=lanczos \
+       ! videoscale method=bilinear \
        ! "video/x-raw,width=${SNAPSHOT_WIDTH},height=${SNAPSHOT_HEIGHT}" \
        ! jpegenc quality="${SNAPSHOT_QUALITY}" \
        ! filesink location="$tmp" \
@@ -49,40 +34,83 @@ _snapshot_capture_one() {
   return 1
 }
 
+_snapshot_targets() {
+  if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -n "${CLIP_BATCH_JOBS:-}" ]; then
+    local helpers="${LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/clip-helpers.mjs"
+    [ -f "$helpers" ] || return 0
+    command -v node >/dev/null 2>&1 || return 0
+    local id token
+    printf '%s' "$CLIP_BATCH_JOBS" \
+      | node "$helpers" jobs-credentials 2>/dev/null \
+      | while IFS=$'\t' read -r id token; do
+          [ -n "$id" ] && [ -n "$token" ] || continue
+          printf '%s/clip-renders/%s/snapshot\t%s:%s\n' \
+            "$STATUS_API_BASE" "$id" "$id" "$token"
+        done
+    return 0
+  fi
+  if [ -n "${BAKE_NODE_ID:-}" ]; then
+    printf '%s/game-server-nodes/%s/snapshot\t%s\n' \
+      "$STATUS_API_BASE" "$BAKE_NODE_ID" "$BAKE_NODE_ID"
+    return 0
+  fi
+  if [ -n "${DEMO_SESSION_ID:-}" ]; then
+    printf '%s/demo-sessions/%s/snapshot\t%s\n' \
+      "$STATUS_API_BASE" "$DEMO_SESSION_ID" "$DEMO_SESSION_ID"
+    return 0
+  fi
+  if [ -n "${MATCH_ID:-}" ] && [ -n "${MATCH_PASSWORD:-}" ]; then
+    printf '%s/game-streamer/%s/snapshot\t%s:%s\n' \
+      "$STATUS_API_BASE" "$MATCH_ID" "$MATCH_ID" "$MATCH_PASSWORD"
+    return 0
+  fi
+}
+
 _snapshot_upload() {
   local file="$1"
   [ -s "$file" ] || return 1
 
-  if [ -z "${MATCH_ID:-}" ] || [ -z "${MATCH_PASSWORD:-}" ]; then
-    return 1
-  fi
+  local targets
+  targets=$(_snapshot_targets)
+  [ -n "$targets" ] || return 1
 
-  local url="${STATUS_API_BASE}/game-streamer/${MATCH_ID}/snapshot"
-  local auth="${MATCH_ID}:${MATCH_PASSWORD}"
+  local url auth http_code rc=1
+  while IFS=$'\t' read -r url auth; do
+    [ -n "$url" ] || continue
+    local hdr=()
+    [ -n "$auth" ] && hdr=(-H "x-origin-auth: ${auth}")
+    http_code=$(curl -sS -m 10 -X POST \
+      "${hdr[@]}" \
+      -F "file=@${file};type=image/jpeg" \
+      -o /dev/null \
+      -w '%{http_code}' \
+      "$url" 2>/dev/null) || http_code=""
+    case "$http_code" in
+      2*) rc=0 ;;
+      *) warn "snapshot upload failed: http=${http_code:-<none>} url=${url}" ;;
+    esac
+  done <<< "$targets"
+  return "$rc"
+}
 
-  local http_code
-  http_code=$(curl -sS -m 10 -X POST \
-    -H "x-origin-auth: ${auth}" \
-    -F "file=@${file};type=image/jpeg" \
-    -o /dev/null \
-    -w '%{http_code}' \
-    "$url" 2>/dev/null) || http_code=""
+_snapshot_booted() {
+  [ -f "$STATUS_LAST_FILE" ] || return 1
+  local st
+  IFS='|' read -r st _ <"$STATUS_LAST_FILE" 2>/dev/null || return 1
+  [ "$st" = "live" ]
+}
 
-  case "$http_code" in
-    2*) return 0 ;;
-    *)
-      warn "snapshot upload failed: http=${http_code:-<none>}"
-      return 1
-      ;;
-  esac
+snapshot_once() {
+  snapshot_running || return 0
+  {
+    _snapshot_capture_one "${SNAPSHOT_FILE}.step" \
+      && _snapshot_upload "${SNAPSHOT_FILE}.step"
+    rm -f "${SNAPSHOT_FILE}.step"
+  } >/dev/null 2>&1 &
 }
 
 _snapshot_loop() {
-  # Warm-up: cs2 needs to paint a frame before the first snapshot,
-  # otherwise the thumbnail is a black loading screen.
-  sleep "$SNAPSHOT_INITIAL_DELAY_SECONDS"
-
-  local start sleep_for
+  local start sleep_for interval
   while :; do
     start=$(date +%s)
     if _snapshot_capture_one "$SNAPSHOT_FILE"; then
@@ -90,8 +118,13 @@ _snapshot_loop() {
     else
       warn "snapshot capture failed"
     fi
+    if _snapshot_booted; then
+      interval="$SNAPSHOT_INTERVAL_SECONDS"
+    else
+      interval="$SNAPSHOT_BOOT_INTERVAL_SECONDS"
+    fi
     local elapsed=$(( $(date +%s) - start ))
-    sleep_for=$(( SNAPSHOT_INTERVAL_SECONDS - elapsed ))
+    sleep_for=$(( interval - elapsed ))
     [ "$sleep_for" -lt 1 ] && sleep_for=1
     sleep "$sleep_for"
   done
@@ -105,8 +138,8 @@ snapshot_running() {
 }
 
 start_snapshot_loop() {
-  if [ -z "${MATCH_ID:-}" ] || [ -z "${MATCH_PASSWORD:-}" ]; then
-    log "snapshot: disabled (MATCH_ID/MATCH_PASSWORD unset)"
+  if [ -z "$(_snapshot_targets)" ]; then
+    log "snapshot: disabled (no snapshot target for this pod)"
     return 0
   fi
   if snapshot_running; then
@@ -114,7 +147,7 @@ start_snapshot_loop() {
   fi
   _snapshot_loop &
   echo $! >"$SNAPSHOT_PID_FILE"
-  log "snapshot: started (interval=${SNAPSHOT_INTERVAL_SECONDS}s ${SNAPSHOT_WIDTH}x${SNAPSHOT_HEIGHT} q=${SNAPSHOT_QUALITY})"
+  log "snapshot: started (interval=${SNAPSHOT_BOOT_INTERVAL_SECONDS}s booting/${SNAPSHOT_INTERVAL_SECONDS}s cs2-up ${SNAPSHOT_WIDTH}x${SNAPSHOT_HEIGHT} q=${SNAPSHOT_QUALITY})"
 }
 
 stop_snapshot_loop() {

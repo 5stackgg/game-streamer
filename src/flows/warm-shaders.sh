@@ -19,6 +19,8 @@ SCRIPT_TAG=warm-shaders
 . "$LIB_DIR/shader-cache.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/snapshot.sh"
 
 load_env
 
@@ -27,6 +29,8 @@ start_status_reporter
 steam_pipe_up || die "Steam isn't running"
 xorg_running  || die "Xorg isn't up"
 restore_real_steamclient
+
+start_snapshot_loop || warn "start_snapshot_loop failed — continuing without thumbnails"
 
 pkill -9 -f '/linuxsteamrt64/cs2' 2>/dev/null || true
 rm -f /tmp/source_engine_*.lock

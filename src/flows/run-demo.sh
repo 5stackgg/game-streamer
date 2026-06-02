@@ -27,6 +27,8 @@ SCRIPT_TAG=run-demo
 . "$LIB_DIR/hud-manager.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/snapshot.sh"
 
 load_env
 require_env MATCH_ID DEMO_URL
@@ -68,6 +70,8 @@ mkdir -p "$(dirname "$DEMO_FILE")"
 steam_pipe_up || die "Steam isn't running"
 xorg_running  || die "Xorg isn't up"
 restore_real_steamclient
+
+start_snapshot_loop || warn "start_snapshot_loop failed — continuing without thumbnails"
 
 pkill -9 -f '/linuxsteamrt64/cs2' 2>/dev/null || true
 stop_capture "$MATCH_ID"
@@ -342,6 +346,7 @@ fi
 # exit so the Job is reaped. cs2 launch is ~60-90s; reusing the
 # instance turns N clips × 90s overhead into a single launch.
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
+  stop_snapshot_loop
   # shellcheck disable=SC1091
   . "$LIB_DIR/batch-highlights.sh"
   process_batch_jobs

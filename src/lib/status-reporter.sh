@@ -226,6 +226,9 @@ report_status() {
       log "status=$new_status (first status report)"
     fi
     printf '%s|%s\n' "$new_status" "$now" >"$STATUS_LAST_FILE"
+    if [ "$prev_status" != "$new_status" ]; then
+      command -v snapshot_once >/dev/null 2>&1 && snapshot_once
+    fi
   fi
 
   broadcast_batch_status "$@" || true

@@ -77,6 +77,8 @@ steam_pipe_up || die "Steam isn't running"
 xorg_running  || die "Xorg isn't up"
 restore_real_steamclient
 
+start_snapshot_loop || warn "start_snapshot_loop failed — will continue without thumbnails"
+
 pkill -9 -f '/linuxsteamrt64/cs2' 2>/dev/null || true
 stop_capture "$MATCH_ID"
 sleep 1
@@ -260,10 +262,6 @@ fi
 # 5th arg = 1 → include PulseAudio leg.
 start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
   || die "capture failed to publish"
-
-# Periodic JPEG thumbnails for the watch-page preview tiles. Failures
-# here are non-fatal — the broadcast is the source of truth.
-start_snapshot_loop || warn "start_snapshot_loop failed — will continue without thumbnails"
 
 report_status status=live \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"

@@ -21,6 +21,8 @@ SCRIPT_TAG=setup-steam
 . "$LIB_DIR/spec-server.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/snapshot.sh"
 
 load_env
 require_env STEAM_USER STEAM_PASSWORD
@@ -30,6 +32,7 @@ require_env STEAM_USER STEAM_PASSWORD
 start_status_reporter
 
 start_xorg
+start_snapshot_loop || warn "start_snapshot_loop failed — continuing without thumbnails"
 start_pulseaudio
 start_spec_server
 
