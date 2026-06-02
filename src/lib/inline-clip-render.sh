@@ -626,7 +626,11 @@ PROGRESS_BASE=0.05
 PROGRESS_SPAN=0.95
 ELAPSED_TICKS_TOTAL=0
 
-for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
+# Explicit index (not a `for` over seq) so an empty vkcapture segment can redo
+# the SAME index once after falling back to ximagesrc (see validation below).
+SEG_IDX=0
+VKCAP_FELL_BACK=0
+while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   SEG_START=$(printf '%s' "$CLIP_SEGMENTS" \
     | node "$CLIP_HELPERS" seg-start-tick "$SEG_IDX")
   SEG_END=$(printf '%s' "$CLIP_SEGMENTS" \
@@ -647,7 +651,7 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   SEG_TICKS=$((SEG_END - SEG_START))
   if [ "$SEG_TICKS" -le 0 ]; then
     say "WARN segment $SEG_IDX: invalid ticks start=${SEG_START} end=${SEG_END} — dropping segment"
-    continue
+    SEG_IDX=$((SEG_IDX + 1)); continue
   fi
   SEG_DURATION_MS=$(awk -v t="$SEG_TICKS" -v r="${CLIP_TICK_RATE:-64}" \
     'BEGIN{printf "%d", t / r * 1000}')
@@ -878,17 +882,31 @@ for SEG_IDX in $(seq 0 $((SEG_COUNT - 1))); do
   if [ "$IS_VALID" = "1" ]; then
     say "  segment $SEG_IDX OK (${SEG_BYTES}B, ${SEG_REAL_DUR}s)"
     printf "file '%s'\n" "$SEG_FILE" >>"$SEG_DIR/concat.txt"
+  elif [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] && [ "$VKCAP_FELL_BACK" = "0" ]; then
+    # Empty under vkcapture = the present-hook delivered no frames (e.g. the GTX
+    # 980 can't host-map the layer's dmabuf: "mmap(fd0) failed: Invalid argument").
+    # ximagesrc needs no dmabuf, so switch the whole render to it and redo this
+    # segment. One-shot (VKCAP_FELL_BACK): the failure is per-pod, never thrashes.
+    say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) — falling back to ximagesrc and retrying"
+    CLIP_CAPTURE_METHOD=ximagesrc; export CLIP_CAPTURE_METHOD
+    VKCAP_FELL_BACK=1
+    rm -f "$SEG_FILE"
+    continue   # retry same SEG_IDX (index not advanced)
   else
     say "WARN segment $SEG_IDX is empty/short (${SEG_BYTES}B, ${SEG_REAL_DUR}s) — dropping from concat"
     rm -f "$SEG_FILE"
   fi
   ELAPSED_TICKS_TOTAL=$((ELAPSED_TICKS_TOTAL + SEG_TICKS))
+  SEG_IDX=$((SEG_IDX + 1))
 done
 
 # Recompute SEG_COUNT from what actually ended up in concat.txt —
 # downstream fade pass + concat decisions need the real count, not
 # the originally-requested count.
-SEG_COUNT=$(grep -c "^file " "$SEG_DIR/concat.txt" 2>/dev/null || echo 0)
+# grep -c prints "0" AND exits 1 on zero matches; a `|| echo 0` would append a
+# second line ("0\n0"), which breaks the -lt guard + the $((+1)) below. Reassign
+# on failure instead so SEG_COUNT is always a single integer.
+SEG_COUNT=$(grep -c "^file " "$SEG_DIR/concat.txt" 2>/dev/null) || SEG_COUNT=0
 if [ "$SEG_COUNT" -lt 1 ]; then
   die_failed "all segments produced empty captures — cs2 may be stalled"
 fi
