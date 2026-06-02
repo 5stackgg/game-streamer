@@ -101,9 +101,17 @@ process_batch_jobs() {
   #     lands on tick 0 of an unloaded demo, captures black)
   #   demoui_hidden=true → spec-server delivered the demoui-toggle
   #     post-GSI (else first render captures the panorama panel)
-  # No timeout — the parent k8s Job's activeDeadlineSeconds is the
-  # ultimate ceiling.
+  # Fail fast instead of hanging here forever: this loop otherwise has
+  # no ceiling (the k8s Job has no activeDeadlineSeconds). A demo cs2
+  # cannot play (e.g. recorded on an older build) logs
+  # NETWORK_DISCONNECT_REPLAY_INCOMPATIBLE in console.log and never
+  # becomes ready; die() broadcasts status=error to every batch job (so
+  # the UI shows the reason) and exits so the Job is reaped and the GPU
+  # node frees. DEMO_READY_TIMEOUT is a backstop for any other
+  # never-ready cause.
   say "waiting for demo-ready (GSI + demoui_hidden)"
+  local console_log="$CS2_DIR/game/csgo/console.log"
+  local demo_ready_timeout="${DEMO_READY_TIMEOUT:-300}"
   local waited=0
   while :; do
     local s ready
@@ -113,6 +121,12 @@ process_batch_jobs() {
     if [ -n "$s" ]; then
       ready=$(printf '%s' "$s" | node "$CLIP_HELPERS" demoui-hidden)
       [ "$ready" = "1" ] && break
+    fi
+    if grep -q 'NETWORK_DISCONNECT_REPLAY_INCOMPATIBLE' "$console_log" 2>/dev/null; then
+      die "demo is incompatible with the current CS2 version and can no longer be rendered"
+    fi
+    if [ "$waited" -ge "$demo_ready_timeout" ]; then
+      die "cs2 did not load the demo within ${demo_ready_timeout}s; aborting render"
     fi
     waited=$((waited + 1))
     [ $((waited % 15)) -eq 0 ] && say "  still waiting (${waited}s)"
