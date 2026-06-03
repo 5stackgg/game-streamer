@@ -120,6 +120,25 @@ export async function hudHandler(_req, res, body) {
   sendJson(res, 200, { ok: true, visible, window: overlayId });
 }
 
+// Variant currently shown on the overlay. Seeded from the pod's
+// HUD_MODE (the api-resolved default that hud-manager.sh forwards as
+// HUD_VARIANT) and updated whenever the operator switches mode below,
+// so hudReloadHandler can rebuild the same layout.
+let activeHudVariant = process.env.HUD_VARIANT || process.env.HUD_MODE || "horizontal";
+
+async function startDefaultOverlay(variant) {
+  const r = await fetch(`http://${HUD_HOST}:${HUD_PORT}/api/overlay/start`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ hudId: "default", variant }),
+  });
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    return { ok: false, status: r.status, body: text.slice(0, 200) };
+  }
+  return { ok: true };
+}
+
 // "mode" here maps to a HUD variant — JTs Hud's default bundle
 // declares ["default","horizontal","vertical"] in its hud.json and
 // switches layout based on the `?variant=` query param (see the admin
@@ -134,17 +153,30 @@ export async function hudModeHandler(_req, res, body) {
     return;
   }
   try {
-    const r = await fetch(`http://${HUD_HOST}:${HUD_PORT}/api/overlay/start`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ hudId: "default", variant: mode }),
-    });
+    const r = await startDefaultOverlay(mode);
     if (!r.ok) {
-      const text = await r.text().catch(() => "");
-      sendJson(res, 502, { error: "hud-manager rejected overlay/start", status: r.status, body: text.slice(0, 200) });
+      sendJson(res, 502, { error: "hud-manager rejected overlay/start", status: r.status, body: r.body });
       return;
     }
+    activeHudVariant = mode;
     sendJson(res, 200, { ok: true, mode });
+  } catch (err) {
+    sendJson(res, 502, { error: "hud-manager unreachable", detail: String(err) });
+  }
+}
+
+// Rebuild the overlay BrowserWindow against the current variant — a
+// fresh page load that re-fetches player metadata and images. Lets
+// operators push a mid-match image swap to the live HUD without
+// flipping layouts (previously the only way to force a reload).
+export async function hudReloadHandler(_req, res, _body) {
+  try {
+    const r = await startDefaultOverlay(activeHudVariant);
+    if (!r.ok) {
+      sendJson(res, 502, { error: "hud-manager rejected overlay/start", status: r.status, body: r.body });
+      return;
+    }
+    sendJson(res, 200, { ok: true, variant: activeHudVariant });
   } catch (err) {
     sendJson(res, 502, { error: "hud-manager unreachable", detail: String(err) });
   }
