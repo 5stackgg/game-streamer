@@ -31,6 +31,7 @@ export async function demoStateHandler(_req, res) {
           map_name: gsiState.mapName,
           map_phase: gsiState.mapPhase,
           round_phase: gsiState.roundPhase,
+          phase_ends_in: gsiState.phaseEndsIn,
           round_number: gsiState.roundNumber,
           spectated_steam_id: gsiState.spectatedSteamId,
           last_received_ms_ago: Date.now() - gsiState.lastReceivedMs,

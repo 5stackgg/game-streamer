@@ -100,6 +100,37 @@ switch (subcmd) {
     break;
   }
 
+  // [stdin: /demo/state; argv[0]=pov steamid] -> one pipe-delimited line of
+  // every field the clip capture loop polls, so the bash loop spawns node ONCE
+  // per tick instead of 7x (matters at the 150ms poll cadence). Field order:
+  //   round_phase|phase_ends_in|world_motion|gsi_age_ms|map_phase|round_number|pov_round_kills
+  // pov_round_kills = round_kills of the spec_slot whose steam_id == argv[0]
+  // (the POV target), for kill-event detection. Missing values render empty.
+  case "capture-fields": {
+    const povSid = args[0] ?? "";
+    const d = readStdinJson();
+    const num = (v) => (typeof v === "number" && Number.isFinite(v) ? String(Math.floor(v)) : "");
+    const str = (v) => (typeof v === "string" ? v : "");
+    let wm = "";
+    const m = d?.gsi?.world_motion;
+    if (Number.isFinite(m)) wm = String(Math.round(m));
+    let povKills = "";
+    if (povSid) {
+      const slot = (d?.gsi?.spec_slots ?? []).find((s) => s?.steam_id === povSid);
+      if (slot && Number.isFinite(slot.round_kills)) povKills = String(slot.round_kills);
+    }
+    process.stdout.write([
+      str(d?.gsi?.round_phase),
+      str(d?.gsi?.phase_ends_in),
+      wm,
+      num(d?.gsi?.last_received_ms_ago),
+      str(d?.gsi?.map_phase),
+      num(d?.gsi?.round_number),
+      povKills,
+    ].join("|"));
+    break;
+  }
+
   // [stdin: /demo/state] -> total_ticks, or empty.
   case "state-total-ticks": {
     const d = readStdinJson();

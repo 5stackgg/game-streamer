@@ -7,6 +7,10 @@ export const gsiState = {
   mapName:          null,
   mapPhase:         null,
   roundPhase:       null,
+  // phase_countdowns.phase_ends_in — seconds left in the current phase, as a
+  // string. Advances with DEMO time during a live round (independent of player
+  // movement), so a flat value across polls = real playback freeze, not a hold.
+  phaseEndsIn:      null,
   roundNumber:      null,
   spectatedSteamId: null,
   specSlots:        [],
@@ -36,6 +40,7 @@ export function applyGsiUpdate(body) {
   const round = body?.round ?? {};
   const player = body?.player ?? {};
   const allPlayers = body?.allplayers ?? null;
+  const pc = body?.phase_countdowns ?? {};
 
   const prevMapPhase = gsiState.mapPhase;
   const prevRoundPhase = gsiState.roundPhase;
@@ -45,6 +50,10 @@ export function applyGsiUpdate(body) {
   gsiState.mapName          = typeof map.name === "string" ? map.name : null;
   gsiState.mapPhase         = typeof map.phase === "string" ? map.phase : null;
   gsiState.roundPhase       = typeof round.phase === "string" ? round.phase : null;
+  gsiState.phaseEndsIn      =
+    typeof pc.phase_ends_in === "string" ? pc.phase_ends_in
+    : typeof pc.phase_ends_in === "number" ? String(pc.phase_ends_in)
+    : null;
   gsiState.roundNumber      = typeof map.round === "number" ? map.round : null;
   gsiState.spectatedSteamId = typeof player.steamid === "string" ? player.steamid : null;
   gsiState.teamCtName       = typeof map?.team_ct?.name === "string" ? map.team_ct.name : null;
@@ -86,7 +95,7 @@ export function applyGsiUpdate(body) {
       };
       next.set(steamId, record);
       if (slot !== null) {
-        slots.push({ slot, steam_id: steamId, name: record.name, team, alive: record.alive, health });
+        slots.push({ slot, steam_id: steamId, name: record.name, team, alive: record.alive, health, round_kills: record.roundKills });
       }
     }
     slots.sort((a, b) => a.slot - b.slot);

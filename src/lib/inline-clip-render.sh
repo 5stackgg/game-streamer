@@ -12,11 +12,15 @@ SCRIPT_TAG=inline-clip
 require_env CLIP_RENDER_JOB_ID CLIP_RENDER_TOKEN STATUS_API_BASE \
             SPEC_SERVER_URL
 
-# Per-segment hard cap on the capture loop, expressed as a multiple of
-# the expected wallclock. The loop already terminates at WALLCLOCK_MS;
-# this is belt-and-suspenders against `kill -0` mis-reporting + the
-# (rare) case where gst keeps the capture pid alive past EOS.
-CLIP_SEGMENT_TIMEOUT_FACTOR="${CLIP_SEGMENT_TIMEOUT_FACTOR:-3}"
+# Per-segment hard wall backstop, as a multiple of the segment's expected
+# wallclock. The loop normally stops at the billed budget; this only fires for
+# a wedged demo. Tight (2x, was 3x) so a misfire can't run deep into the next
+# round. Fractional — applied via awk.
+CLIP_SEGMENT_TIMEOUT_FACTOR="${CLIP_SEGMENT_TIMEOUT_FACTOR:-2}"
+# Max time per segment we'll withhold from the budget for a suspected freeze
+# (the documented ~2s post-seek stall). Bounds tail over-record to ~this if the
+# freeze signal ever misfires.
+CLIP_UNBILLED_CAP_MS="${CLIP_UNBILLED_CAP_MS:-2200}"
 CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
 : "${ROUND_TICKS_PATH:=${LOG_DIR:-/tmp/game-streamer}/demo-round-ticks.json}"
 
@@ -212,55 +216,6 @@ gsi_slot_for_steamid() {
   s=$(spec_get_state || true)
   [ -z "$s" ] && { echo ""; return; }
   printf '%s' "$s" | node "$CLIP_HELPERS" slot-for-steamid "$target_sid"
-}
-
-# Sum of all player positions from GSI — a real "demo is advancing" signal
-# (the /demo/state tick is a wall-clock estimate that lies once we've
-# toggled play). Empty when GSI hasn't fired.
-gsi_world_motion() {
-  local s
-  s=$(spec_get_state || true)
-  [ -z "$s" ] && { echo ""; return; }
-  printf '%s' "$s" | node "$CLIP_HELPERS" world-motion
-}
-
-# GSI round_phase: freezetime / live / over (empty if GSI hasn't fired).
-gsi_round_phase() {
-  local s
-  s=$(spec_get_state || true)
-  [ -z "$s" ] && { echo ""; return; }
-  printf '%s' "$s" | node "$CLIP_HELPERS" state-round-phase
-}
-
-# Returns 0 if the world moved within ~1.5s (demo really playing), 1 if it
-# stayed static (cs2 frozen — e.g. a dropped resume keypress). Checks ALL
-# players, so a single still spectated player doesn't read as frozen.
-verify_world_advancing() {
-  local m0 m1 i
-  m0=$(gsi_world_motion)
-  for i in $(seq 1 12); do
-    sleep 0.12
-    m1=$(gsi_world_motion)
-    [ -n "$m1" ] && [ "$m1" != "$m0" ] && return 0
-  done
-  return 1
-}
-
-# Confirm the demo is really advancing, kicking a stalled playback back to
-# life with pause→toggle (deterministic play) up to twice. cs2 can stall a
-# second or two after a backward seek. Returns 0 once moving, or 1 if it
-# gave up — caller proceeds and lets the in-capture guard keep retrying.
-wait_until_advancing() {
-  local tries=0
-  while ! verify_world_advancing; do
-    tries=$((tries + 1))
-    [ "$tries" -gt 2 ] && return 1
-    say "  demo not advancing — kick ${tries}: pause→toggle"
-    spec_post /demo/pause '{"force": true}'
-    sleep 0.15
-    spec_post /demo/toggle '{}'
-  done
-  return 0
 }
 
 # Dump the full GSI spec_slots table (slot/steamid/name + who's spectated)
@@ -699,7 +654,24 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   fi
 
   WALLCLOCK_MS=$SEG_DURATION_MS
-  WALLCLOCK_DEADLINE_MS=$((WALLCLOCK_MS * CLIP_SEGMENT_TIMEOUT_FACTOR))
+  WALLCLOCK_DEADLINE_MS=$(awk -v w="$WALLCLOCK_MS" -v f="$CLIP_SEGMENT_TIMEOUT_FACTOR" \
+    'BEGIN{printf "%d", w * f}')
+
+  # Start capture while the demo is still PAUSED at SEG_START, THEN press play.
+  # Recording therefore opens exactly at the pre-roll — previously we played
+  # first and only started capturing after wait-advancing + POV re-press + the
+  # ~0.3s gst spawn, during which the demo drifted ~1-2s past SEG_START and ate
+  # most of the 3s lead (the kill landed almost immediately). The only frames
+  # recorded before playback are the brief held SEG_START frame (gst spawn + the
+  # documented post-seek stall); they sit at the very top of the lead-in and
+  # STEP 7's phase-clock freeze-withholding keeps them from being billed, so the
+  # full pre-roll still plays before the kill.
+  say "STEP 6: start capture (paused at $SEG_START) -> $SEG_FILE"
+  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
+    die_failed "clip capture failed to start (segment $SEG_IDX)"
+  fi
+  say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
+  start_capture_diag "${CLIP_CAPTURE_PID:-}"
 
   # Force-pause then toggle → deterministic PLAYING (a bare relative toggle
   # could pause a demo the re-seek left playing).
@@ -708,20 +680,8 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   sleep 0.15
   spec_post /demo/toggle '{}'
 
-  # Confirm the demo is advancing BEFORE recording so a post-seek stall
-  # doesn't bake dead frames (or the POV-settling flicker) into the clip —
-  # cs2 can freeze for a second or two after a backward seek. Only
-  # meaningful in a live round (players are static in freezetime/over). The
-  # 5s lead-in absorbs the wait, so the kill is never clipped.
-  PLAY_PHASE=$(gsi_round_phase)
-  if [ "$PLAY_PHASE" = "live" ]; then
-    wait_until_advancing \
-      || say "WARN demo not advancing after kicks — capturing anyway (in-capture guard will retry)"
-  else
-    say "STEP 5: play-confirm skipped (round_phase=${PLAY_PHASE:-?}; motion unreliable when players are frozen)"
-  fi
-
-  # Re-press POV after play; observer_slot may have shifted.
+  # Re-press POV after play; the re-seek reset it and the pre-play re-press
+  # no-ops while paused. observer_slot may also have shifted.
   if [ -n "${SEG_POV_STEAMID:-}" ]; then
     POV_SLOT_AFTER_PLAY=$(gsi_slot_for_steamid "$SEG_POV_STEAMID")
     say "STEP 5: re-press slot=${POV_SLOT_AFTER_PLAY:-NONE}; GSI spectated=$(gsi_spectated_steamid)"
@@ -729,96 +689,127 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   fi
   log_spec_slots "after-play"
 
-  # Start capture only now the demo is confirmed live — keeps dead pre-roll
-  # / stall frames (and the POV-settling flicker) out of the recording.
-  say "STEP 6: start capture -> $SEG_FILE"
-  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
-    die_failed "clip capture failed to start (segment $SEG_IDX)"
-  fi
-  say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
-  start_capture_diag "${CLIP_CAPTURE_PID:-}"
-
-  # STEP 7: record the segment's worth of ACTUAL playback. We budget by demo
-  # advancement, not wall time — each poll where world_motion moved adds its
-  # slice to PLAYED_MS; a stall (flat motion in a live round) isn't billed and
-  # gets kicked back to life. So overhead, the post-seek stall, and recovery
-  # hitches can neither pad the tail (over-record) nor eat into it (cut the
-  # ending): we stop the instant we've captured SEG_DURATION of real gameplay.
-  # WALLCLOCK_DEADLINE_MS is a hard wall-time backstop against a stuck demo.
-  say "STEP 7: capturing ${SEG_DURATION_MS}ms of live playback (wall cap ${WALLCLOCK_DEADLINE_MS}ms)"
+  # STEP 7: record SEG_DURATION of playback, billed by WALL-CLOCK. rate is
+  # forced to 1, so wall-time == demo-time once playing (we opened the capture
+  # paused at SEG_START, then pressed play). We bill every poll so a quiet hold
+  # can't stretch the window
+  # — flat world_motion is a LEGIT gameplay state (players pre-aiming), and the
+  # old loop mis-read it as a stall and over-recorded into the next round. The
+  # one real exception is the documented ~2s post-seek FREEZE that can land
+  # mid-clip before the kill: we detect it via the GSI phase clock
+  # (phase_ends_in), which advances with demo time during a live round but goes
+  # FLAT when playback truly stalls — independent of whether players move. While
+  # it's flat (capped at CLIP_UNBILLED_CAP_MS) we withhold the time and kick, so
+  # the kill isn't cut; the cap bounds any tail over-record if the signal ever
+  # misfires. WALLCLOCK_DEADLINE_MS is a hard backstop against a wedged demo.
+  say "STEP 7: capturing ${SEG_DURATION_MS}ms wall-clock (target tick ${SEG_END}, wall cap ${WALLCLOCK_DEADLINE_MS}ms)"
   PLAYED_MS=0
-  LAST_MOTION=""
-  LAST_LOG_MS=0
+  UNBILLED_MS=0
+  LAST_PHASE_ENDS=""
+  LAST_LOG_TICKS=0
   FREEZE_STREAK=0
   FREEZE_RECOVERIES=0
   FREEZE_RECOVERY_MAX=4
+  CUR_DONE_TICKS=0
+  SEG_START_ROUND=""   # GSI round_number at capture start (bleed guard anchor)
+  LAST_POV_KILLS=""    # POV target's round_kills, to log the actual kill moment
+  LOG_EVERY_TICKS=$(awk -v r="${CLIP_TICK_RATE:-64}" 'BEGIN{printf "%d", r * 1.5}')
   WALLCLOCK_START_MS=$(date +%s%3N 2>/dev/null || awk 'BEGIN{srand(); printf "%d", systime()*1000}')
   PREV_MS=$WALLCLOCK_START_MS
-  while [ "$PLAYED_MS" -lt "$WALLCLOCK_MS" ]; do
+  while : ; do
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
     fi
-    NOW_MS=$(date +%s%3N 2>/dev/null || echo $((PREV_MS + 500)))
+    NOW_MS=$(date +%s%3N 2>/dev/null || echo $((PREV_MS + 150)))
     if [ $((NOW_MS - WALLCLOCK_START_MS)) -gt "$WALLCLOCK_DEADLINE_MS" ]; then
-      say "WARN segment $SEG_IDX hit ${WALLCLOCK_DEADLINE_MS}ms wall cap (played=${PLAYED_MS}ms) — stopping"
+      say "WARN segment $SEG_IDX hit ${WALLCLOCK_DEADLINE_MS}ms wall cap (done=${CUR_DONE_TICKS}t) — stopping"
+      spec_post /demo/pause '{"force": true}'
       break
     fi
     DELTA_MS=$((NOW_MS - PREV_MS))
     PREV_MS=$NOW_MS
 
+    # One node spawn per poll: pipe-delimited capture fields (see clip-helpers).
     FS=$(spec_get_state || true)
-    MOTION=$(printf '%s' "$FS" | node "$CLIP_HELPERS" world-motion)
-    PHASE=$(printf '%s' "$FS" | node "$CLIP_HELPERS" state-round-phase)
+    IFS='|' read -r PHASE PHASE_ENDS MOTION GSIAGE MPHASE ROUND_NUM POV_KILLS <<EOF
+$(printf '%s' "$FS" | node "$CLIP_HELPERS" capture-fields "${SEG_POV_STEAMID:-}")
+EOF
+    GSI_FRESH=0; { [ -n "$GSIAGE" ] && [ "$GSIAGE" -le 750 ]; } && GSI_FRESH=1
 
-    if [ -n "$MOTION" ] && [ "$MOTION" != "$LAST_MOTION" ]; then
-      # Demo advanced this slice — bill it toward the segment budget.
-      PLAYED_MS=$((PLAYED_MS + DELTA_MS))
-      FREEZE_STREAK=0
-    elif [ "$PHASE" = "live" ]; then
-      # Flat motion in a live round = a stall: don't bill it, kick playback
-      # (pause→toggle is deterministic). Two flat polls before kicking so a
-      # brief still beat doesn't thrash; capped so a stuck demo can't loop.
+    # Anchor the bleed guard to the round we opened in (first fresh reading).
+    if [ -z "$SEG_START_ROUND" ] && [ "$GSI_FRESH" = "1" ] && [ -n "$ROUND_NUM" ]; then
+      SEG_START_ROUND="$ROUND_NUM"
+      say "seg$SEG_IDX: start round=${SEG_START_ROUND} povKills=${POV_KILLS:-?}"
+    fi
+    # Log the actual kill moment (POV target's round_kills incremented) so we can
+    # verify the kill lands ~lead into the clip. (Detection only — no behavior.)
+    if [ -n "$POV_KILLS" ]; then
+      if [ -n "$LAST_POV_KILLS" ] && [ "$POV_KILLS" -gt "$LAST_POV_KILLS" ]; then
+        say "KILL seg$SEG_IDX: POV round_kills ${LAST_POV_KILLS}->${POV_KILLS} at +${CUR_DONE_TICKS}t (${PLAYED_MS}ms played, clock=${PHASE_ENDS:-?})"
+      fi
+      LAST_POV_KILLS="$POV_KILLS"
+    fi
+
+    # Withhold a poll's time ONLY on a real freeze: the GSI phase clock flat in
+    # a live round means demo playback stalled (not a player hold). Capped so a
+    # missing/odd phase clock can't stretch the tail.
+    if [ "$PHASE" = "live" ] && [ -n "$PHASE_ENDS" ] && [ "$PHASE_ENDS" = "$LAST_PHASE_ENDS" ] \
+       && [ "$UNBILLED_MS" -lt "$CLIP_UNBILLED_CAP_MS" ]; then
+      UNBILLED_MS=$((UNBILLED_MS + DELTA_MS))
       FREEZE_STREAK=$((FREEZE_STREAK + 1))
       if [ "$FREEZE_STREAK" -ge 2 ] && [ "$FREEZE_RECOVERIES" -lt "$FREEZE_RECOVERY_MAX" ]; then
         FREEZE_RECOVERIES=$((FREEZE_RECOVERIES + 1))
-        say "WARN seg$SEG_IDX stalled at +${PLAYED_MS}ms played (motion=${MOTION:-?}) — recovery ${FREEZE_RECOVERIES}/${FREEZE_RECOVERY_MAX}: pause→toggle"
-        spec_post /demo/pause '{"force": true}'
-        sleep 0.15
-        spec_post /demo/toggle '{}'
+        say "WARN seg$SEG_IDX demo frozen (phase clock ${PHASE_ENDS}s, unbilled=${UNBILLED_MS}/${CLIP_UNBILLED_CAP_MS}ms) — recovery ${FREEZE_RECOVERIES}/${FREEZE_RECOVERY_MAX}: pause→toggle"
+        spec_post /demo/pause '{"force": true}'; sleep 0.15; spec_post /demo/toggle '{}'
         FREEZE_STREAK=0
       fi
+    else
+      PLAYED_MS=$((PLAYED_MS + DELTA_MS))
+      FREEZE_STREAK=0
     fi
-    LAST_MOTION="$MOTION"
+    LAST_PHASE_ENDS="$PHASE_ENDS"
+    CUR_DONE_TICKS=$(awk -v p="$PLAYED_MS" -v w="$WALLCLOCK_MS" -v t="$SEG_TICKS" \
+      'BEGIN{ printf "%d", (w>0) ? t * p / w : t }')
 
     # Match-end guard: playing to the literal final tick triggers cs2's
     # gameover transition and auto-closes the demo, breaking later jobs.
-    if [ "$SEG_MATCH_END_GUARDED" = "1" ] && [ -n "$FS" ]; then
-      age=$(printf '%s' "$FS" | node "$CLIP_HELPERS" state-gsi-age-ms)
-      mphase=$(printf '%s' "$FS" | node "$CLIP_HELPERS" state-map-phase)
-      if [ -n "$age" ] && [ "$age" -le 750 ] && [ "$mphase" = "gameover" ]; then
-        say "MATCH_END_GUARD segment $SEG_IDX: gameover reached at +${PLAYED_MS}ms played — stopping early"
+    if [ "$SEG_MATCH_END_GUARDED" = "1" ] && [ -n "$MPHASE" ]; then
+      if [ -n "$GSIAGE" ] && [ "$GSIAGE" -le 750 ] && [ "$MPHASE" = "gameover" ]; then
+        say "MATCH_END_GUARD segment $SEG_IDX: gameover reached (done=${CUR_DONE_TICKS}t) — stopping early"
         spec_post /demo/pause '{"force": true}'
         break
       fi
     fi
 
-    if [ $((PLAYED_MS - LAST_LOG_MS)) -ge 1500 ]; then
-      say "STATE [seg${SEG_IDX} played+${PLAYED_MS}ms]: motion=${MOTION:-?} phase=${PHASE:-?}"
-      LAST_LOG_MS=$PLAYED_MS
+    # Round-bleed guard: GSI says we've crossed into a later round than we
+    # opened in — the tail ran past the round end. Stop now (accurate fix for
+    # "clip runs into the next round"). Gated on fresh GSI.
+    if [ "$GSI_FRESH" = "1" ] && [ -n "$SEG_START_ROUND" ] && [ -n "$ROUND_NUM" ] \
+       && [ "$ROUND_NUM" -gt "$SEG_START_ROUND" ]; then
+      say "ROUND_BLEED seg$SEG_IDX: round ${SEG_START_ROUND}->${ROUND_NUM} (done=${CUR_DONE_TICKS}t) — stopping"
+      spec_post /demo/pause '{"force": true}'
+      break
+    fi
+
+    if [ "$PLAYED_MS" -ge "$WALLCLOCK_MS" ]; then
+      say "STEP 7: captured ${PLAYED_MS}ms of ${WALLCLOCK_MS}ms (wall-clock) — stopping (seg $SEG_IDX)"
+      spec_post /demo/pause '{"force": true}'
+      break
+    fi
+
+    if [ $((CUR_DONE_TICKS - LAST_LOG_TICKS)) -ge "$LOG_EVERY_TICKS" ]; then
+      say "STATE [seg${SEG_IDX} +${CUR_DONE_TICKS}t]: phase=${PHASE:-?} clock=${PHASE_ENDS:-?} round=${ROUND_NUM:-?}/${SEG_START_ROUND:-?} povKills=${POV_KILLS:-?} motion=${MOTION:-?}"
+      LAST_LOG_TICKS=$CUR_DONE_TICKS
     fi
 
     DONE_FRAC=$(awk \
       -v base="$PROGRESS_BASE" -v span="$PROGRESS_SPAN" \
       -v done_ticks="$ELAPSED_TICKS_TOTAL" \
-      -v cur_e="$PLAYED_MS" -v cur_w="$WALLCLOCK_MS" \
-      -v cur_ticks="$SEG_TICKS" -v total="$TOTAL_DURATION_TICKS" \
-      'BEGIN{
-         partial = (cur_w > 0) ? (cur_ticks * cur_e / cur_w) : cur_ticks;
-         printf "%.3f", base + span * (done_ticks + partial) / total;
-       }')
+      -v cur="$CUR_DONE_TICKS" -v total="$TOTAL_DURATION_TICKS" \
+      'BEGIN{ if (total <= 0) total = 1; printf "%.3f", base + span * (done_ticks + cur) / total }')
     api_status "status=rendering" "progress=$DONE_FRAC"
 
-    if [ "$SEG_MATCH_END_GUARDED" = "1" ]; then sleep 0.25; else sleep 0.5; fi
+    sleep 0.15
   done
 
   stop_capture_diag
