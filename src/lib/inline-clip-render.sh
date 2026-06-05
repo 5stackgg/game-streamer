@@ -781,12 +781,15 @@ EOF
       fi
     fi
 
-    # Round-bleed guard: GSI says we've crossed into a later round than we
-    # opened in — the tail ran past the round end. Stop now (accurate fix for
-    # "clip runs into the next round"). Gated on fresh GSI.
+    # Round-bleed guard: stop only once the NEXT round has actually begun, not
+    # during the "over" aftermath. A round-ending kill (clutch/ace) flips
+    # round_number forward immediately while phase=="over" — that aftermath IS
+    # the post-roll we want, so we must NOT cut there. We stop only when a later
+    # round reaches freezetime/live (a real bleed into the next round). Gated on
+    # fresh GSI.
     if [ "$GSI_FRESH" = "1" ] && [ -n "$SEG_START_ROUND" ] && [ -n "$ROUND_NUM" ] \
-       && [ "$ROUND_NUM" -gt "$SEG_START_ROUND" ]; then
-      say "ROUND_BLEED seg$SEG_IDX: round ${SEG_START_ROUND}->${ROUND_NUM} (done=${CUR_DONE_TICKS}t) — stopping"
+       && [ "$ROUND_NUM" -gt "$SEG_START_ROUND" ] && [ "$PHASE" != "over" ]; then
+      say "ROUND_BLEED seg$SEG_IDX: round ${SEG_START_ROUND}->${ROUND_NUM} phase=${PHASE} (done=${CUR_DONE_TICKS}t) — stopping"
       spec_post /demo/pause '{"force": true}'
       break
     fi
