@@ -84,3 +84,21 @@ shader_report_progress() {
   age=$(( now - mtime ))
   [ "${pct:-100}" -lt 100 ] && [ "$age" -le "${SHADER_ACTIVE_STALE:-45}" ]
 }
+
+# Operator "skip shaders": stop Steam's fossilize_replay precompile workers so
+# the "Processing Vulkan shaders" step ends and cs2 launches. Deterministic and
+# display-independent — unlike poking the CEF dialog, which needs a keystroke to
+# land on the right focused button (Steam's dialog ignores keystrokes, and on
+# coexist nodes the Steam UI is black/unrenderable, so the poke can't work).
+# Returns 0 if it signalled at least one worker, else 1. Idempotent — called
+# every loop while skip is requested; escalates TERM -> KILL across calls.
+skip_shader_compile() {
+  pgrep -f fossilize_replay >/dev/null 2>&1 || return 1
+  if [ "${_SHADER_KILL_ESCALATED:-0}" = 1 ]; then
+    pkill -KILL -f fossilize_replay 2>/dev/null || true
+  else
+    pkill -TERM -f fossilize_replay 2>/dev/null || true   # clean stop, flush cache
+    _SHADER_KILL_ESCALATED=1
+  fi
+  return 0
+}

@@ -1479,12 +1479,16 @@ cloud_conflict_active() {
 # never time out / die (operator cancels via pod delete).
 #
 # Side effects on each iteration:
-#   - poke_steam_dialog ONLY on operator skip (auto-poking would dismiss
-#     the shader modal and skip the compile we always want).
+#   - on operator skip: stop the fossilize_replay shader workers (deterministic;
+#     poke_steam_dialog is kept as a secondary nudge but is unreliable alone).
 #   - shader_report_progress (inline) reports compile %.
-#   - we do NOT re-issue -applaunch — duplicate cs2 instances clash on the engine
-#     lock and wedge Steam in a phantom "running" state. <applaunch_fn> is kept
-#     for signature compat but no longer called.
+#   - re-issue -applaunch ONLY when cs2 is absent AND nothing is in flight (no
+#     shader compile, no file validation), after a grace period, spaced out, and
+#     capped. This recovers the "Steam forwarded the applaunch after a fresh
+#     download/update but never actually started cs2" hang WITHOUT reintroducing
+#     the duplicate-instance wedge (we never re-launch while a cs2 process exists
+#     or while Steam is busy compiling/validating). <applaunch_fn> is invoked by
+#     NAME for this.
 #   - at 60s/120s/180s: dump open X windows + console-linux.txt tail
 #     so a future failure leaves evidence (which dialog was up, what
 #     Steam was doing) instead of a silent 5-min wait.
@@ -1493,8 +1497,10 @@ cloud_conflict_active() {
 # export it). It must be a defined shell function in the caller's
 # scope; we invoke it as `"$1"`.
 wait_for_cs2_process() {
-  local applaunch_fn="${1:?applaunch function name required}"  # kept for signature compat; no longer re-invoked
+  local applaunch_fn="${1:?applaunch function name required}"
   local pid="" i=0 cloud_pokes=0
+  # Re-applaunch recovery state (see header): count + last loop we re-launched.
+  local relaunches=0 last_relaunch_i=0
 
   # Operator "Skip shaders" signal (spec-server writes this file). Clear any
   # stale marker from a prior run so we don't auto-skip this one.
@@ -1532,15 +1538,22 @@ wait_for_cs2_process() {
       fi
     fi
 
-    # Only poke (dismiss the modal) on operator skip — auto-poking would
-    # skip the shader compile we always want to run.
-    [ "$skip_now" = 1 ] && poke_steam_dialog
+    # On operator skip: stop the fossilize_replay workers directly (deterministic
+    # end to "Processing Vulkan shaders" regardless of dialog focus / black UI),
+    # and still poke the CEF dialog as a secondary nudge. Only on skip — we never
+    # auto-kill the compile we normally want to run.
+    if [ "$skip_now" = 1 ]; then
+      declare -F skip_shader_compile >/dev/null 2>&1 && skip_shader_compile
+      poke_steam_dialog
+    fi
 
     [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
 
     # Surface a Steam game-file validation pass (corrupt-files repair / partial
     # update) as status=validating. Self-throttles; no-op when not validating.
-    validate_report_progress
+    # Capture whether it's actively validating so re-applaunch holds off.
+    local validating_active=0
+    validate_report_progress && validating_active=1
 
     # Report compile progress + whether it's actively running (inline — no
     # bg process that can die and freeze the UI).
@@ -1566,6 +1579,27 @@ wait_for_cs2_process() {
        && declare -F dismiss_cloud_dialog >/dev/null 2>&1 && dismiss_cloud_dialog; then
       cloud_pokes=$(( cloud_pokes + 1 ))
       log "  dismissed Cloud Out of Date modal"
+    fi
+
+    # Re-applaunch recovery: after a fresh steamcmd download/update, Steam often
+    # forwards the applaunch ("Steam is already running, command was forwarded")
+    # but never actually starts cs2 — the loop would then wait forever. Re-issue
+    # the launch when cs2 is absent (loop top) AND nothing is in flight (no shader
+    # compile, no file validation), after an initial grace, spaced out, and capped.
+    # Tightly guarded so we never fire while a cs2 process exists or Steam is busy
+    # — that's the duplicate-instance wedge we must avoid.
+    # i - last_active_i guards the post-compile handoff: when a compile just
+    # finished, cs2 spawns within seconds, so we hold off re-launching until the
+    # GPU/Steam has been idle for the grace window (last_active_i stays 0 when no
+    # compile ever ran, so a truly-stuck launch still fires after the grace).
+    if [ "$shaders_active" = 0 ] && [ "$validating_active" = 0 ] \
+       && [ $(( i - last_active_i )) -ge "${CS2_RELAUNCH_GRACE:-45}" ] \
+       && [ "$relaunches" -lt "${CS2_RELAUNCH_MAX:-5}" ] \
+       && [ $(( i - last_relaunch_i )) -ge "${CS2_RELAUNCH_INTERVAL:-30}" ]; then
+      relaunches=$(( relaunches + 1 ))
+      last_relaunch_i=$i
+      log "  cs2 not up after ${i}s with nothing in flight — re-issuing applaunch (#${relaunches}/${CS2_RELAUNCH_MAX:-5}); Steam likely dropped the first one after a download/update"
+      "$applaunch_fn" || warn "  re-applaunch invocation failed"
     fi
 
     # Quiet/slow compile: never auto-skip or die — only the UI skip button
