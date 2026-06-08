@@ -50,10 +50,12 @@ run_demo_flow() {
       esac
       echo "GET $DEMO_URL (bunzip=$DEMO_NEEDS_BUNZIP)"
 
-      # Heartbeat: emit elapsed seconds + bytes written every 5s so a
-      # stuck download is obvious in the logs instead of silent for 5min.
+      # Heartbeat: emit bytes written every 5s while curl runs so a stuck
+      # download is obvious instead of silent. Killed the moment curl
+      # returns (below) so it never bleeds into the bunzip2 phase and
+      # prints misleading "still downloading" with a frozen byte count.
       (
-        while [ ! -f "$DEMO_FILE_BG" ] && [ ! -f "$DEMO_FILE_BG.failed" ]; do
+        while [ ! -f "$DEMO_FILE_BG.failed" ]; do
           sleep 5
           size=$(stat -c%s "$DEMO_FILE_BG.partial" 2>/dev/null || echo 0)
           echo "still downloading: ${size} bytes"
@@ -61,15 +63,22 @@ run_demo_flow() {
       ) &
       HEARTBEAT_PID=$!
 
-      if curl --fail --silent --show-error --location \
-              --retry 5 --retry-delay 2 --retry-all-errors \
-              --max-time "${DEMO_DOWNLOAD_TIMEOUT:-300}" \
-              --output "$DEMO_FILE_BG.partial" \
-              "$DEMO_URL"; then
+      # --speed-limit/--speed-time abort a stalled-but-open socket (Valve
+      # replay mirrors trickle then freeze) so --retry can reconnect;
+      # --max-time alone would sit idle on a dead socket for the full cap.
+      curl_rc=0
+      curl --fail --silent --show-error --location \
+           --retry 5 --retry-delay 2 --retry-all-errors \
+           --connect-timeout 30 --speed-limit 1024 --speed-time 30 \
+           --max-time "${DEMO_DOWNLOAD_TIMEOUT:-300}" \
+           --output "$DEMO_FILE_BG.partial" \
+           "$DEMO_URL" || curl_rc=$?
+      kill "$HEARTBEAT_PID" 2>/dev/null || true
+      if [ "$curl_rc" = 0 ]; then
         bytes=$(stat -c%s "$DEMO_FILE_BG.partial" 2>/dev/null || echo 0)
         echo "downloaded ${bytes} bytes"
         if [ "$DEMO_NEEDS_BUNZIP" = "1" ]; then
-          echo "bunzip2 starting"
+          echo "decompressing ${bytes} bytes (bunzip2)"
           if bunzip2 -q -c "$DEMO_FILE_BG.partial" > "$DEMO_FILE_BG.tmp"; then
             out_bytes=$(stat -c%s "$DEMO_FILE_BG.tmp" 2>/dev/null || echo 0)
             echo "bunzip2 done: ${out_bytes} bytes"
@@ -84,10 +93,9 @@ run_demo_flow() {
           mv -f "$DEMO_FILE_BG.partial" "$DEMO_FILE_BG"
         fi
       else
-        echo "curl FAILED (exit $?) — marking download as failed"
+        echo "curl FAILED (exit $curl_rc) — marking download as failed"
         touch "$DEMO_FILE_BG.failed"
       fi
-      kill "$HEARTBEAT_PID" 2>/dev/null || true
     ) > >(awk '{print "[demo-download] " $0; fflush()}' >&2) 2>&1 &
     echo $! > /tmp/game-streamer/demo-download.pid
     fi
