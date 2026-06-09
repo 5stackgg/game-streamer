@@ -101,18 +101,23 @@ RUN apt-get install -y --no-install-recommends cuda-nvrtc-12-6 \
 # present. Build the LAYER ONLY (-DBUILD_PLUGIN=OFF drops the libobs dependency);
 # vkcapture-consumer (compiled below) is the socket consumer. Pinned to a release
 # tag for reproducible builds. Requires nvidia-drm.modeset=1 on the host.
+# present-eventfd.patch adds a per-present eventfd poke (see src/vkcapture/) so the
+# consumer can frame-lock to cs2's presents; copied in before the clone so `git
+# apply` can patch the freshly cloned tree (src/ proper isn't COPY'd until later).
+COPY src/vkcapture/present-eventfd.patch /tmp/present-eventfd.patch
 RUN set -eux; \
       apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates cmake build-essential pkg-config \
         libvulkan-dev libgl-dev libegl-dev libx11-dev libxcb1-dev \
       && git clone --depth=1 --branch v1.5.6 \
            https://github.com/nowrep/obs-vkcapture /tmp/obs-vkcapture \
+      && git -C /tmp/obs-vkcapture apply /tmp/present-eventfd.patch \
       && cmake -S /tmp/obs-vkcapture -B /tmp/obs-vkcapture/build \
            -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release -DBUILD_PLUGIN=OFF \
       && cmake --build /tmp/obs-vkcapture/build --parallel \
       && cmake --install /tmp/obs-vkcapture/build \
       && test -f /usr/share/vulkan/implicit_layer.d/obs_vkcapture_64.json \
-      && rm -rf /tmp/obs-vkcapture /var/lib/apt/lists/*
+      && rm -rf /tmp/obs-vkcapture /tmp/present-eventfd.patch /var/lib/apt/lists/*
 
 # Node.js — runs src/spectator/server.mjs (cs2 spectator-control HTTP
 # daemon, refactored from the single-file src/spec-server.mjs). Ubuntu

@@ -40,6 +40,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
 #include <stdint.h>
 #include <immintrin.h>   // MOVNTDQA streaming loads for write-combined GPU memory
 #include <glib.h>
@@ -90,6 +91,17 @@ struct state {
                                  // gone (cs2 swapchain rebuild on seek) so the
                                  // stream holds instead of dying
 
+    // present-lock: an eventfd we hand the (patched) layer via SCM_RIGHTS; it
+    // pokes it on every vkQueuePresentKHR, so we push exactly one frame per
+    // present with deterministic CFR PTS. Until the first poke we stay on the fps
+    // timer (works with any/unpatched layer), then disarm it.
+    int         present_efd;
+    guint       present_src;
+    bool        present_locked;   // engaged: presents drive the push, timer off
+    guint64     present_signals;  // VKCAP_DEBUG: total presents seen
+    guint64     dbg_last;         // VKCAP_DEBUG: present_signals at last debug tick
+    bool        debug;
+
     // optional HUD-overlay toggle (composite mode): poll VKCAP_HUD_CTL and
     // set the compositor's HUD pad alpha, so the operator can hide/show the
     // overlay without unmapping the grabbed window (which would break the
@@ -99,7 +111,7 @@ struct state {
     int         hud_visible;      // last applied (1 visible / 0 hidden)
 };
 
-static struct state st = { .listen_fd = -1, .client_fd = -1 };
+static struct state st = { .listen_fd = -1, .client_fd = -1, .present_efd = -1 };
 
 // ---- fourcc -> GStreamer format ------------------------------------------
 // DRM fourccs are little-endian byte order in memory; map to the matching gst
@@ -170,7 +182,30 @@ static void send_control(int fd, bool capturing)
     c.no_modifiers = 1;
     c.linear       = 1;
     c.map_host     = 1;
-    ssize_t n = write(fd, &c, sizeof(c));
+
+    // Ask the layer to poke us per present, handing it our eventfd via SCM_RIGHTS.
+    // A patched layer reads want_present_signal + the fd; an unpatched layer treats
+    // both as padding and ignores them — we stay on the fps timer (graceful).
+    if (capturing && st.present_efd >= 0)
+        c.want_present_signal = 1;
+
+    struct iovec io = { .iov_base = &c, .iov_len = sizeof(c) };
+    struct msghdr msg = {0};
+    msg.msg_iov = &io;
+    msg.msg_iovlen = 1;
+    char cmsg_buf[CMSG_SPACE(sizeof(int))];
+    if (c.want_present_signal) {
+        msg.msg_control = cmsg_buf;
+        msg.msg_controllen = sizeof(cmsg_buf);
+        struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
+        cm->cmsg_level = SOL_SOCKET;
+        cm->cmsg_type  = SCM_RIGHTS;
+        cm->cmsg_len   = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(cm), &st.present_efd, sizeof(int));
+        msg.msg_controllen = cm->cmsg_len;
+    }
+
+    ssize_t n = sendmsg(fd, &msg, MSG_NOSIGNAL);
     if (n != (ssize_t)sizeof(c))
         log_msg("WARN: send_control short write (%zd/%zu): %s", n, sizeof(c), strerror(errno));
 }
@@ -235,12 +270,15 @@ static void wc_copy(void *dst, const void *src, size_t n)
         memcpy(dst, src, n);
 }
 
-static gboolean on_tick(gpointer user)
+// Build a buffer from the current shared frame (or repeat the last good frame
+// while the layer is transiently gone) and push it into the pipeline. Shared by
+// the fps timer (on_tick) and the per-present signal (on_present_signal).
+// Returns false to stop the main loop.
+static bool push_one_frame(void)
 {
-    (void)user;
     // Push only once PLAYING (delayed to the first frame so pulsesrc audio starts
     // in lockstep with video).
-    if (!st.playing || !st.appsrc) return G_SOURCE_CONTINUE;
+    if (!st.playing || !st.appsrc) return true;
 
     GstBuffer *out = NULL;
 
@@ -253,7 +291,7 @@ static gboolean on_tick(gpointer user)
         const size_t sz  = row * (size_t)st.height;
         GstBuffer *buf = gst_buffer_new_allocate(NULL, sz, NULL);
         GstMapInfo mi;
-        if (!gst_buffer_map(buf, &mi, GST_MAP_WRITE)) { gst_buffer_unref(buf); return G_SOURCE_CONTINUE; }
+        if (!gst_buffer_map(buf, &mi, GST_MAP_WRITE)) { gst_buffer_unref(buf); return true; }
 
         const uint8_t *src = (const uint8_t *)st.map_ptr + st.offsets[0];
         if (st.flip) {
@@ -273,16 +311,68 @@ static gboolean on_tick(gpointer user)
         // frame so the stream holds instead of dying + tripping client reconnects.
         out = gst_buffer_ref(st.last_buf);
     } else {
-        return G_SOURCE_CONTINUE;  // nothing captured yet
+        return true;  // nothing captured yet
     }
 
     // PTS is stamped by appsrc (do-timestamp=TRUE); downstream videorate locks CFR.
+    // Present-driven pushing feeds videorate distinct, render-aligned frames, so it
+    // corrects only on a real cs2 frame dip (not timer phase-drift dups). Video
+    // rides the same live clock as the pulsesrc audio, so A/V stays synced and the
+    // clip's duration always matches wall-clock (no time-compression).
     GstFlowReturn fr = gst_app_src_push_buffer(st.appsrc, out); // takes ownership
     if (fr != GST_FLOW_OK) {
         log_msg("appsrc push returned %d — stopping", fr);
         g_main_loop_quit(st.loop);
-        return G_SOURCE_REMOVE;
+        return false;
     }
+    return true;
+}
+
+static gboolean on_tick(gpointer user)
+{
+    (void)user;
+    if (st.present_locked) return G_SOURCE_REMOVE;  // presents drive the push now
+    return push_one_frame() ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+}
+
+// First present poke from a patched layer: switch from the wall-clock timer to
+// present-driven, deterministic-CFR pushing.
+static void engage_present_lock(void)
+{
+    if (st.present_locked) return;
+    st.present_locked = true;
+    // Presents now drive the push; drop the wall-clock sampler. Timestamping stays
+    // on do-timestamp + videorate (A/V-safe; duration tracks wall-clock even if cs2
+    // dips below fps_max). Sampling is what we lock to the render, not the clock.
+    if (st.tick_src) { g_source_remove(st.tick_src); st.tick_src = 0; }
+    log_msg("present-lock ENGAGED (layer pokes per present; fps=%d, present-driven sampling)", st.fps);
+}
+
+// eventfd readable: the layer poked us one or more presents. Drain the counter and
+// push exactly one CFR frame (fps_max==capture fps keeps the count ≈1 in steady state).
+static gboolean on_present_signal(gint fd, GIOCondition cond, gpointer user)
+{
+    (void)user;
+    if (cond & (G_IO_HUP | G_IO_ERR)) { st.present_src = 0; return G_SOURCE_REMOVE; }
+    uint64_t cnt = 0;
+    ssize_t n = read(fd, &cnt, sizeof(cnt));
+    if (n != (ssize_t)sizeof(cnt)) return G_SOURCE_CONTINUE;  // spurious / EAGAIN
+    if (!st.present_locked) engage_present_lock();
+    st.present_signals += cnt;
+    if (!push_one_frame()) { st.present_src = 0; return G_SOURCE_REMOVE; }
+    return G_SOURCE_CONTINUE;
+}
+
+// VKCAP_DEBUG: once a second, report present rate and mode so we can confirm 1:1
+// present->frame locking and spot drops.
+static gboolean on_debug_tick(gpointer user)
+{
+    (void)user;
+    guint64 d = st.present_signals - st.dbg_last;
+    st.dbg_last = st.present_signals;
+    log_msg("DEBUG %s: presents/s=%llu (total=%llu)",
+            st.present_locked ? "present-locked" : "timer-fallback",
+            (unsigned long long)d, (unsigned long long)st.present_signals);
     return G_SOURCE_CONTINUE;
 }
 
@@ -351,7 +441,8 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
     case CAPTURE_CLIENT_DATA_TYPE: {
         struct capture_client_data *cd = (void *)buf;
         cd->exe[sizeof(cd->exe) - 1] = '\0';
-        log_msg("layer hello: exe='%s' -> sending capturing=1 (linear+map_host)", cd->exe);
+        log_msg("layer hello: exe='%s' -> capturing=1 (linear+map_host%s)", cd->exe,
+                st.present_efd >= 0 ? ", requesting present-signal" : "");
         send_control(fd, true);
         break;
     }
@@ -443,7 +534,8 @@ static gboolean on_sigint(gpointer user)
 {
     (void)user;
     log_msg("SIGINT — sending EOS and finalizing");
-    if (st.tick_src) { g_source_remove(st.tick_src); st.tick_src = 0; }
+    if (st.tick_src)    { g_source_remove(st.tick_src);    st.tick_src = 0; }
+    if (st.present_src) { g_source_remove(st.present_src); st.present_src = 0; }
     if (st.pipeline && st.playing) {
         // EOS the WHOLE pipeline (same as `gst-launch -e`) so BOTH the video appsrc
         // and the audio pulsesrc branch drain into qtmux and the moov atom is
@@ -522,6 +614,7 @@ int main(int argc, char **argv)
     st.test_frames_left = getenv("VKCAP_TEST_FRAMES") ? atoi(getenv("VKCAP_TEST_FRAMES")) : 5;
     st.fps = getenv("VKCAP_FPS") ? atoi(getenv("VKCAP_FPS")) : 60;
     if (st.fps <= 0) st.fps = 60;
+    st.debug = getenv("VKCAP_DEBUG") && atoi(getenv("VKCAP_DEBUG")) != 0;
     for (int i = 0; i < 4; i++) st.fds[i] = -1;
 
     if (!st.test_mode) {
@@ -577,10 +670,21 @@ int main(int argc, char **argv)
     g_unix_signal_add(SIGINT,  on_sigint, NULL);
     g_unix_signal_add(SIGTERM, on_sigint, NULL);
     if (!st.test_mode) {
+        // Present-lock channel: an eventfd we hand the layer (via send_control's
+        // SCM_RIGHTS). A patched layer pokes it per present -> on_present_signal
+        // engages present-lock and disarms the timer below. Unpatched layer never
+        // pokes -> timer path runs unchanged.
+        st.present_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (st.present_efd < 0)
+            log_msg("WARN: eventfd failed (%s) — present-lock off, fps timer only", strerror(errno));
+        else
+            st.present_src = g_unix_fd_add(st.present_efd, G_IO_IN | G_IO_ERR, on_present_signal, NULL);
+
         guint interval_ms = (guint)(1000 / st.fps);
         if (interval_ms < 1) interval_ms = 1;   // clamp: absurd VKCAP_FPS -> 0 -> busy loop
         st.tick_src = g_timeout_add(interval_ms, on_tick, NULL);
         if (st.hud_pad) g_timeout_add(250, poll_hud_ctl, NULL);
+        if (st.debug)   g_timeout_add_seconds(1, on_debug_tick, NULL);
     } else {
         // TEST mode always terminates: the layer may send texture metadata only
         // ONCE (then you sample asynchronously), so don't rely on the frame count.
@@ -601,6 +705,8 @@ int main(int argc, char **argv)
         gst_object_unref(st.pipeline);
     }
     release_frame();
+    if (st.present_src) g_source_remove(st.present_src);
+    if (st.present_efd >= 0) close(st.present_efd);
     if (st.client_fd >= 0) close(st.client_fd);
     if (st.listen_fd >= 0) close(st.listen_fd);
     log_msg("exit");

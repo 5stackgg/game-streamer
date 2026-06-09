@@ -1,0 +1,122 @@
+diff --git a/src/capture.c b/src/capture.c
+index 247c04b..0b23ff3 100644
+--- a/src/capture.c
++++ b/src/capture.c
+@@ -38,6 +38,7 @@ static struct {
+     bool map_host;
+     bool need_reinit;
+     uint8_t device_uuid[16];
++    int present_eventfd;
+ } data;
+ 
+ static bool get_wine_exe(char *buf, size_t bufsize)
+@@ -118,6 +119,7 @@ void capture_init()
+ {
+     memset(&data, 0, sizeof(data));
+     data.connfd = -1;
++    data.present_eventfd = -1;
+ }
+ 
+ void capture_update_socket()
+@@ -134,7 +136,17 @@ void capture_update_socket()
+     }
+ 
+     struct capture_control_data control;
+-    ssize_t n = recv(data.connfd, &control, sizeof(control), 0);
++    struct iovec io = {
++        .iov_base = &control,
++        .iov_len = sizeof(control),
++    };
++    char cmsg_buf[CMSG_SPACE(sizeof(int))];
++    struct msghdr msg = {0};
++    msg.msg_iov = &io;
++    msg.msg_iovlen = 1;
++    msg.msg_control = cmsg_buf;
++    msg.msg_controllen = sizeof(cmsg_buf);
++    ssize_t n = recvmsg(data.connfd, &msg, 0);
+     if (n == sizeof(control)) {
+         const bool old_no_modifiers = data.no_modifiers;
+         const bool old_linear = data.linear;
+@@ -149,6 +161,22 @@ void capture_update_socket()
+             || old_map_host != data.map_host)) {
+             data.need_reinit = true;
+         }
++        // The consumer may hand us an eventfd (SCM_RIGHTS) to poke on every
++        // present; only when it asked via want_present_signal.
++        if (control.want_present_signal) {
++            for (struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg); cmsg;
++                    cmsg = CMSG_NXTHDR(&msg, cmsg)) {
++                if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
++                    int fd = -1;
++                    memcpy(&fd, CMSG_DATA(cmsg), sizeof(int));
++                    if (data.present_eventfd >= 0) {
++                        close(data.present_eventfd);
++                    }
++                    data.present_eventfd = fd;
++                    break;
++                }
++            }
++        }
+     }
+     if (n == -1) {
+         if (errno == EAGAIN || errno == EWOULDBLOCK) {
+@@ -162,7 +190,25 @@ void capture_update_socket()
+         close(data.connfd);
+         data.connfd = -1;
+         data.accepted = false;
++        if (data.present_eventfd >= 0) {
++            close(data.present_eventfd);
++            data.present_eventfd = -1;
++        }
++    }
++}
++
++// Poke the consumer's eventfd once per present. Runs on cs2's present/render
++// thread, so it MUST never block: the fd is EFD_NONBLOCK and the counter
++// coalesces, so a slow consumer can never back-pressure the render. Errors are
++// swallowed (the next present re-pokes).
++void capture_signal_present()
++{
++    if (data.present_eventfd < 0) {
++        return;
+     }
++    const uint64_t one = 1;
++    ssize_t r = write(data.present_eventfd, &one, sizeof(one));
++    (void)r;
+ }
+ 
+ void capture_init_shtex(
+diff --git a/src/capture.h b/src/capture.h
+index d8e4b4d..e42280c 100644
+--- a/src/capture.h
++++ b/src/capture.h
+@@ -82,7 +82,8 @@ struct capture_control_data {
+     uint8_t linear;
+     uint8_t map_host;
+     uint8_t device_uuid[16];
+-    uint8_t padding[12];
++    uint8_t want_present_signal;
++    uint8_t padding[11];
+ } __attribute__((packed));
+ 
+ #define CAPTURE_CONTROL_DATA_TYPE 10
+@@ -96,6 +97,7 @@ void capture_init_shtex(
+         int offsets[4], uint64_t modifier, uint32_t winid,
+         bool flip, uint32_t color_space, int nfd, int fds[4]);
+ void capture_stop();
++void capture_signal_present();
+ 
+ bool capture_should_stop();
+ bool capture_should_init();
+diff --git a/src/vklayer.c b/src/vklayer.c
+index d8b6f6a..bd5415d 100644
+--- a/src/vklayer.c
++++ b/src/vklayer.c
+@@ -1243,6 +1243,7 @@ static void vk_capture(struct vk_data *data, VkQueue queue,
+         }
+ 
+         vk_shtex_capture(data, &data->funcs, swap, 0, queue, info);
++        capture_signal_present();
+     }
+ }
+ 

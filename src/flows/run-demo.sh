@@ -36,10 +36,11 @@ require_env MATCH_ID DEMO_URL
 start_status_reporter
 
 : "${FPS:=60}"
-# Demo playback render cap. We capture at 60Hz, so 120 gives a 2x buffer — cs2
-# stays comfortably above 60 so every capture sample lands on a fresh frame,
-# without burning GPU/heat on 200+fps we'd never sample. The GPU clock-lock
-# (cs2_autotune) keeps it steady. 0 = uncapped; set lower only if heat-limited.
+# Demo playback render cap. We capture at 60Hz; 120 gives 2x headroom so cs2 keeps
+# delivering >=60 distinct presents/s through frame-time spikes. Present-driven
+# capture samples each present and do-timestamp+videorate decimate 120->60 cleanly
+# (drops, no dups) — headroom keeps the 60fps output dup-free + A/V synced. The GPU
+# clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
 : "${CS2_FPS_MAX:=120}"
 # TrueView prediction for the spectated player's view: reconstructs the observed
 # player's real camera/aim by re-running client-side prediction instead of showing

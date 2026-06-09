@@ -102,7 +102,26 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
   fi
 
   export VKCAP_FPS="$fps"
-  spawn_logged vkcap-clip vkcapture-consumer "$pipeline"
+  # Pin the consumer to dedicated high cores so its gst threads don't pile
+  # (wake-affinity) onto a core cs2 is using and jitter the sampling. Mirrors
+  # stream.sh; CAPTURE_CPUS overrides the list (empty = no pin).
+  local capture_pin=()
+  if [ -z "${CAPTURE_CPUS+x}" ] && command -v taskset >/dev/null 2>&1; then
+    local _ncpu _capn _caplo
+    _ncpu=$(nproc 2>/dev/null || echo 0)
+    if [ "$_ncpu" -ge 4 ]; then
+      _capn="${CAPTURE_CORES:-2}"
+      [ "$_capn" -lt 1 ] && _capn=1
+      [ "$_capn" -ge "$_ncpu" ] && _capn=$(( _ncpu - 1 ))
+      _caplo=$(( _ncpu - _capn ))
+      CAPTURE_CPUS="${_caplo}-$(( _ncpu - 1 ))"
+    fi
+  fi
+  if [ -n "${CAPTURE_CPUS:-}" ]; then
+    capture_pin=(taskset -c "$CAPTURE_CPUS")
+    log "  clip capture pinned to cores $CAPTURE_CPUS (off cs2's cores)"
+  fi
+  spawn_logged vkcap-clip "${capture_pin[@]}" vkcapture-consumer "$pipeline"
   local pid=$SPAWNED_PID
   sleep 0.5
   if ! kill -0 "$pid" 2>/dev/null; then
