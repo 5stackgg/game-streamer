@@ -559,10 +559,21 @@ if [ "$BRANDING_ENABLED" = "1" ] && [ "${CLIP_DISABLE_OUTRO:-0}" != "1" ]; then
     OUTRO_WILL_APPEND=1
   fi
 fi
+# The fused path overlays the chip via a single filter_complex that
+# `split`s the chip into one branch per captured segment and feeds them
+# all into one `concat`. split-fan-out → concat deadlocks ffmpeg once the
+# branch count gets high — it stalls mid-encode with no error (small clips
+# are fine, large montages hang). Cap the fuse to small clips; larger ones
+# fall back to per-segment chip polish (a split-free single-overlay graph)
+# plus a split-free concat.
+CLIP_MAX_FUSED_SEGMENTS="${CLIP_MAX_FUSED_SEGMENTS:-6}"
 WILL_FUSE_POLISH_OUTRO=0
 if [ "$OUTRO_WILL_APPEND" = "1" ] \
-   && [ -n "$CHIP_NAME" ]; then
+   && [ -n "$CHIP_NAME" ] \
+   && [ "$SEG_COUNT" -le "$CLIP_MAX_FUSED_SEGMENTS" ]; then
   WILL_FUSE_POLISH_OUTRO=1
+elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ]; then
+  say "concat: ${SEG_COUNT} segments exceeds fuse cap ${CLIP_MAX_FUSED_SEGMENTS} — per-segment polish + split-free concat"
 fi
 
 # Per-segment output paths + concat list. We render each segment to
@@ -875,6 +886,26 @@ EOF
     'BEGIN{print (d >= 0.5 && b > 1024) ? 1 : 0}')
   if [ "$IS_VALID" = "1" ]; then
     say "  segment $SEG_IDX OK (${SEG_BYTES}B, ${SEG_REAL_DUR}s)"
+    # A segment that captured through the gameover/menu transition (e.g. a
+    # final-round multi-kill whose wall-clock window rolls past round end)
+    # can land with no audio stream. The concat filter graph maps [i:a] for
+    # every segment unconditionally, so one audio-less segment fails the whole
+    # concat. Pad silent stereo audio (video stream-copied) to keep streams
+    # uniform across every concat path.
+    if ! has_audio_stream "$SEG_FILE"; then
+      say "  segment $SEG_IDX has no audio stream — padding silence"
+      AUD_FILE="${SEG_FILE}.aud.mp4"
+      if ffmpeg -y -hide_banner -loglevel warning \
+           -i "$SEG_FILE" \
+           -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+           -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest \
+           -movflags +faststart "$AUD_FILE"; then
+        mv -f "$AUD_FILE" "$SEG_FILE"
+      else
+        rm -f "$AUD_FILE"
+        say "  WARN failed to pad silent audio for segment $SEG_IDX — leaving as-is"
+      fi
+    fi
     printf "file '%s'\n" "$SEG_FILE" >>"$SEG_DIR/concat.txt"
   elif [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] && [ "$VKCAP_FELL_BACK" = "0" ]; then
     # Empty under vkcapture = the present-hook delivered no frames (e.g. the GTX
