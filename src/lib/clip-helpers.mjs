@@ -230,6 +230,42 @@ switch (subcmd) {
     break;
   }
 
+  // [stdin: job_json] -> every field batch_render_one_job needs, each
+  // NUL-TERMINATED (one node spawn per job instead of 12; terminator,
+  // not separator, so bash readarray keeps trailing EMPTY fields).
+  // Free-text fields (title, names) can contain anything EXCEPT NUL — \u0000 is stripped
+  // so a malicious value can't shift the field positions. Order:
+  //   job_id token segments_json output_dims output_fps target_sid
+  //   title target_name target_avatar_url kills_count map_name round
+  // Semantics match the individual subcommands below.
+  case "job-fields": {
+    const d = readStdinJson();
+    const S = (v) => (typeof v === "string" ? v.replaceAll("\u0000", "") : "");
+    const segs = d?.spec?.segments;
+    const res = d?.spec?.output?.resolution ?? "1080p";
+    const fps = parseInt(d?.spec?.output?.fps, 10);
+    const seg0sid = (Array.isArray(segs) ? segs : [])[0]?.pov_steam_id;
+    const kills = d?.spec?.kills_count;
+    const round = d?.spec?.round;
+    process.stdout.write([
+      S(d?.job_id),
+      S(d?.token),
+      JSON.stringify(Array.isArray(segs) ? segs : []),
+      res === "720p" ? "1280x720" : "1920x1080",
+      String(Number.isFinite(fps) ? fps : 60),
+      S(seg0sid),
+      S(d?.spec?.title),
+      S(d?.spec?.target_name),
+      S(d?.spec?.target_avatar_url),
+      typeof kills === "number" && Number.isFinite(kills) && kills > 0
+        ? String(Math.floor(kills)) : "",
+      S(d?.spec?.map_name),
+      typeof round === "number" && Number.isFinite(round) && round >= 0
+        ? String(Math.floor(round)) : "",
+    ].map((f) => f + "\u0000").join(""));
+    break;
+  }
+
   // [stdin: job_json] -> top-level job_id.
   case "job-id": {
     const d = readStdinJson();
@@ -346,6 +382,27 @@ switch (subcmd) {
       }
     }
     process.stdout.write(String(total));
+    break;
+  }
+
+  // [stdin: CLIP_SEGMENTS] -> one "start|end|accountid" line per segment,
+  // so the segment loop spawns node ONCE up front instead of 3x per
+  // segment. All values numeric (accountid empty when missing/invalid),
+  // so the line protocol is injection-safe.
+  case "segs-table": {
+    const d = readStdinJson();
+    if (!Array.isArray(d)) break;
+    for (const s of d) {
+      const start = typeof s?.start_tick === "number" ? String(Math.floor(s.start_tick)) : "";
+      const end = typeof s?.end_tick === "number" ? String(Math.floor(s.end_tick)) : "";
+      let aid = "";
+      const sid = s?.pov_steam_id;
+      if (typeof sid === "string" && /^\d+$/.test(sid)) {
+        const a = BigInt(sid) - STEAMID64_BASE;
+        if (a > 0n) aid = a.toString();
+      }
+      process.stdout.write(`${start}|${end}|${aid}\n`);
+    }
     break;
   }
 

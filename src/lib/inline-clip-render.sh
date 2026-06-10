@@ -27,6 +27,19 @@ CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
 LOG_PREFIX="[clip ${CLIP_RENDER_JOB_ID:0:8}]"
 say() { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
 
+# Millisecond clock into a named var. bash 5's EPOCHREALTIME saves two
+# forks per STEP 7 poll; date (+awk seconds-granularity rescue) otherwise.
+if [ -n "${EPOCHREALTIME:-}" ]; then
+  now_ms() { local t="${EPOCHREALTIME//[!0-9]/}"; printf -v "$1" '%s' "${t:0:${#t}-3}"; }
+else
+  now_ms() {
+    local v
+    v=$(date +%s%3N 2>/dev/null) || v=""
+    case "$v" in ''|*[!0-9]*) v=$(awk 'BEGIN{srand(); printf "%d", systime()*1000}') ;; esac
+    printf -v "$1" '%s' "$v"
+  }
+fi
+
 # --- Capture diagnostics --------------------------------------------------
 # While a segment records, sample GPU util/VRAM/clock + cs2 & capture-process CPU
 # every ~0.7s into the render log, timestamped from capture start (so the lines
@@ -77,6 +90,34 @@ api_status() {
     || say "WARN status post failed: $*"
 }
 
+# Progress-only status POST for the capture hot loop: throttled to ~1/s,
+# single-flight (skipped while one is in flight) so remote-API RTT never
+# stretches the 150ms poll cadence. Body via printf — both values are
+# script-controlled here, unlike the node status-body path used elsewhere.
+API_PROGRESS_PID=""
+API_PROGRESS_LAST_MS=0
+api_status_progress_async() {
+  local now_ms="$1" frac="$2"
+  API_PROGRESS_LAST_MS=$now_ms
+  curl --fail --silent --max-time 10 \
+       --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
+       --header "content-type: application/json" \
+       --data "$(printf '{"status":"rendering","progress":%s}' "$frac")" \
+       --output /dev/null \
+       "${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/status" \
+    >/dev/null 2>&1 &
+  API_PROGRESS_PID=$!
+}
+# Reap/cancel the in-flight progress POST. Default lets a healthy POST
+# finish; "kill" is for terminal paths so a stray "rendering" can't land
+# after a done/error status.
+api_progress_settle() {
+  [ -z "$API_PROGRESS_PID" ] && return 0
+  if [ "${1:-wait}" = "kill" ]; then kill "$API_PROGRESS_PID" 2>/dev/null || true; fi
+  wait "$API_PROGRESS_PID" 2>/dev/null || true
+  API_PROGRESS_PID=""
+}
+
 spec_get_state() {
   curl --fail --silent --show-error --max-time 5 \
        "${SPEC_SERVER_URL}/demo/state"
@@ -102,6 +143,7 @@ spec_post() {
 die_failed() {
   local msg="$1"
   say "ERROR: $msg"
+  api_progress_settle kill
   api_status "status=error" "error=${msg}"
   CLIP_REACHED_TERMINAL=1
   exit 1
@@ -142,6 +184,12 @@ on_exit() {
     kill -TERM "$CHIP_RENDER_PID" 2>/dev/null || true
     wait "$CHIP_RENDER_PID" 2>/dev/null || true
   fi
+  # Backgrounded segment polish — same deal on early exit.
+  if [ -n "${POLISH_BG_PID:-}" ] && kill -0 "$POLISH_BG_PID" 2>/dev/null; then
+    kill -TERM "$POLISH_BG_PID" 2>/dev/null || true
+    wait "$POLISH_BG_PID" 2>/dev/null || true
+  fi
+  [ -n "${POLISH_BG_LOG:-}" ] && rm -f "$POLISH_BG_LOG"
   [ -n "${CHIP_RENDER_LOG:-}" ] && rm -f "$CHIP_RENDER_LOG"
   # ProRes intermediates are ~20MB/s — drop the chip mov even on
   # error so a flapping pod doesn't fill its scratch dir.
@@ -152,6 +200,7 @@ on_exit() {
   # POSTed a terminal status (set -u trip, SIGTERM, early exit before
   # die_failed was reachable), best-effort mark the row error so the
   # batch-highlights watchdog doesn't leave it stuck in-flight.
+  api_progress_settle kill
   if [ "$rc" -ne 0 ] && [ "${CLIP_REACHED_TERMINAL:-0}" != "1" ]; then
     api_status "status=error" "error=render exited rc=${rc} before reaching terminal status" \
       || true
@@ -173,6 +222,32 @@ if [ -z "${CLIP_SEGMENTS:-}" ]; then
   fi
   CLIP_SEGMENTS="[{\"start_tick\":${CLIP_START_TICK},\"end_tick\":${CLIP_END_TICK}}]"
 fi
+
+# Fast capture-fields path: one in-process GET replaces the curl+node
+# pipeline per STEP 7 poll. A stale spec-server (dev-pod rsync without a
+# restart) 404s — fall back to the node parser and warn.
+CAPTURE_FIELDS_FAST=0
+CF_PROBE=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --max-time 5 "${SPEC_SERVER_URL}/demo/capture-fields?pov=0" || echo 000)
+if [ "$CF_PROBE" = "200" ]; then
+  CAPTURE_FIELDS_FAST=1
+else
+  say "WARN /demo/capture-fields probe -> ${CF_PROBE} — spec-server predates it; using node fallback (restart spec-server)"
+fi
+POV_STATE_FAST=0
+PS_PROBE=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --max-time 5 "${SPEC_SERVER_URL}/demo/pov-state?pov=0" || echo 000)
+if [ "$PS_PROBE" = "200" ]; then
+  POV_STATE_FAST=1
+else
+  say "WARN /demo/pov-state probe -> ${PS_PROBE} — spec-server predates it; using node fallback (restart spec-server)"
+fi
+
+# "spectated_steam_id|pov_slot|slots_count|tick" from the fast endpoint.
+spec_pov_state() {
+  curl --fail --silent --max-time 5 \
+    "${SPEC_SERVER_URL}/demo/pov-state?pov=${1:-}" || true
+}
 
 log_state() {
   local label="$1"
@@ -198,9 +273,15 @@ log_state() {
   say "STATE [$label]: tick=$tick paused=$paused motion=${motion:-?} phase=${phase:-?} slots=${slots} spec=${spectated:-?}"
 }
 
-# Read GSI's currently-spectated steamid64 from /demo/state. Returns
-# empty string when GSI hasn't fired yet or the field isn't set.
+# Read GSI's currently-spectated steamid64. Returns empty string when
+# GSI hasn't fired yet or the field isn't set.
 gsi_spectated_steamid() {
+  if [ "$POV_STATE_FAST" = "1" ]; then
+    local line
+    line=$(spec_pov_state)
+    printf '%s' "${line%%|*}"
+    return
+  fi
   local s
   s=$(spec_get_state || true)
   [ -z "$s" ] && { echo ""; return; }
@@ -212,6 +293,13 @@ gsi_spectated_steamid() {
 # can't compute this once — must read fresh each segment.
 gsi_slot_for_steamid() {
   local target_sid="$1"
+  if [ "$POV_STATE_FAST" = "1" ]; then
+    local line _spect slot _rest
+    line=$(spec_pov_state "$target_sid")
+    IFS='|' read -r _spect slot _rest <<<"$line"
+    printf '%s' "$slot"
+    return
+  fi
   local s
   s=$(spec_get_state || true)
   [ -z "$s" ] && { echo ""; return; }
@@ -237,11 +325,13 @@ log_spec_slots() {
 verify_spec_lock() {
   local target_sid="$1"
   local slot=""
-  # Find slot — retry briefly in case GSI is between snapshots.
-  local try
-  for try in 1 2 3 4 5; do
+  # Find slot — deadline-based (~2s, the old effective window once each
+  # try paid a node spawn) in case GSI is between snapshots.
+  local find_start=$SECONDS
+  while :; do
     slot=$(gsi_slot_for_steamid "$target_sid")
-    if [ -n "$slot" ]; then break; fi
+    [ -n "$slot" ] && break
+    [ $((SECONDS - find_start)) -ge 2 ] && break
     sleep 0.2
   done
   if [ -z "$slot" ]; then
@@ -250,10 +340,12 @@ verify_spec_lock() {
   fi
   say "  pressing digit key for slot ${slot} -> ${target_sid}"
   spec_post /spec/slot "{\"slot\": ${slot}}"
-  # Up to 2s of polling at ~7Hz. cs2 GSI fires at ~10Hz so 150ms
-  # gives the next tick a chance to land between polls.
-  local i current
-  for i in $(seq 1 14); do
+  # Up to ~4s of polling at ~7Hz (the old 14-iter loop's effective span
+  # once each poll paid a node spawn — kept so locks don't get LESS time
+  # to confirm now that polls are cheap). cs2 GSI fires at ~10Hz so
+  # 150ms gives the next tick a chance to land between polls.
+  local current verify_start=$SECONDS
+  while [ $((SECONDS - verify_start)) -lt 4 ]; do
     sleep 0.15
     current=$(gsi_spectated_steamid)
     if [ "$current" = "$target_sid" ]; then
@@ -261,9 +353,10 @@ verify_spec_lock() {
       return 0
     fi
   done
-  say "WARN POV did not verify after 2s — wanted=${target_sid} got='${current}' — re-pressing slot ${slot}"
+  say "WARN POV did not verify — wanted=${target_sid} got='${current}' — re-pressing slot ${slot}"
   spec_post /spec/slot "{\"slot\": ${slot}}"
-  for i in $(seq 1 14); do
+  verify_start=$SECONDS
+  while [ $((SECONDS - verify_start)) -lt 4 ]; do
     sleep 0.15
     current=$(gsi_spectated_steamid)
     if [ "$current" = "$target_sid" ]; then
@@ -282,13 +375,20 @@ verify_spec_lock() {
 # segment duration. Caller is expected to retry resume on failure.
 verify_play_resumed() {
   local baseline_tick="$1"
-  local i s tick
-  for i in 1 2 3 4 5 6; do
+  # ~2s deadline matches the old 6-iter loop's effective span (node
+  # spawn per poll).
+  local s tick line start=$SECONDS
+  while [ $((SECONDS - start)) -lt 2 ]; do
     sleep 0.1
-    s=$(spec_get_state || true)
-    [ -z "$s" ] && continue
-    tick=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-tick)
-    if [ -n "$tick" ] && [ "$tick" != "?" ] && [ "$tick" -gt "$baseline_tick" ]; then
+    if [ "$POV_STATE_FAST" = "1" ]; then
+      line=$(spec_pov_state)
+      tick="${line##*|}"
+    else
+      s=$(spec_get_state || true)
+      [ -z "$s" ] && continue
+      tick=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-tick)
+    fi
+    if [ -n "$tick" ] && [ "$tick" != "?" ] && [ "$tick" -gt "$baseline_tick" ] 2>/dev/null; then
       return 0
     fi
   done
@@ -300,11 +400,18 @@ verify_play_resumed() {
 # first GSI frame — the very first spec lock then misses because the
 # slot table is empty. Returns 0 when populated, 1 on timeout.
 wait_for_gsi_slots() {
-  local max_iters="${1:-40}"
-  local i slots
-  for i in $(seq 1 "$max_iters"); do
-    slots=$(spec_get_state 2>/dev/null \
-      | node "$CLIP_HELPERS" state-slots 2>/dev/null || true)
+  # Deadline matches the old effective window (iters x ~0.4s incl. the
+  # node spawn) so cold demo loads keep the same grace.
+  local deadline_s=$(( (${1:-40} * 2) / 5 ))
+  local start=$SECONDS slots line _a _b
+  while [ $((SECONDS - start)) -lt "$deadline_s" ]; do
+    if [ "$POV_STATE_FAST" = "1" ]; then
+      line=$(spec_pov_state)
+      IFS='|' read -r _a _b slots _ <<<"$line"
+    else
+      slots=$(spec_get_state 2>/dev/null \
+        | node "$CLIP_HELPERS" state-slots 2>/dev/null || true)
+    fi
     if [ -n "$slots" ] && [ "$slots" != "0" ]; then
       return 0
     fi
@@ -585,28 +692,61 @@ mkdir -p "$SEG_DIR"
 rm -f "$SEG_DIR"/*.mp4 "$SEG_DIR/concat.txt" 2>/dev/null || true
 : >"$SEG_DIR/concat.txt"
 
+# Per-segment polish runs in the BACKGROUND so its ~5-8s NVENC encode
+# overlaps the NEXT segment's seek+capture instead of sitting between
+# them. Concurrency is exactly 1 (reap previous before spawning next):
+# capture holds one NVENC session and the GTX 980 limit is 2.
+# CLIP_POLISH_OVERLAP=0 reaps immediately after spawn (serial behavior).
+# concat.txt is written AFTER the loop from CONCAT_ENTRY (index order) —
+# it isn't read until then, and entries are recorded before the polish
+# that rewrites the file in place has finished.
+CLIP_POLISH_OVERLAP="${CLIP_POLISH_OVERLAP:-1}"
+# 1 while every valid segment has gone through the per-segment polish
+# (one uniform encoder invocation) — the precondition for the
+# stream-copy concat fast path below.
+COPY_ELIGIBLE=1
+declare -a CONCAT_ENTRY=()
+POLISH_BG_PID=""
+POLISH_BG_IDX=""
+POLISH_BG_LOG=""
+reap_polish_bg() {
+  [ -z "$POLISH_BG_PID" ] && return 0
+  local rc=0
+  wait "$POLISH_BG_PID" || rc=$?
+  local idx="$POLISH_BG_IDX" log="$POLISH_BG_LOG"
+  POLISH_BG_PID=""; POLISH_BG_IDX=""; POLISH_BG_LOG=""
+  if [ -n "$log" ] && [ -s "$log" ]; then
+    sed "s/^/  polish[$idx]: /" "$log" >&2
+  fi
+  rm -f "$log"
+  if [ "$rc" -ne 0 ]; then
+    die_failed "ffmpeg polish pass failed (segment $idx)"
+  fi
+}
+
 # Render-phase progress 0..1 (web shows render + upload as separate
 # bars; upload is pulse-only since the curl POST has no readback).
-# BASE=0.05 covers setup overhead before any segment plays.
-PROGRESS_BASE=0.05
-PROGRESS_SPAN=0.95
+# Computed in the capture loop as 0.05 base + 0.95 span, x1000 integer math.
 ELAPSED_TICKS_TOTAL=0
 
 # Explicit index (not a `for` over seq) so an empty vkcapture segment can redo
 # the SAME index once after falling back to ximagesrc (see validation below).
 SEG_IDX=0
 VKCAP_FELL_BACK=0
+# Parse the segment table once (one node spawn) instead of 3x per
+# segment iteration. POV accountid = steamid64 - 76561197960265728;
+# the lock is applied AFTER seeking + lead-in so the freshly-seeked
+# target gets overridden — otherwise the clip opens on whoever cs2 was
+# last spectating, producing the wrong POV.
+declare -a SEG_STARTS=() SEG_ENDS=() SEG_POVS=()
+while IFS='|' read -r _s _e _a; do
+  SEG_STARTS+=("$_s"); SEG_ENDS+=("$_e"); SEG_POVS+=("$_a")
+done < <(printf '%s' "$CLIP_SEGMENTS" | node "$CLIP_HELPERS" segs-table)
+
 while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
-  SEG_START=$(printf '%s' "$CLIP_SEGMENTS" \
-    | node "$CLIP_HELPERS" seg-start-tick "$SEG_IDX")
-  SEG_END=$(printf '%s' "$CLIP_SEGMENTS" \
-    | node "$CLIP_HELPERS" seg-end-tick "$SEG_IDX")
-  # POV target. accountid = steamid64 - 76561197960265728. The lock
-  # is applied AFTER seeking + lead-in so the freshly-seeked target
-  # gets overridden — otherwise the clip opens on whoever cs2 was
-  # last spectating, producing the wrong POV.
-  SEG_POV_ACCOUNTID=$(printf '%s' "$CLIP_SEGMENTS" \
-    | node "$CLIP_HELPERS" seg-pov-accountid "$SEG_IDX")
+  SEG_START="${SEG_STARTS[$SEG_IDX]:-0}"
+  SEG_END="${SEG_ENDS[$SEG_IDX]:-0}"
+  SEG_POV_ACCOUNTID="${SEG_POVS[$SEG_IDX]:-}"
   SEG_MATCH_END_GUARDED=0
   if [ -n "$DEMO_TOTAL_TICKS_FOR_GUARD" ] \
      && [ "$DEMO_TOTAL_TICKS_FOR_GUARD" -gt 0 ] \
@@ -725,13 +865,14 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   SEG_START_ROUND=""   # GSI round_number at capture start (bleed guard anchor)
   LAST_POV_KILLS=""    # POV target's round_kills, to log the actual kill moment
   LOG_EVERY_TICKS=$(awk -v r="${CLIP_TICK_RATE:-64}" 'BEGIN{printf "%d", r * 1.5}')
-  WALLCLOCK_START_MS=$(date +%s%3N 2>/dev/null || awk 'BEGIN{srand(); printf "%d", systime()*1000}')
+  LOOP_ITERS=0
+  now_ms WALLCLOCK_START_MS
   PREV_MS=$WALLCLOCK_START_MS
   while : ; do
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
     fi
-    NOW_MS=$(date +%s%3N 2>/dev/null || echo $((PREV_MS + 150)))
+    now_ms NOW_MS
     if [ $((NOW_MS - WALLCLOCK_START_MS)) -gt "$WALLCLOCK_DEADLINE_MS" ]; then
       say "WARN segment $SEG_IDX hit ${WALLCLOCK_DEADLINE_MS}ms wall cap (done=${CUR_DONE_TICKS}t) — stopping"
       spec_post /demo/pause '{"force": true}'
@@ -740,11 +881,16 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     DELTA_MS=$((NOW_MS - PREV_MS))
     PREV_MS=$NOW_MS
 
-    # One node spawn per poll: pipe-delimited capture fields (see clip-helpers).
-    FS=$(spec_get_state || true)
-    IFS='|' read -r PHASE PHASE_ENDS MOTION GSIAGE MPHASE ROUND_NUM POV_KILLS <<EOF
-$(printf '%s' "$FS" | node "$CLIP_HELPERS" capture-fields "${SEG_POV_STEAMID:-}")
-EOF
+    # Pipe-delimited capture fields. Fast path: one in-process GET on the
+    # spec-server. Fallback (stale server): the old curl+node pipeline.
+    # A failed fetch yields an empty line -> all fields empty, same as before.
+    if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
+      FS_LINE=$(curl --fail --silent --max-time 5 \
+        "${SPEC_SERVER_URL}/demo/capture-fields?pov=${SEG_POV_STEAMID:-}" || true)
+    else
+      FS_LINE=$(spec_get_state | node "$CLIP_HELPERS" capture-fields "${SEG_POV_STEAMID:-}" || true)
+    fi
+    IFS='|' read -r PHASE PHASE_ENDS MOTION GSIAGE MPHASE ROUND_NUM POV_KILLS <<<"$FS_LINE"
     GSI_FRESH=0; { [ -n "$GSIAGE" ] && [ "$GSIAGE" -le 750 ]; } && GSI_FRESH=1
 
     # Anchor the bleed guard to the round we opened in (first fresh reading).
@@ -779,8 +925,11 @@ EOF
       FREEZE_STREAK=0
     fi
     LAST_PHASE_ENDS="$PHASE_ENDS"
-    CUR_DONE_TICKS=$(awk -v p="$PLAYED_MS" -v w="$WALLCLOCK_MS" -v t="$SEG_TICKS" \
-      'BEGIN{ printf "%d", (w>0) ? t * p / w : t }')
+    if [ "$WALLCLOCK_MS" -gt 0 ]; then
+      CUR_DONE_TICKS=$(( SEG_TICKS * PLAYED_MS / WALLCLOCK_MS ))
+    else
+      CUR_DONE_TICKS=$SEG_TICKS
+    fi
 
     # Match-end guard: playing to the literal final tick triggers cs2's
     # gameover transition and auto-closes the demo, breaking later jobs.
@@ -816,65 +965,37 @@ EOF
       LAST_LOG_TICKS=$CUR_DONE_TICKS
     fi
 
-    DONE_FRAC=$(awk \
-      -v base="$PROGRESS_BASE" -v span="$PROGRESS_SPAN" \
-      -v done_ticks="$ELAPSED_TICKS_TOTAL" \
-      -v cur="$CUR_DONE_TICKS" -v total="$TOTAL_DURATION_TICKS" \
-      'BEGIN{ if (total <= 0) total = 1; printf "%.3f", base + span * (done_ticks + cur) / total }')
-    api_status "status=rendering" "progress=$DONE_FRAC"
+    # Progress POST: throttled to >=1s, single-flight, backgrounded — the
+    # remote API must never sit in the poll's critical path. Integer math
+    # scaled x1000 mirrors base 0.05 + span 0.95 above.
+    if [ $((NOW_MS - API_PROGRESS_LAST_MS)) -ge 1000 ] \
+       && { [ -z "$API_PROGRESS_PID" ] || ! kill -0 "$API_PROGRESS_PID" 2>/dev/null; }; then
+      P_TOTAL=$TOTAL_DURATION_TICKS
+      [ "$P_TOTAL" -le 0 ] && P_TOTAL=1
+      P_MILLI=$(( 50 + 950 * (ELAPSED_TICKS_TOTAL + CUR_DONE_TICKS) / P_TOTAL ))
+      [ "$P_MILLI" -gt 1000 ] && P_MILLI=1000
+      api_status_progress_async "$NOW_MS" \
+        "$(printf '%d.%03d' $((P_MILLI / 1000)) $((P_MILLI % 1000)))"
+    fi
 
+    LOOP_ITERS=$((LOOP_ITERS + 1))
     sleep 0.15
   done
+  api_progress_settle wait
+  if [ "$LOOP_ITERS" -gt 0 ]; then
+    say "STEP 7: loop iters=${LOOP_ITERS} avg_period=$(( (NOW_MS - WALLCLOCK_START_MS) / LOOP_ITERS ))ms"
+  fi
 
   stop_capture_diag
   say "STEP 8: stop capture (segment $SEG_IDX)"
   stop_clip_capture
 
-  # Per-segment polish pass — bakes the chip overlay when present.
-  # Skipped when no chip applies so the no-chip path keeps GStreamer's
-  # capture intact. Also skipped when WILL_FUSE_POLISH_OUTRO=1 — the
-  # chip gets baked into the same filter_complex as the outro concat,
-  # saving one full NVENC encode per clip.
-  wait_for_chip_render
-  if [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] && [ -n "$CHIP_MOV" ]; then
-    HAS_AUDIO=0
-    if has_audio_stream "$SEG_FILE"; then HAS_AUDIO=1; fi
-    POLISH_FILE="${SEG_FILE}.polish.mp4"
-
-    # Keep the underlying segment's duration and blend the chip's
-    # alpha properly. The chip mov is only ~3.5s — past its end the
-    # [1:v] stream ends and overlay falls through with no chip drawn.
-    FC_VIDEO="[0:v][1:v]overlay=0:0:eof_action=pass:format=auto[vout]"
-    INPUT_ARGS=(-i "$SEG_FILE" -i "$CHIP_MOV")
-
-    AUDIO_ARGS=()
-    if [ "$HAS_AUDIO" = "1" ]; then
-      AUDIO_ARGS=(-map 0:a -c:a aac -b:a 192k)
-    else
-      AUDIO_ARGS=(-an)
-    fi
-
-    if ! ffmpeg -y -hide_banner -loglevel warning \
-         "${INPUT_ARGS[@]}" \
-         -filter_complex "$FC_VIDEO" \
-         -map "[vout]" \
-         "${AUDIO_ARGS[@]}" \
-         "${FFMPEG_VENC_ARGS[@]}" \
-         -r "${CLIP_OUTPUT_FPS:-60}" \
-         -movflags +faststart \
-         "$POLISH_FILE"; then
-      rm -f "$POLISH_FILE"
-      die_failed "ffmpeg polish pass failed (segment $SEG_IDX)"
-    fi
-    mv -f "$POLISH_FILE" "$SEG_FILE"
-  fi
-
-  # Sanity check: capture sometimes produces an mp4 with no
-  # decodable frames (cs2 mid-load, audio attach race, etc).
-  # Concat'ing an empty file silently drops everything after it,
-  # which is exactly the "got 1 kill instead of 2" bug. Probe the
-  # file and skip from concat if unusable — better to lose a beat
-  # than the rest of the highlight.
+  # Sanity check the RAW capture before any polish: capture sometimes
+  # produces an mp4 with no decodable frames (cs2 mid-load, audio attach
+  # race, etc). Concat'ing an empty file silently drops everything after
+  # it, which is exactly the "got 1 kill instead of 2" bug. Probing the
+  # raw file (not the polished one) also keeps the vkcapture-empty
+  # fallback below reachable on the chip path.
   SEG_BYTES=$(stat -c '%s' "$SEG_FILE" 2>/dev/null \
     || stat -f '%z' "$SEG_FILE" 2>/dev/null \
     || echo 0)
@@ -886,27 +1007,90 @@ EOF
     'BEGIN{print (d >= 0.5 && b > 1024) ? 1 : 0}')
   if [ "$IS_VALID" = "1" ]; then
     say "  segment $SEG_IDX OK (${SEG_BYTES}B, ${SEG_REAL_DUR}s)"
-    # A segment that captured through the gameover/menu transition (e.g. a
-    # final-round multi-kill whose wall-clock window rolls past round end)
-    # can land with no audio stream. The concat filter graph maps [i:a] for
-    # every segment unconditionally, so one audio-less segment fails the whole
-    # concat. Pad silent stereo audio (video stream-copied) to keep streams
-    # uniform across every concat path.
-    if ! has_audio_stream "$SEG_FILE"; then
-      say "  segment $SEG_IDX has no audio stream — padding silence"
-      AUD_FILE="${SEG_FILE}.aud.mp4"
-      if ffmpeg -y -hide_banner -loglevel warning \
-           -i "$SEG_FILE" \
-           -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
-           -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest \
-           -movflags +faststart "$AUD_FILE"; then
-        mv -f "$AUD_FILE" "$SEG_FILE"
-      else
-        rm -f "$AUD_FILE"
-        say "  WARN failed to pad silent audio for segment $SEG_IDX — leaving as-is"
+    # Per-segment polish pass — bakes the chip overlay when present.
+    # Skipped when no chip applies so the no-chip path keeps GStreamer's
+    # capture intact. Also skipped when WILL_FUSE_POLISH_OUTRO=1 — the
+    # chip gets baked into the same filter_complex as the outro concat,
+    # saving one full NVENC encode per clip.
+    wait_for_chip_render
+    if [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] && [ -n "$CHIP_MOV" ]; then
+      # Reap the PREVIOUS segment's polish first — single-flight.
+      reap_polish_bg
+      POLISH_BG_LOG="${SEG_FILE}.polish.log"
+      (
+        HAS_AUDIO=0
+        if has_audio_stream "$SEG_FILE"; then HAS_AUDIO=1; fi
+        POLISH_FILE="${SEG_FILE}.polish.mp4"
+
+        # Keep the underlying segment's duration and blend the chip's
+        # alpha properly. The chip mov is only ~3.5s — past its end the
+        # [1:v] stream ends and overlay falls through with no chip drawn.
+        FC_VIDEO="[0:v][1:v]overlay=0:0:eof_action=pass:format=auto[vout]"
+        INPUT_ARGS=(-i "$SEG_FILE" -i "$CHIP_MOV")
+
+        AUDIO_ARGS=()
+        if [ "$HAS_AUDIO" = "1" ]; then
+          AUDIO_ARGS=(-map 0:a -c:a aac -b:a 192k)
+        else
+          AUDIO_ARGS=(-an)
+        fi
+
+        if ! nice -n 10 ffmpeg -y -hide_banner -loglevel warning \
+             "${INPUT_ARGS[@]}" \
+             -filter_complex "$FC_VIDEO" \
+             -map "[vout]" \
+             "${AUDIO_ARGS[@]}" \
+             "${FFMPEG_VENC_ARGS[@]}" \
+             -r "${CLIP_OUTPUT_FPS:-60}" \
+             -movflags +faststart \
+             "$POLISH_FILE"; then
+          rm -f "$POLISH_FILE"
+          exit 1
+        fi
+        mv -f "$POLISH_FILE" "$SEG_FILE"
+        # A segment that captured through the gameover/menu transition can
+        # land with no audio stream; one audio-less segment fails the whole
+        # concat filter graph. Pad silent stereo (video stream-copied).
+        if ! has_audio_stream "$SEG_FILE"; then
+          echo "no audio stream — padding silence"
+          AUD_FILE="${SEG_FILE}.aud.mp4"
+          if ffmpeg -y -hide_banner -loglevel warning \
+               -i "$SEG_FILE" \
+               -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+               -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest \
+               -movflags +faststart "$AUD_FILE"; then
+            mv -f "$AUD_FILE" "$SEG_FILE"
+          else
+            rm -f "$AUD_FILE"
+            echo "WARN failed to pad silent audio — leaving as-is"
+          fi
+        fi
+      ) >"$POLISH_BG_LOG" 2>&1 &
+      POLISH_BG_PID=$!
+      POLISH_BG_IDX=$SEG_IDX
+      say "  polish[$SEG_IDX] backgrounded (pid $POLISH_BG_PID) — overlaps next segment"
+      if [ "$CLIP_POLISH_OVERLAP" != "1" ]; then
+        reap_polish_bg
+      fi
+    else
+      # No-chip path stays inline (no second encode happens here).
+      COPY_ELIGIBLE=0
+      if ! has_audio_stream "$SEG_FILE"; then
+        say "  segment $SEG_IDX has no audio stream — padding silence"
+        AUD_FILE="${SEG_FILE}.aud.mp4"
+        if ffmpeg -y -hide_banner -loglevel warning \
+             -i "$SEG_FILE" \
+             -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+             -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -shortest \
+             -movflags +faststart "$AUD_FILE"; then
+          mv -f "$AUD_FILE" "$SEG_FILE"
+        else
+          rm -f "$AUD_FILE"
+          say "  WARN failed to pad silent audio for segment $SEG_IDX — leaving as-is"
+        fi
       fi
     fi
-    printf "file '%s'\n" "$SEG_FILE" >>"$SEG_DIR/concat.txt"
+    CONCAT_ENTRY[$SEG_IDX]="$SEG_FILE"
   elif [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] && [ "$VKCAP_FELL_BACK" = "0" ]; then
     # Empty under vkcapture = the present-hook delivered no frames (e.g. the GTX
     # 980 can't host-map the layer's dmabuf: "mmap(fd0) failed: Invalid argument").
@@ -923,6 +1107,15 @@ EOF
   fi
   ELAPSED_TICKS_TOTAL=$((ELAPSED_TICKS_TOTAL + SEG_TICKS))
   SEG_IDX=$((SEG_IDX + 1))
+done
+
+# Wait for the last background polish, then write concat.txt in segment
+# order. Entries were recorded per index during the loop; nothing reads
+# concat.txt before this point.
+reap_polish_bg
+for i in $(seq 0 $((SEG_COUNT - 1))); do
+  [ -n "${CONCAT_ENTRY[$i]:-}" ] \
+    && printf "file '%s'\n" "${CONCAT_ENTRY[$i]}" >>"$SEG_DIR/concat.txt"
 done
 
 # Recompute SEG_COUNT from what actually ended up in concat.txt —
@@ -970,9 +1163,78 @@ fi
 # mismatched params on some pods. Re-encode is the fallback for that
 # case, using the same codec family as the segments to keep file
 # sizes consistent.
+# Stream-copy fast path for the outro concat: when every captured
+# segment went through the per-segment polish (one uniform encoder
+# invocation), transcode the short outro once with the same args and
+# concat-demux `-c copy` the whole montage — skipping the second full
+# re-encode. The trailing-PTS concern documented below applies to RAW
+# gst captures; polished files are clean ffmpeg muxes. PTS pathologies
+# survive -c copy silently, so the output duration is verified; any
+# failure falls back to the filter-graph encode. CLIP_CONCAT_COPY=0
+# disables the attempt.
+try_concat_copy() {
+  [ "${CLIP_CONCAT_COPY:-1}" = "1" ] || return 1
+  [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] || return 1
+  [ "$COPY_ELIGIBLE" = "1" ] || return 1
+
+  local outro_matched="$SEG_DIR/outro-matched.mp4"
+  local in_args=(-i "$OUTRO_FILE")
+  local map_args=(-map 0:v -map 0:a)
+  if ! has_audio_stream "$OUTRO_FILE"; then
+    in_args+=(-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000)
+    map_args=(-map 0:v -map 1:a -shortest)
+  fi
+  say "STEP 9: concat fast path — transcoding outro to match polished segments"
+  if ! ffmpeg -y -hide_banner -loglevel warning \
+       "${in_args[@]}" \
+       "${map_args[@]}" \
+       "${FFMPEG_VENC_ARGS[@]}" \
+       -r "${CLIP_OUTPUT_FPS:-60}" \
+       -c:a aac -b:a 192k -ar 48000 -ac 2 \
+       -movflags +faststart \
+       "$outro_matched"; then
+    say "  concat: outro transcode failed — falling back to re-encode"
+    rm -f "$outro_matched"
+    return 1
+  fi
+
+  local copy_list="$SEG_DIR/concat-copy.txt"
+  sed '$d' "$SEG_DIR/concat.txt" >"$copy_list"   # drop original outro line
+  printf "file '%s'\n" "$outro_matched" >>"$copy_list"
+
+  if ! ffmpeg -y -hide_banner -loglevel warning \
+       -f concat -safe 0 -i "$copy_list" \
+       -c copy -movflags +faststart \
+       "$CLIP_OUT_FILE" 2>/dev/null; then
+    say "  concat: stream-copy refused — falling back to re-encode"
+    rm -f "$CLIP_OUT_FILE"
+    return 1
+  fi
+
+  local expected_s actual_s
+  expected_s=$(awk -F"'" '/^file/{print $2}' "$copy_list" \
+    | while IFS= read -r f; do
+        ffprobe -v error -show_entries format=duration \
+          -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null
+      done | awk '{s+=$1} END{printf "%.2f", s}')
+  actual_s=$(ffprobe -v error -show_entries format=duration \
+    -of default=noprint_wrappers=1:nokey=1 "$CLIP_OUT_FILE" 2>/dev/null \
+    | awk '{printf "%.2f", $1}')
+  if ! awk -v a="${actual_s:-0}" -v e="${expected_s:-0}" \
+       'BEGIN{ d=a-e; if (d<0) d=-d; exit !(e > 0 && d <= 2.0) }'; then
+    say "  concat: stream-copy duration off (${actual_s:-?}s vs expected ${expected_s:-?}s) — falling back to re-encode"
+    rm -f "$CLIP_OUT_FILE"
+    return 1
+  fi
+  say "  concat: stream-copy OK (${actual_s}s, expected ${expected_s}s) — montage re-encode skipped"
+  return 0
+}
+
 if [ "$SEG_COUNT" = "1" ]; then
   ONLY_SEG=$(awk -F"'" '/^file/{print $2}' "$SEG_DIR/concat.txt" | head -1)
   mv -f "$ONLY_SEG" "$CLIP_OUT_FILE"
+elif [ "$OUTRO_APPENDED" = "1" ] && try_concat_copy; then
+  : # stream-copy fast path already produced $CLIP_OUT_FILE
 elif [ "$OUTRO_APPENDED" = "1" ]; then
   # concat filter (not demuxer) — regenerates PTS cleanly. The
   # captured segments carry trailing PTS that pushes the outro ~30s
@@ -1083,6 +1345,14 @@ restore_user_playback
 SAVED_TICK=""
 trap - EXIT
 
+# Batch mode: cs2/demo work is done — signal the batch loop so the next
+# job can start capturing while this job's thumbnail+upload tail
+# (network/disk only) finishes in the background.
+if [ -n "${CLIP_CS2_RELEASE_MARKER:-}" ]; then
+  : >"$CLIP_CS2_RELEASE_MARKER" 2>/dev/null || true
+  say "cs2 released — next batch job may start"
+fi
+
 [ -s "$CLIP_OUT_FILE" ] || die_failed "clip output is empty"
 CLIP_BYTES=$(stat -c '%s' "$CLIP_OUT_FILE" 2>/dev/null \
   || stat -f '%z' "$CLIP_OUT_FILE")
@@ -1130,13 +1400,16 @@ THUMB_BG_PID=$!
 api_status "status=uploading" "progress=0.0"
 UPLOAD_URL="${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/upload"
 say "POST $UPLOAD_URL"
+# --upload-file streams from disk; --data-binary @file slurps the whole
+# clip into RAM (matters with CLIP_BATCH_MAX_TAILS concurrent uploads).
 if ! curl --fail --silent --show-error \
        --max-time 1800 \
        --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
        --header "content-type: application/octet-stream" \
        --header "x-clip-duration-ms: ${REAL_DURATION_MS}" \
-       --data-binary "@${CLIP_OUT_FILE}" \
-       --output /tmp/clip-upload-response.json \
+       --upload-file "$CLIP_OUT_FILE" \
+       --request POST \
+       --output "/tmp/clip-upload-response-${CLIP_RENDER_JOB_ID}.json" \
        "$UPLOAD_URL"; then
   die_failed "clip upload failed"
 fi

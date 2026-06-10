@@ -42,20 +42,14 @@ patch_title_from_gsi() {
 batch_render_one_job() {
   local job_json="$1"
 
-  local job_id token segments output_dims output_fps
-  local target_sid current_title target_name target_avatar kills_count map_name round
-  job_id=$(printf       '%s' "$job_json" | node "$CLIP_HELPERS" job-id)
-  token=$(printf        '%s' "$job_json" | node "$CLIP_HELPERS" job-token)
-  segments=$(printf     '%s' "$job_json" | node "$CLIP_HELPERS" job-segments)
-  output_dims=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-output-dims)
-  output_fps=$(printf   '%s' "$job_json" | node "$CLIP_HELPERS" job-output-fps)
-  target_sid=$(printf   '%s' "$job_json" | node "$CLIP_HELPERS" job-first-pov-steamid)
-  current_title=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-title)
-  target_name=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-target-name)
-  target_avatar=$(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-target-avatar-url)
-  kills_count=$(printf  '%s' "$job_json" | node "$CLIP_HELPERS" job-kills-count)
-  map_name=$(printf     '%s' "$job_json" | node "$CLIP_HELPERS" job-map-name)
-  round=$(printf        '%s' "$job_json" | node "$CLIP_HELPERS" job-round)
+  # One node spawn for every job field (NUL-separated — free-text fields
+  # like title can contain anything except NUL, which job-fields strips).
+  local -a F=()
+  readarray -d '' -t F < <(printf '%s' "$job_json" | node "$CLIP_HELPERS" job-fields)
+  local job_id="${F[0]:-}" token="${F[1]:-}" segments="${F[2]:-}" \
+        output_dims="${F[3]:-}" output_fps="${F[4]:-}" target_sid="${F[5]:-}" \
+        current_title="${F[6]:-}" target_name="${F[7]:-}" target_avatar="${F[8]:-}" \
+        kills_count="${F[9]:-}" map_name="${F[10]:-}" round="${F[11]:-}"
 
   if [ -z "$job_id" ] || [ -z "$token" ]; then
     say "  skipping malformed job blob"
@@ -67,6 +61,8 @@ batch_render_one_job() {
 
   # Subshell so the render trap + env don't leak. MATCH_ID is unset
   # because batch pods don't publish a live match capture.
+  local marker="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}/${job_id}.cs2done"
+  rm -f "$marker"
   (
     export CLIP_RENDER_JOB_ID="$job_id"
     export CLIP_RENDER_TOKEN="$token"
@@ -81,9 +77,45 @@ batch_render_one_job() {
     export CLIP_DISPLAY_KILLS="$kills_count"
     export CLIP_DISPLAY_MAP="$map_name"
     export CLIP_DISPLAY_ROUND="$round"
+    export CLIP_CS2_RELEASE_MARKER="$marker"
     unset MATCH_ID
     bash "$LIB_DIR/inline-clip-render.sh"
-  ) || say "  job $job_id failed (others in batch unaffected)"
+  ) &
+  local pid=$!
+
+  if [ "${CLIP_BATCH_TAIL_OVERLAP:-1}" != "1" ]; then
+    wait "$pid" || say "  job $job_id failed (others in batch unaffected)"
+    rm -f "$marker"
+    return 0
+  fi
+
+  # cs2 is only needed until the final concat; the render touches the
+  # marker right after, so the next job can seek+capture while this
+  # one's thumbnail+upload tail (network/disk only) runs in background.
+  while kill -0 "$pid" 2>/dev/null && [ ! -f "$marker" ]; do
+    sleep 0.5
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" || say "  job $job_id failed (others in batch unaffected)"
+    rm -f "$marker"
+    return 0
+  fi
+  say "  job $job_id: cs2 released — upload tail continues in background"
+  TAIL_PIDS+=("$pid")
+  TAIL_JOBS+=("$job_id")
+  TAIL_MARKERS+=("$marker")
+}
+
+# Reap the oldest backgrounded upload tail (FIFO). Failures log the same
+# line the serial path used — the render POSTs status=error itself.
+reap_oldest_tail() {
+  [ "${#TAIL_PIDS[@]}" -eq 0 ] && return 0
+  local pid="${TAIL_PIDS[0]}" job="${TAIL_JOBS[0]}" marker="${TAIL_MARKERS[0]}"
+  wait "$pid" || say "  job $job failed (others in batch unaffected)"
+  rm -f "$marker"
+  TAIL_PIDS=("${TAIL_PIDS[@]:1}")
+  TAIL_JOBS=("${TAIL_JOBS[@]:1}")
+  TAIL_MARKERS=("${TAIL_MARKERS[@]:1}")
 }
 
 process_batch_jobs() {
@@ -134,6 +166,11 @@ process_batch_jobs() {
   done
   say "demo ready after ${waited}s"
 
+  # Backgrounded upload tails (job N uploads while job N+1 captures).
+  # Bounded so a slow API can't stack every clip on local disk at once.
+  local -a TAIL_PIDS=() TAIL_JOBS=() TAIL_MARKERS=()
+  local max_tails="${CLIP_BATCH_MAX_TAILS:-2}"
+
   local idx
   for idx in $(seq 0 $((count - 1))); do
     local job_json
@@ -142,7 +179,16 @@ process_batch_jobs() {
       say "  WARN failed to extract job at index $idx"
       continue
     fi
+    while [ "${#TAIL_PIDS[@]}" -ge "$max_tails" ]; do
+      say "  ${#TAIL_PIDS[@]} upload tail(s) pending — reaping oldest before next job"
+      reap_oldest_tail
+    done
     batch_render_one_job "$job_json"
+  done
+
+  while [ "${#TAIL_PIDS[@]}" -gt 0 ]; do
+    say "waiting on ${#TAIL_PIDS[@]} upload tail(s)"
+    reap_oldest_tail
   done
 
   say "batch-highlights: drained ${count} job(s) — exiting"

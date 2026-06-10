@@ -215,9 +215,11 @@ stop_clip_capture() {
     return 0
   fi
   kill -INT "$pid" 2>/dev/null || true
-  for _ in $(seq 1 30); do
+  # 0.1s polls: gst usually flushes EOS in <100ms, and every extra poll
+  # period is dead time between segments. Same 15s cap as before.
+  for _ in $(seq 1 150); do
     kill -0 "$pid" 2>/dev/null || break
-    sleep 0.5
+    sleep 0.1
   done
   if kill -0 "$pid" 2>/dev/null; then
     warn "clip capture didn't exit — forcing"

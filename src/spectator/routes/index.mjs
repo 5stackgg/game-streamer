@@ -4,6 +4,7 @@ import { readJsonBody, sendJson } from "../util/http.mjs";
 
 import { healthHandler } from "./health.mjs";
 import { demoStateHandler } from "./demo-state.mjs";
+import { captureFieldsHandler, povStateHandler } from "./capture-fields.mjs";
 import { gsiHandler } from "./gsi.mjs";
 import {
   autodirectorHandler,
@@ -40,6 +41,8 @@ const HEALTH_GET_URLS = new Set(["/", "/health", "/spec/health"]);
 
 const ROUTES = new Map([
   ["GET /demo/state", demoStateHandler],
+  ["GET /demo/capture-fields", captureFieldsHandler],
+  ["GET /demo/pov-state", povStateHandler],
   ["POST /gsi", gsiHandler],
 
   ["POST /spec/click",        clickHandler],
@@ -84,10 +87,13 @@ export async function dispatch(req, res) {
       return;
     }
 
-    const handler = ROUTES.get(`${method} ${url}`);
+    // Route on the path only — /demo/capture-fields carries a query string.
+    const qIdx = url.indexOf("?");
+    const path = qIdx >= 0 ? url.slice(0, qIdx) : url;
+    const handler = ROUTES.get(`${method} ${path}`);
     if (!handler) {
       sendJson(res, 404, { error: "not found" });
-      logResponse(method, url, res);
+      logResponse(method, path, res);
       return;
     }
 
@@ -101,17 +107,20 @@ export async function dispatch(req, res) {
       }
     }
     await handler(req, res, body);
-    logResponse(method, url, res);
+    logResponse(method, path, res);
   } catch (err) {
     process.stderr.write(`[spec-server] handler threw ${(err && err.stack) || err}\n`);
     if (!res.headersSent) sendJson(res, 500, { error: "internal" });
   }
 }
 
-// Both endpoints are polled at high frequency by upstream consumers
-// (gsi: cs2 @10Hz, demo/state: web scrubber @1Hz). Their handlers log
-// state transitions themselves; per-request lines just drown the log.
-const QUIET_URLS = new Set(["/gsi", "/demo/state"]);
+// These endpoints are polled at high frequency by upstream consumers
+// (gsi: cs2 @10Hz, demo/state: web scrubber @1Hz, capture-fields: clip
+// loop @~6Hz). Their handlers log state transitions themselves;
+// per-request lines just drown the log.
+const QUIET_URLS = new Set([
+  "/gsi", "/demo/state", "/demo/capture-fields", "/demo/pov-state",
+]);
 
 function logResponse(method, url, res) {
   if (QUIET_URLS.has(url)) return;
