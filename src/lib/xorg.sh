@@ -266,15 +266,18 @@ poke_steam_dialog() {
 # match => no click (never misclicks the store). Returns 0 only if it clicked.
 dismiss_cloud_dialog() {
   command -v xdotool >/dev/null 2>&1 && command -v gst-launch-1.0 >/dev/null 2>&1 \
-    && command -v node >/dev/null 2>&1 || return 1
+    && command -v node >/dev/null 2>&1 \
+    || { log "dismiss_cloud_dialog: missing tool (xdotool/gst/node)"; return 1; }
   local wid
   wid=$(wmctrl -lx 2>/dev/null | awk '$3=="steamwebhelper.steam" && $NF=="Steam"{print $1; exit}')
   [ -z "$wid" ] && wid=$(find_main_steam_window 2>/dev/null)
-  [ -z "$wid" ] && return 1
+  [ -z "$wid" ] && { log "dismiss_cloud_dialog: no Steam window found"; return 1; }
 
   local X Y WIDTH HEIGHT
-  eval "$(xdotool getwindowgeometry --shell "$wid" 2>/dev/null)" || return 1
-  [ "${WIDTH:-0}" -gt 0 ] && [ "${HEIGHT:-0}" -gt 0 ] || return 1
+  eval "$(xdotool getwindowgeometry --shell "$wid" 2>/dev/null)" \
+    || { log "dismiss_cloud_dialog: getwindowgeometry failed for $wid"; return 1; }
+  [ "${WIDTH:-0}" -gt 0 ] && [ "${HEIGHT:-0}" -gt 0 ] \
+    || { log "dismiss_cloud_dialog: bad geometry ${WIDTH}x${HEIGHT} for $wid"; return 1; }
 
   # Centre region where the modal sits (width rounded to /4 for RGBA, no stride).
   local cw ch x1 y1 x2 y2
@@ -285,14 +288,16 @@ dismiss_cloud_dialog() {
   local raw="${LOG_DIR:-/tmp}/cloud-modal.rgba"
   gst-launch-1.0 -q ximagesrc display-name="${DISPLAY:-:0}" startx="$x1" starty="$y1" \
     endx="$x2" endy="$y2" use-damage=0 num-buffers=1 \
-    ! videoconvert ! video/x-raw,format=RGBA ! filesink location="$raw" >/dev/null 2>&1 || return 1
+    ! videoconvert ! video/x-raw,format=RGBA ! filesink location="$raw" >/dev/null 2>&1 \
+    || { log "dismiss_cloud_dialog: ximagesrc capture failed (${x1},${y1})-(${x2},${y2})"; return 1; }
 
   # node confirms a button-sized blue blob; prints "cx cy w h count" or nothing.
   local out cx cy bw bh
-  out=$(node "$LIB_DIR/find-cloud-button.mjs" "$raw" "$cw" "$ch" 2>/dev/null)
-  [ -z "$out" ] && return 1
+  out=$(node "$LIB_DIR/find-cloud-button.mjs" "$raw" "$cw" "$ch" 2>&1) \
+    || { log "dismiss_cloud_dialog: find-cloud-button error: $out"; return 1; }
+  [ -z "$out" ] && { log "dismiss_cloud_dialog: no blue button in ${cw}x${ch} region (window $wid @ ${X},${Y} ${WIDTH}x${HEIGHT})"; return 1; }
   read -r cx cy bw bh _ <<<"$out"
-  [ -n "$cx" ] && [ -n "$cy" ] || return 1
+  [ -n "$cx" ] && [ -n "$cy" ] || { log "dismiss_cloud_dialog: unparsable finder output: $out"; return 1; }
 
   local px=$(( x1 + cx )) py=$(( y1 + cy ))
   log "dismiss_cloud_dialog: Play anyway @ ${px},${py} (button ${bw}x${bh})"

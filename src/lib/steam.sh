@@ -1469,7 +1469,9 @@ validate_report_progress() {
 cloud_conflict_active() {
   local f="${STEAM_HOME:-/root/.local/share/Steam}/logs/cloud_log.txt"
   [ -f "$f" ] || return 1
-  grep -aqiE '\[AppID 730\].*conflict' "$f" 2>/dev/null
+  # "conflict" = sync-conflict variant; "pending remote operations" = the
+  # "(upload not started)" variant (save on another machine not yet uploaded).
+  grep -aqiE '\[AppID 730\].*(conflict|returned [1-9][0-9]* pending remote operation)' "$f" 2>/dev/null
 }
 
 # wait_for_cs2_process <applaunch_fn>
@@ -1498,7 +1500,7 @@ cloud_conflict_active() {
 # scope; we invoke it as `"$1"`.
 wait_for_cs2_process() {
   local applaunch_fn="${1:?applaunch function name required}"
-  local pid="" i=0 cloud_pokes=0
+  local pid="" i=0 cloud_pokes=0 cloud_detected=0 steam_gone=0
   # Re-applaunch recovery state (see header): count + last loop we re-launched.
   local relaunches=0 last_relaunch_i=0
 
@@ -1549,6 +1551,27 @@ wait_for_cs2_process() {
 
     [ $(( i % 15 )) -eq 0 ] && log "  ${i}s elapsed waiting on cs2..."
 
+    # Steam client watchdog: the client can segfault after boot (breakpad dump
+    # fires, the steam.sh wrapper survives holding the IPC pipe) — every
+    # applaunch then "forwards" into the corpse and cs2 never spawns. Three
+    # consecutive 5s checks with no client process = dead → full restart.
+    if [ $(( i % 5 )) -eq 0 ]; then
+      if pgrep -f 'ubuntu12_32/steam' >/dev/null 2>&1; then
+        steam_gone=0
+      else
+        steam_gone=$(( steam_gone + 1 ))
+        if [ "$steam_gone" -ge 3 ]; then
+          log "  Steam client process gone ~15s (segfault?) — restarting Steam"
+          kill_steam
+          start_steam
+          wait_for_steam_pipe "${STEAM_PIPE_TIMEOUT:-300}"
+          wait_for_main_steam_window "${STEAM_WINDOW_TIMEOUT:-300}" || true
+          steam_gone=0; cloud_pokes=0; relaunches=0; last_relaunch_i=$i
+          "$applaunch_fn"
+        fi
+      fi
+    fi
+
     # Surface a Steam game-file validation pass (corrupt-files repair / partial
     # update) as status=validating. Self-throttles; no-op when not validating.
     # Capture whether it's actively validating so re-applaunch holds off.
@@ -1574,11 +1597,20 @@ wait_for_cs2_process() {
     # Cloud "Out of Date" modal: gate on the FRESH (boot-wiped) cloud_log — a 730
     # conflict line means the modal is actually up THIS run. Only then dismiss.
     # Fresh log = no stale false-positives (won't fire on the shader screen).
-    if [ "$cloud_pokes" -lt "${CLOUD_DISMISS_MAX:-1}" ] && [ $(( i % 4 )) -eq 0 ] \
-       && declare -F cloud_conflict_active >/dev/null 2>&1 && cloud_conflict_active \
-       && declare -F dismiss_cloud_dialog >/dev/null 2>&1 && dismiss_cloud_dialog; then
-      cloud_pokes=$(( cloud_pokes + 1 ))
-      log "  dismissed Cloud Out of Date modal"
+    if [ $(( i % 4 )) -eq 0 ] \
+       && declare -F cloud_conflict_active >/dev/null 2>&1 && cloud_conflict_active; then
+      if [ "$cloud_detected" != 1 ]; then
+        cloud_detected=1
+        log "  Cloud Out of Date signature in cloud_log @ ${i}s"
+      fi
+      if [ "$cloud_pokes" -lt "${CLOUD_DISMISS_MAX:-1}" ]; then
+        if declare -F dismiss_cloud_dialog >/dev/null 2>&1 && dismiss_cloud_dialog; then
+          cloud_pokes=$(( cloud_pokes + 1 ))
+          log "  dismissed Cloud Out of Date modal (poke ${cloud_pokes}/${CLOUD_DISMISS_MAX:-1})"
+        else
+          log "  dismiss_cloud_dialog failed — retrying in 4s"
+        fi
+      fi
     fi
 
     # Re-applaunch recovery: after a fresh steamcmd download/update, Steam often
