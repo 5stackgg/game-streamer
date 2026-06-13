@@ -211,7 +211,17 @@ do_applaunch() {
     cs2_args+=(+password "$CS2_CONNECT_PASSWORD" +connect "$CS2_CONNECT_ADDR")
   fi
   export_cs2_shader_cache_env  # cs2-only GLCache env (pod-wide broke Steam)
-  local cmd=("$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
+  # Confine cs2 to its own cores (disjoint from the capture pipeline's) so the two
+  # never share a core — affinity is inherited by the cs2 child of the steam
+  # wrapper. No-op on <4-core boxes / when taskset is absent (see cs2_cpu_pin).
+  compute_cpu_split  # set GS_CS2_CPUS/GS_CAPTURE_CPUS in THIS shell (the pin runs in a subshell)
+  local cs2_pin=(); mapfile -t cs2_pin < <(cs2_cpu_pin)
+  if [ "${#cs2_pin[@]}" -gt 0 ]; then
+    log "cs2 pinned to cores ${GS_CS2_CPUS} (off the capture cores ${GS_CAPTURE_CPUS}); nproc=$(nproc)"
+  else
+    log "cs2 NOT core-pinned: nproc=$(nproc) < GS_CS2_PIN_MIN_CORES=${GS_CS2_PIN_MIN_CORES:-6} (cs2 shares all cores; capture cores=${GS_CAPTURE_CPUS:-none})"
+  fi
+  local cmd=("${cs2_pin[@]}" "$STEAM_HOME/ubuntu12_32/steam" -applaunch 730 "${cs2_args[@]}")
   spawn_logged cs2-launch "${cmd[@]}"
 }
 do_applaunch

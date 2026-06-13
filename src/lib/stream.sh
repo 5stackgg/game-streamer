@@ -132,7 +132,7 @@ start_capture() {
       pipeline="$outchain ! queue ! mux. \
 $cs2_src \
 $hud_src \
-pulsesrc device=$pulse_source ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue ! mux. \
+pulsesrc device=$pulse_source buffer-time=400000 provide-clock=false ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue ! mux. \
 mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=200"
     else
       pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=200 \
@@ -140,29 +140,23 @@ $cs2_src \
 $hud_src"
     fi
     export VKCAP_FPS="$fps"
+    # Zero-copy is clip-only: the software `compositor` here blends in system
+    # memory and can't consume a device-local dmabuf. Force it off so a global
+    # VKCAP_ZEROCOPY=1 can't push this path into the ximagesrc fallback.
+    export VKCAP_ZEROCOPY=0
     # Seed visible=1; consumer reads VKCAP_HUD_CTL and polls it for show/hide.
     printf '1\n' > "$hud_ctl"
     export VKCAP_HUD_CTL="$hud_ctl"
     # Pin the capture pipeline to dedicated high cores so its gst threads don't
-    # pile (wake-affinity) onto a core cs2 is using and peg it. CAPTURE_CPUS
-    # overrides the list (empty = no pin).
+    # pile (wake-affinity) onto a core cs2 is using and peg it. cs2 is pinned to
+    # the complementary cores at launch (cs2_cpu_pin), so the split is real — they
+    # never share a core. CAPTURE_CPUS overrides the list (empty = no pin);
+    # CAPTURE_CORES sets the count (2 is the floor — capture needs ~1.7 cores).
     local capture_pin=()
-    if [ -z "${CAPTURE_CPUS+x}" ] && command -v taskset >/dev/null 2>&1; then
-      local _ncpu _capn _caplo
-      _ncpu=$(nproc 2>/dev/null || echo 0)
-      if [ "$_ncpu" -ge 4 ]; then
-        # Capture needs ~1.7 cores, so 2 is the floor (1 bottlenecks it).
-        # Override the count with CAPTURE_CORES.
-        _capn="${CAPTURE_CORES:-2}"
-        [ "$_capn" -lt 1 ] && _capn=1
-        [ "$_capn" -ge "$_ncpu" ] && _capn=$(( _ncpu - 1 ))
-        _caplo=$(( _ncpu - _capn ))
-        CAPTURE_CPUS="${_caplo}-$(( _ncpu - 1 ))"
-      fi
-    fi
-    if [ -n "${CAPTURE_CPUS:-}" ]; then
-      capture_pin=(taskset -c "$CAPTURE_CPUS")
-      log "  capture pinned to cores $CAPTURE_CPUS (off cs2's cores)"
+    compute_cpu_split
+    if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
+      capture_pin=(taskset -c "$GS_CAPTURE_CPUS")
+      log "  capture pinned to cores $GS_CAPTURE_CPUS (cs2 confined to ${GS_CS2_CPUS:-all})"
     fi
     spawn_logged "$gst_tag" "${capture_pin[@]}" vkcapture-consumer "$pipeline"
     sleep 1
@@ -190,7 +184,7 @@ $hud_src"
           ! $enc \
           ! $parse \
           ! queue ! mux. \
-        pulsesrc device="$pulse_source" \
+        pulsesrc device="$pulse_source" buffer-time=400000 provide-clock=false \
           ! audio/x-raw,rate=48000,channels=2 \
           ! audioconvert \
           ! audioresample \

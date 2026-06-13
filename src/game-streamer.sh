@@ -6,6 +6,8 @@ SCRIPT_TAG=game-streamer
 
 # shellcheck disable=SC1091
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/shader-cache.sh"   # should_warm_shaders for the batch pre-warm
 
 load_env
 
@@ -132,6 +134,20 @@ run_demo_flow() {
     echo $! > /tmp/game-streamer/workshop-download.pid
   fi
   "$FLOWS_DIR/setup-steam.sh" "$@" || exit $?
+  # Cold-shader first-segment fix: the FIRST cs2 process renders cold — Vulkan
+  # pipelines compile on first encounter, stalling the render thread, so the first
+  # segment's fps dips (GPU+CPU idle during the dip; later segments run warm). Run
+  # Steam's Fossilize precache once per node (persists on the library volume) so the
+  # render cs2 starts warm. Gated on a cold cache (warmed nodes skip the ~60-90s);
+  # batch only. setup-steam left Steam+Xorg up, which warm-shaders needs.
+  if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
+    if should_warm_shaders; then
+      log "shader pre-warm: cold ($(cs2_shadercache_dir)=$(cs2_shadercache_mib)MiB, GS_WARM_SHADERS=${GS_WARM_SHADERS:-auto}) — warming once before render"
+      "$FLOWS_DIR/warm-shaders.sh" "$@" || warn "shader pre-warm failed — continuing (first segment may stutter)"
+    else
+      log "shader pre-warm: SKIPPED ($(cs2_shadercache_dir)=$(cs2_shadercache_mib)MiB ≥ ${GS_SHADERCACHE_MIN_MIB:-50}MiB, GS_WARM_SHADERS=${GS_WARM_SHADERS:-auto})"
+    fi
+  fi
   exec "$FLOWS_DIR/run-demo.sh" "$@"
 }
 

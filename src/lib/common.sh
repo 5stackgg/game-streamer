@@ -397,6 +397,23 @@ _cuda_scale_available() {
   [ "$GS_CUDASCALE_OK" = 1 ]
 }
 
+# True when this pod's `cudaupload` advertises DMABuf import on its sink — the
+# prerequisite for the zero-copy clip path (consumer pushes memory:DMABuf buffers;
+# without import support negotiation fails and the consumer dies mid-render). Older
+# gst-plugins-bad builds lack it. Gates VKCAP_ZEROCOPY so a miss degrades to the
+# host-map copy path up front instead of crashing. Cached per-process.
+_cudaupload_dmabuf_ok() {
+  if [ -z "${GS_CUDAUPLOAD_DMABUF:-}" ]; then
+    if gst-inspect-1.0 cudaupload 2>/dev/null | grep -q 'memory:DMABuf'; then
+      GS_CUDAUPLOAD_DMABUF=1
+    else
+      GS_CUDAUPLOAD_DMABUF=0
+    fi
+    export GS_CUDAUPLOAD_DMABUF
+  fi
+  [ "$GS_CUDAUPLOAD_DMABUF" = 1 ]
+}
+
 # Emit the scale + colorspace-convert fragment that feeds the encoder.
 # When the active encoder is a CUDA NVENC element and cudaconvertscale is
 # present, the scale (e.g. 1440p->1080p) and RGBx->NV12 convert run on the
@@ -453,6 +470,50 @@ _drm_modeset_on() {
   [ -r "$f" ] || return 0
   v=$(cat "$f" 2>/dev/null)
   [ "$v" != "N" ] && [ "$v" != "0" ]
+}
+
+# CPU split between cs2 and the capture pipeline. Pinning the capture consumer to
+# the top cores only ISOLATES it if cs2 is confined to the complementary cores —
+# otherwise cs2's threads still schedule onto the capture cores and the two fight
+# (which jitters cs2's present + starves its audio thread → the frame/audio
+# hitch). This computes one consistent split: capture gets the top CAPTURE_CORES
+# cores (default 2), cs2 gets the rest. Sets GS_CAPTURE_CPUS + GS_CS2_CPUS (taskset
+# -c lists). Env overrides win: pre-set CAPTURE_CPUS / CS2_CPUS are honored as-is;
+# empty string = "don't pin this side". Only splits on a box with ≥4 cores (below
+# that, carving out cores starves cs2 more than contention does). Idempotent.
+compute_cpu_split() {
+  [ -n "${GS_CPU_SPLIT_DONE:-}" ] && return 0
+  local ncpu capn caphi caplo
+  ncpu=$(nproc 2>/dev/null || echo 0)
+  if [ "$ncpu" -ge 4 ]; then
+    capn="${CAPTURE_CORES:-2}"
+    [ "$capn" -lt 1 ] && capn=1
+    [ "$capn" -ge "$ncpu" ] && capn=$(( ncpu - 1 ))
+    caplo=$(( ncpu - capn )); caphi=$(( ncpu - 1 ))
+    # `+x` test: only fill in a side the caller didn't explicitly set (even to "").
+    # Capture pin: status quo from ≥4 cores. cs2 pin: only once there are enough
+    # cores that confining cs2 still leaves it a healthy share — below
+    # GS_CS2_PIN_MIN_CORES (default 6 → cs2 keeps ≥4) we'd hand heavily-threaded
+    # cs2 too few exclusive cores, which hurts more than the contention it removes.
+    [ -z "${CAPTURE_CPUS+x}" ] && CAPTURE_CPUS="${caplo}-${caphi}"
+    if [ -z "${CS2_CPUS+x}" ] && [ "$ncpu" -ge "${GS_CS2_PIN_MIN_CORES:-6}" ]; then
+      CS2_CPUS="0-$(( caplo - 1 ))"
+    fi
+  fi
+  GS_CAPTURE_CPUS="${CAPTURE_CPUS:-}"
+  GS_CS2_CPUS="${CS2_CPUS:-}"
+  GS_CPU_SPLIT_DONE=1
+  export GS_CAPTURE_CPUS GS_CS2_CPUS GS_CPU_SPLIT_DONE CAPTURE_CPUS CS2_CPUS
+}
+
+# taskset prefix array for cs2: confines cs2 to GS_CS2_CPUS so it never shares a
+# core with the capture pipeline. Usage: read into an array, prepend to the launch
+# cmd. Empty (no-op) when taskset is missing or the split decided not to pin.
+cs2_cpu_pin() {
+  compute_cpu_split
+  if [ -n "${GS_CS2_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
+    printf 'taskset\n-c\n%s\n' "$GS_CS2_CPUS"
+  fi
 }
 
 # True when CLIP_CAPTURE_METHOD selects vkcapture AND it can run here (consumer

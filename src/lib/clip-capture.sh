@@ -85,51 +85,89 @@ _start_clip_capture_vkcapture() {
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
   _assert_cuda_chain "$convert" "$enc"
 
-  log "  clip capture: $out_file (vkcapture/present-hook -> ${out_w}x${out_h}@${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
-
-  # appsrc (name=vksrc) is filled by the consumer from cs2's swapchain; everything
-  # downstream matches the ximagesrc path. qtmux faststart=true keeps moov first.
-  # videorate + framerate caps -> exact CFR (appsrc frames are stamped on the live
-  # clock by do-timestamp, so timing can wobble; videorate dups/drops to lock $fps).
-  local vsrc="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1"
-  local pipeline
-  if [ "$audio" = "1" ]; then
-    pipeline="$vsrc ! $convert ! $enc ! $parse_caps ! queue ! mux. \
-pulsesrc device=$pulse_source ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! avenc_aac bitrate=192000 ! aacparse ! queue ! mux. \
-qtmux faststart=true name=mux ! filesink location=$out_file"
-  else
-    pipeline="$vsrc ! $convert ! $enc ! $parse_caps ! qtmux faststart=true ! filesink location=$out_file"
-  fi
-
-  export VKCAP_FPS="$fps"
-  # Pin the consumer to dedicated high cores so its gst threads don't pile
-  # (wake-affinity) onto a core cs2 is using and jitter the sampling. Mirrors
-  # stream.sh; CAPTURE_CPUS overrides the list (empty = no pin).
-  local capture_pin=()
-  if [ -z "${CAPTURE_CPUS+x}" ] && command -v taskset >/dev/null 2>&1; then
-    local _ncpu _capn _caplo
-    _ncpu=$(nproc 2>/dev/null || echo 0)
-    if [ "$_ncpu" -ge 4 ]; then
-      _capn="${CAPTURE_CORES:-2}"
-      [ "$_capn" -lt 1 ] && _capn=1
-      [ "$_capn" -ge "$_ncpu" ] && _capn=$(( _ncpu - 1 ))
-      _caplo=$(( _ncpu - _capn ))
-      CAPTURE_CPUS="${_caplo}-$(( _ncpu - 1 ))"
+  # Zero-copy dmabuf import (VKCAP_ZEROCOPY, default ON): the consumer hands appsrc
+  # a DEVICE-LOCAL dmabuf and cudaupload imports it on the GPU — the CPU never
+  # copies a frame (vs. the host-map wc_copy + PCIe round-trip). Preflight gates it
+  # to where it can work: the encode chain must be CUDA (a CPU videoconvert can't
+  # consume memory:DMABuf) and this gst's cudaupload must advertise DMABuf import.
+  # Either miss => host-map copy path (correct, just costs the CPU copy).
+  local zc="${VKCAP_ZEROCOPY:-1}"
+  if [ "$zc" != "0" ]; then
+    if [[ "$convert" != *cudaupload* ]]; then
+      warn "zero-copy wanted but encode chain isn't CUDA (no cudaupload) — using host-map copy"
+      zc=0
+    elif ! _cudaupload_dmabuf_ok; then
+      warn "zero-copy wanted but this gst cudaupload lacks memory:DMABuf import — using host-map copy"
+      zc=0
+    else
+      zc=1
     fi
   fi
-  if [ -n "${CAPTURE_CPUS:-}" ]; then
-    capture_pin=(taskset -c "$CAPTURE_CPUS")
-    log "  clip capture pinned to cores $CAPTURE_CPUS (off cs2's cores)"
+
+  log "  clip capture: $out_file (vkcapture/present-hook -> ${out_w}x${out_h}@${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
+
+  export VKCAP_FPS="$fps"
+  # Diagnostics: when the per-segment capture diag is on, have the consumer log
+  # presents/s each second too. It's present-locked, so presents/s == cs2's real
+  # render fps — this is the missing signal next to the DIAG gpu/cpu lines (a low
+  # presents/s with GPU pegged = GPU-bound; low presents/s with GPU idle + cs2cpu
+  # near one core = sim/CPU-bound). Set CLIP_CAPTURE_DIAG=0 to mute both.
+  [ "${CLIP_CAPTURE_DIAG:-1}" = "1" ] && export VKCAP_DEBUG="${VKCAP_DEBUG:-1}"
+  # Pin the consumer to dedicated high cores so its gst threads don't pile
+  # (wake-affinity) onto a core cs2 is using and jitter the sampling. cs2 is
+  # pinned to the complementary cores at launch (cs2_cpu_pin), so the split is
+  # real — they never share a core. CAPTURE_CPUS overrides the list (empty = no pin).
+  local capture_pin=()
+  compute_cpu_split
+  if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
+    capture_pin=(taskset -c "$GS_CAPTURE_CPUS")
+    log "  clip capture pinned to cores $GS_CAPTURE_CPUS (cs2 confined to ${GS_CS2_CPUS:-all})"
   fi
-  spawn_logged vkcap-clip "${capture_pin[@]}" vkcapture-consumer "$pipeline"
-  local pid=$SPAWNED_PID
-  sleep 0.5
-  if ! kill -0 "$pid" 2>/dev/null; then
+
+  # Spawn the consumer. Zero-copy can still fail at runtime on a bad node
+  # (driver / dmabuf modifier); if the consumer dies on spawn, retry ONCE with
+  # zero-copy off (host-map copy) before giving up to ximagesrc — host-map
+  # vkcapture still beats the X-server grab.
+  local attempt
+  for attempt in 1 2; do
+    export VKCAP_ZEROCOPY="$zc"
+    # $vfeat tags the appsrc caps with memory:DMABuf so the feature survives the
+    # framerate filter into cudaupload. appsrc (name=vksrc) is filled by the
+    # consumer from cs2's swapchain; everything downstream matches the ximagesrc
+    # path. qtmux faststart=true keeps moov first. videorate + framerate caps ->
+    # exact CFR (appsrc frames are do-timestamp stamped on the live clock, so timing
+    # can wobble; videorate dups/drops to lock $fps).
+    local vfeat=""
+    [ "$zc" = "1" ] && { vfeat="(memory:DMABuf)"; log "  clip capture: zero-copy dmabuf import ON (no CPU frame copy)"; }
+    local vsrc="appsrc name=vksrc ! queue ! videorate ! video/x-raw${vfeat},framerate=$fps/1"
+    local pipeline
+    if [ "$audio" = "1" ]; then
+      # Deep pulsesrc buffer (2s) + a non-leaky 2s audio queue: file output has no
+      # latency budget, so the slack lets a transient video-encode stall ride through
+      # without the Pulse capture overflowing -> the audio hitch. provide-clock=false
+      # keeps a jittery monitor source from driving the pipeline clock.
+      pipeline="$vsrc ! $convert ! $enc ! $parse_caps ! queue ! mux. \
+pulsesrc device=$pulse_source buffer-time=2000000 provide-clock=false ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! avenc_aac bitrate=192000 ! aacparse ! queue max-size-time=2000000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
+qtmux faststart=true name=mux ! filesink location=$out_file"
+    else
+      pipeline="$vsrc ! $convert ! $enc ! $parse_caps ! qtmux faststart=true ! filesink location=$out_file"
+    fi
+    spawn_logged vkcap-clip "${capture_pin[@]}" vkcapture-consumer "$pipeline"
+    local pid=$SPAWNED_PID
+    sleep 0.5
+    if kill -0 "$pid" 2>/dev/null; then
+      CLIP_CAPTURE_PID=$pid
+      return 0
+    fi
+    if [ "$zc" = "1" ]; then
+      warn "zero-copy consumer died on spawn — retrying with host-map copy"
+      zc=0
+      continue
+    fi
     warn "vkcapture-consumer died on spawn — obs-vkcapture layer not loaded in cs2 (OBS_VKCAPTURE=1 launch option?), nvidia-drm.modeset=1 missing on host, or bad gst pipeline"
     return 1
-  fi
-  CLIP_CAPTURE_PID=$pid
-  return 0
+  done
+  return 1
 }
 
 # Reads $CLIP_OUTPUT_DIMS from env to scale capture → output dims so
@@ -176,13 +214,13 @@ _start_clip_capture_gst() {
         ! $enc \
         ! $parse_caps \
         ! queue ! mux. \
-      pulsesrc device="$pulse_source" \
+      pulsesrc device="$pulse_source" buffer-time=2000000 provide-clock=false \
         ! audio/x-raw,rate=48000,channels=2 \
         ! audioconvert \
         ! audioresample \
         ! avenc_aac bitrate=192000 \
         ! aacparse \
-        ! queue ! mux. \
+        ! queue max-size-time=2000000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
       qtmux faststart=true name=mux \
         ! filesink location="$out_file"
   else

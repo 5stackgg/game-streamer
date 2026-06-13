@@ -17,11 +17,55 @@ export_cs2_shader_cache_env() {
   export __GL_SHADER_DISK_CACHE_PATH="${__GL_SHADER_DISK_CACHE_PATH:-$GL_SHADER_CACHE_DIR}"
   export __GL_SHADER_DISK_CACHE_SIZE="${__GL_SHADER_DISK_CACHE_SIZE:-10737418240}"
   export __GL_SHADER_DISK_CACHE_SKIP_CLEANUP="${__GL_SHADER_DISK_CACHE_SKIP_CLEANUP:-1}"
-  log "cs2 shader cache: path=$__GL_SHADER_DISK_CACHE_PATH size=$__GL_SHADER_DISK_CACHE_SIZE"
+  # Report current cache occupancy (bytes + file count). The driver disables the
+  # GLCache for root, so the real question is whether it's actually persisting:
+  # if this stays ~0 / doesn't grow run-over-run, the cache isn't working and
+  # EVERY first segment renders cold-shader (the present-rate dip / stutter).
+  local _cn _cb
+  _cn=$(find "$__GL_SHADER_DISK_CACHE_PATH" -type f 2>/dev/null | wc -l | tr -d ' ')
+  _cb=$(du -sh "$__GL_SHADER_DISK_CACHE_PATH" 2>/dev/null | awk '{print $1}')
+  log "cs2 shader cache: path=$__GL_SHADER_DISK_CACHE_PATH size=$__GL_SHADER_DISK_CACHE_SIZE occupancy=${_cb:-?} files=${_cn:-?}"
 }
 
 shader_log_file() {
   printf '%s/logs/shader_log.txt' "${STEAM_HOME:-/root/.local/share/Steam}"
+}
+
+# Steam's Fossilize Vulkan shader cache for cs2 (steamapps/shadercache/730).
+# This — NOT the NVIDIA GLCache (nvcache) — is where cs2's Vulkan pipelines come
+# from, and it persists on the node's library volume. Path-only.
+cs2_shadercache_dir() {
+  printf '%s/steamapps/shadercache/730' "${STEAM_LIBRARY:-/mnt/game-streamer}"
+}
+
+# Current Fossilize cache occupancy in MiB (0 when missing) — for the warm-decision log.
+cs2_shadercache_mib() {
+  local d kib; d="$(cs2_shadercache_dir)"
+  [ -d "$d" ] || { printf '0'; return; }
+  kib=$(du -sk "$d" 2>/dev/null | awk '{print $1}')
+  printf '%s' "$(( ${kib:-0} / 1024 ))"
+}
+
+# True when the node already has a populated Fossilize cache, so we can skip the
+# one-time pre-warm. Heuristic: ≥50 MiB of compiled pipelines = warm; a cold/fresh
+# node has the dir missing or near-empty. Override the floor with GS_SHADERCACHE_MIN_MIB.
+cs2_shadercache_populated() {
+  local d; d="$(cs2_shadercache_dir)"
+  [ -d "$d" ] || return 1
+  local kib; kib=$(du -sk "$d" 2>/dev/null | awk '{print $1}')
+  [ -n "$kib" ] && [ "$kib" -ge "$(( ${GS_SHADERCACHE_MIN_MIB:-50} * 1024 ))" ]
+}
+
+# Whether to run the node shader pre-warm before a batch render. GS_WARM_SHADERS
+# overrides: 1/on=always, 0/off=never. Default (auto): warm only when the
+# Fossilize cache is cold — the first batch pod on a fresh node pays the one-time
+# ~60-90s; warmed nodes skip it. Fixes the cold-shader first-segment fps dip.
+should_warm_shaders() {
+  case "${GS_WARM_SHADERS:-auto}" in
+    1|on|true|yes)  return 0 ;;
+    0|off|false|no) return 1 ;;
+  esac
+  ! cs2_shadercache_populated
 }
 
 # Echo "pct compiled total" from a "Still replaying 730 (NN%, d/t)." line.

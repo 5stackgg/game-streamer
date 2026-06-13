@@ -147,6 +147,10 @@ process_batch_jobs() {
   fi
 
   rm -f "$CS2_FATAL_SENTINEL"   # fresh session — drop any stale fatal marker
+  # Fresh cs2 process for this batch → its Vulkan pipelines are cold again. Drop
+  # the warm marker so inline-clip-render re-warms on the first segment (see
+  # warm_pipelines_if_cold). Keep the path in sync with CLIP_WARMUP_MARKER there.
+  rm -f "${CLIP_WARMUP_MARKER:-/tmp/game-streamer/.pipelines-warmed}"
 
   local count
   count=$(printf '%s' "$CLIP_BATCH_JOBS" | node "$CLIP_HELPERS" jobs-count)

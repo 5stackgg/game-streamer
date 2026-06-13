@@ -47,6 +47,8 @@
 #include <glib-unix.h>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
+#include <gst/allocators/allocators.h>   // GstDmaBufAllocator — zero-copy dmabuf wrap
+#include <gst/video/video.h>             // GstVideoMeta — stride/offset on the dmabuf
 
 #include "capture.h"
 
@@ -79,6 +81,14 @@ struct state {
     // mmap of fds[0] (the host-visible shared image)
     void      *map_ptr;
     size_t     map_len;
+
+    // zero-copy: when set (VKCAP_ZEROCOPY=1), the layer hands us a DEVICE-LOCAL
+    // dmabuf (map_host=0) and we wrap its fd straight into a GstBuffer for
+    // `cudaupload` to import on the GPU — no host map, no CPU pixel copy, no PCIe
+    // readback. Off (default): the host-mapped wc_copy path below. Auto-disabled at
+    // runtime if the layer reports a flipped image (can't cheaply GPU-flip a dmabuf).
+    bool        zerocopy;
+    GstAllocator *dmabuf_alloc;  // shared GstDmaBufAllocator for the wrapped fds
 
     // gstreamer
     GstElement *pipeline;
@@ -127,6 +137,19 @@ static const char *fourcc_to_gst(uint32_t f)
     }
 }
 
+// Same mapping as fourcc_to_gst but to the GstVideoFormat enum, for the
+// GstVideoMeta we attach to zero-copy dmabuf buffers (stride/offset metadata).
+static GstVideoFormat fourcc_to_gst_vfmt(uint32_t f)
+{
+    switch (f) {
+    case DRM_FORMAT_XRGB8888: return GST_VIDEO_FORMAT_BGRx;
+    case DRM_FORMAT_ARGB8888: return GST_VIDEO_FORMAT_BGRA;
+    case DRM_FORMAT_XBGR8888: return GST_VIDEO_FORMAT_RGBx;
+    case DRM_FORMAT_ABGR8888: return GST_VIDEO_FORMAT_RGBA;
+    default:                  return GST_VIDEO_FORMAT_UNKNOWN;
+    }
+}
+
 static void fourcc_str(uint32_t f, char out[5])
 {
     out[0] = (char)(f & 0xff);
@@ -172,16 +195,20 @@ static bool geometry_ok(const struct capture_texture_data *td, int nfd)
 }
 
 // ---- control: tell the layer to start producing --------------------------
-// Request a LINEAR, host-visible, no-modifier dmabuf so we can mmap + memcpy it
-// with the CPU. (device_uuid left zero — single GPU; the layer allocates on its
-// own device.)
+// Default: request a LINEAR, host-visible, no-modifier dmabuf so we can mmap +
+// memcpy it with the CPU. Zero-copy (st.zerocopy): request map_host=0 so the
+// shared image stays DEVICE-LOCAL — we wrap its fd into a GstBuffer for cudaupload
+// to import on the GPU, so the CPU never touches a pixel. Still LINEAR + no
+// modifiers (keeps the consumer's video-meta simple; the layer's per-present blit
+// into the shared image is inherent either way). (device_uuid left zero — single
+// GPU; the layer allocates on its own device.)
 static void send_control(int fd, bool capturing)
 {
     struct capture_control_data c = {0};
     c.capturing    = capturing ? 1 : 0;
     c.no_modifiers = 1;
     c.linear       = 1;
-    c.map_host     = 1;
+    c.map_host     = st.zerocopy ? 0 : 1;
 
     // Ask the layer to poke us per present, handing it our eventfd via SCM_RIGHTS.
     // A patched layer reads want_present_signal + the fd; an unpatched layer treats
@@ -226,11 +253,16 @@ static void set_caps_if_needed(void)
         "height",    G_TYPE_INT, st.height,
         "framerate", GST_TYPE_FRACTION, st.fps, 1,
         NULL);
+    // Zero-copy: tag the caps with the DMABuf memory feature so downstream
+    // negotiates the dmabuf import (cudaupload) instead of expecting system memory.
+    if (st.zerocopy)
+        gst_caps_set_features_simple(caps, gst_caps_features_new("memory:DMABuf", NULL));
     gst_app_src_set_caps(st.appsrc, caps);
     gst_caps_unref(caps);
     st.caps_set = true;
-    log_msg("appsrc caps: %s %dx%d @%dfps (stride0=%d flip=%d)",
-            gfmt, st.width, st.height, st.fps, st.strides[0], st.flip);
+    log_msg("appsrc caps: %s %dx%d @%dfps (stride0=%d flip=%d%s)",
+            gfmt, st.width, st.height, st.fps, st.strides[0], st.flip,
+            st.zerocopy ? " memory:DMABuf zero-copy" : "");
 }
 
 // Streaming-load (MOVNTDQA) copy for the layer's write-combined GPU buffer:
@@ -282,7 +314,30 @@ static bool push_one_frame(void)
 
     GstBuffer *out = NULL;
 
-    if (st.have_frame && st.map_ptr) {
+    if (st.have_frame && st.zerocopy && st.fds[0] >= 0) {
+        // Zero-copy: wrap the device-local dmabuf fd straight into a GstBuffer.
+        // dup() because the dmabuf allocator takes ownership of the fd it's given
+        // and closes it when the buffer is released — we keep st.fds[0] alive for
+        // the swapchain's lifetime. cudaupload downstream imports + GPU-copies it;
+        // the CPU never maps the pixels. (Single shared image, overwritten on the
+        // next present — same one-texture model as obs-vkcapture itself; present-
+        // lock pushes right after a present so the import wins the race.)
+        set_caps_if_needed();
+        int dfd = dup(st.fds[0]);
+        if (dfd < 0) return true;  // transient; next present re-pushes
+        const gsize sz = (gsize)st.strides[0] * (gsize)st.height + (gsize)st.offsets[0];
+        GstMemory *mem = gst_dmabuf_allocator_alloc(st.dmabuf_alloc, dfd, sz);
+        if (!mem) { close(dfd); return true; }
+        GstBuffer *buf = gst_buffer_new();
+        gst_buffer_append_memory(buf, mem);  // takes the dfd-owning memory
+        GstVideoFormat vfmt = fourcc_to_gst_vfmt(st.fourcc);
+        if (vfmt == GST_VIDEO_FORMAT_UNKNOWN) vfmt = GST_VIDEO_FORMAT_BGRx;
+        gsize off[GST_VIDEO_MAX_PLANES] = { (gsize)st.offsets[0], 0, 0, 0 };
+        gint  strd[GST_VIDEO_MAX_PLANES] = { st.strides[0], 0, 0, 0 };
+        gst_buffer_add_video_meta_full(buf, GST_VIDEO_FRAME_FLAG_NONE, vfmt,
+                                       st.width, st.height, 1, off, strd);
+        out = buf;  // push (transfers ownership)
+    } else if (st.have_frame && st.map_ptr) {
         set_caps_if_needed();
 
         // Copy the shared host-mapped image into a fresh buffer (the layer
@@ -479,17 +534,34 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
             test_handle_frame();
             break;
         }
-        // encode mode: mmap the shared image so on_tick can sample it.
         if (st.nfd < 1 || st.fds[0] < 0) break;
-        st.map_len = (size_t)st.strides[0] * (size_t)st.height + (size_t)st.offsets[0];
-        st.map_ptr = mmap(NULL, st.map_len, PROT_READ, MAP_SHARED, st.fds[0], 0);
-        if (st.map_ptr == MAP_FAILED) {
-            st.map_ptr = NULL;
-            log_msg("ERROR: mmap(fd0) failed: %s", strerror(errno));
-            break;
+        if (st.zerocopy) {
+            // Zero-copy can't cheaply GPU-flip a dmabuf. If the layer reports a
+            // flipped (bottom-up) image, drop back to the host-map copy path (which
+            // flips per-row): clear zerocopy, re-request map_host=1, and wait for
+            // the layer to reinit + resend a host-mappable texture.
+            if (st.flip) {
+                log_msg("WARN: layer reports flipped image — zero-copy can't GPU-flip; reverting to host-map copy");
+                st.zerocopy = false;
+                st.caps_set = false;
+                send_control(fd, true);
+                break;
+            }
+            // Device-local dmabuf: no host map — push_one_frame wraps the fd directly.
+            st.have_frame = true;
+            log_msg("shared dmabuf ready (zero-copy): %dx%d, pushing at %dfps", st.width, st.height, st.fps);
+        } else {
+            // host-map copy path: mmap the shared image so push_one_frame can sample it.
+            st.map_len = (size_t)st.strides[0] * (size_t)st.height + (size_t)st.offsets[0];
+            st.map_ptr = mmap(NULL, st.map_len, PROT_READ, MAP_SHARED, st.fds[0], 0);
+            if (st.map_ptr == MAP_FAILED) {
+                st.map_ptr = NULL;
+                log_msg("ERROR: mmap(fd0) failed: %s", strerror(errno));
+                break;
+            }
+            st.have_frame = true;
+            log_msg("shared texture ready: %dx%d, sampling at %dfps", st.width, st.height, st.fps);
         }
-        st.have_frame = true;
-        log_msg("shared texture ready: %dx%d, sampling at %dfps", st.width, st.height, st.fps);
         // Go PLAYING now so audio (pulsesrc) starts in lockstep with video.
         if (!st.playing) {
             gst_element_set_state(st.pipeline, GST_STATE_PLAYING);
@@ -615,6 +687,9 @@ int main(int argc, char **argv)
     st.fps = getenv("VKCAP_FPS") ? atoi(getenv("VKCAP_FPS")) : 60;
     if (st.fps <= 0) st.fps = 60;
     st.debug = getenv("VKCAP_DEBUG") && atoi(getenv("VKCAP_DEBUG")) != 0;
+    // Zero-copy defaults ON; only an explicit VKCAP_ZEROCOPY=0 disables it. (The
+    // shell always exports an explicit value; this default is for bare manual runs.)
+    { const char *z = getenv("VKCAP_ZEROCOPY"); st.zerocopy = !z || atoi(z) != 0; }
     for (int i = 0; i < 4; i++) st.fds[i] = -1;
 
     if (!st.test_mode) {
@@ -624,6 +699,15 @@ int main(int argc, char **argv)
             return 2;
         }
         gst_init(&argc, &argv);
+        if (st.zerocopy) {
+            st.dmabuf_alloc = gst_dmabuf_allocator_new();
+            if (!st.dmabuf_alloc) {
+                log_msg("WARN: gst_dmabuf_allocator_new failed — disabling zero-copy (host-map copy)");
+                st.zerocopy = false;
+            } else {
+                log_msg("zero-copy ENABLED (device-local dmabuf import; CPU never touches pixels)");
+            }
+        }
         GError *err = NULL;
         // FATAL_ERRORS: a missing element must fail here so the shell falls back to
         // ximagesrc, not return a half-linked pipeline that limps to "not-linked".
@@ -698,6 +782,7 @@ int main(int argc, char **argv)
 
     // teardown
     if (st.last_buf) gst_buffer_unref(st.last_buf);
+    if (st.dmabuf_alloc) gst_object_unref(st.dmabuf_alloc);
     if (st.hud_pad) gst_object_unref(st.hud_pad);
     g_free(st.hud_ctl_path);
     if (st.pipeline) {
