@@ -85,6 +85,34 @@ die()  {
   exit 1
 }
 
+# Detect cs2's GetClassBaseline replay crash (issue #3429): cs2 halts the demo
+# but stays alive, so a render would capture frozen frames. The sentinel lets
+# the rest of a batch skip once the session is dead.
+CS2_FATAL_SENTINEL="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}/.cs2-fatal"
+
+# Echo the GetClassBaseline line if cs2 logged one since byte offset $1 (caller
+# snapshots before playback so a stale line can't fail an unrelated job).
+cs2_fatal_reason() {
+  local log="${CS2_DIR}/game/csgo/console.log" since="${1:-0}" hit
+  if [ -f "$log" ]; then
+    hit=$(tail -c "+$((since + 1))" "$log" 2>/dev/null \
+      | grep -aoE 'GetClassBaseline[^[:cntrl:]]*failed' | tail -1) || true
+    [ -n "$hit" ] && { printf '%s' "$hit"; return 0; }
+  fi
+  # console.log buffers; the Error dialog is a real-time X window.
+  if command -v xdotool >/dev/null 2>&1 \
+     && [ -n "$(timeout 3 xdotool search --name '^Error$' 2>/dev/null | head -1)" ]; then
+    printf 'cs2 fatal Error dialog'
+    return 0
+  fi
+  return 1
+}
+
+cs2_mark_fatal() {
+  mkdir -p "$(dirname "$CS2_FATAL_SENTINEL")" 2>/dev/null || true
+  printf '%s\n' "${1:-cs2 GetClassBaseline fatal}" > "$CS2_FATAL_SENTINEL" 2>/dev/null || true
+}
+
 # Stdout+stderr of the daemon stream to this process's stderr with a
 # "[<tag>] " prefix per line — k8s container logs become self-describing.
 # nohup detaches so HUP doesn't kill it when launcher scripts exit;

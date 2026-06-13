@@ -33,11 +33,11 @@ start_clip_capture() {
 }
 
 # Resolve the NVENC encoder fragment + parser for a clip, honoring CLIP_VIDEO_CODEC
-# (h265 default; falls back to h264 if no NVENC HEVC). Sets CLIP_ENC / CLIP_PARSE_CAPS
+# (h264 default; falls back to h264 if no NVENC HEVC). Sets CLIP_ENC / CLIP_PARSE_CAPS
 # / CLIP_CODEC. The hvc1 caps on h265 are required for mp4 / Safari / iOS playback.
 _clip_resolve_encoder() {
   local gop="$1" kbps="$2"
-  CLIP_CODEC="${CLIP_VIDEO_CODEC:-h265}"
+  CLIP_CODEC="${CLIP_VIDEO_CODEC:-h264}"
   CLIP_ENC="" CLIP_PARSE_CAPS=""
   case "$CLIP_CODEC" in
     h265|hevc)

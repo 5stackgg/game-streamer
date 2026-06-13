@@ -149,6 +149,14 @@ die_failed() {
   exit 1
 }
 
+# Fail the job on the GetClassBaseline crash; drop the sentinel so the batch skips.
+fail_on_cs2_fatal() {
+  local reason
+  reason=$(cs2_fatal_reason "${CS2_LOG_OFFSET:-0}") || return 0
+  cs2_mark_fatal "$reason"
+  die_failed "cs2 cannot play this demo (${reason}) — known unfixed cs2 replay bug"
+}
+
 # Flag flipped to 1 once we've POSTed a terminal status (done / error /
 # cancelled). The on_exit trap inspects it: if the script exits without
 # having reached terminal — `set -u` tripped on an unset var,
@@ -431,7 +439,7 @@ has_audio_stream() {
 # ffmpeg concat/polish passes must all agree, otherwise re-encoded
 # outputs can drift from captured segments. HEVC needs both NVENC paths
 # (gst + ffmpeg); downgrade to h264 if either is missing.
-CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h265}"
+CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h264}"
 # yuv420p + high@4.2 are required for broad Safari/iOS/Android MP4 playback.
 H264_VENC_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
 case "$CLIP_VIDEO_CODEC" in
@@ -743,6 +751,10 @@ while IFS='|' read -r _s _e _a; do
   SEG_STARTS+=("$_s"); SEG_ENDS+=("$_e"); SEG_POVS+=("$_a")
 done < <(printf '%s' "$CLIP_SEGMENTS" | node "$CLIP_HELPERS" segs-table)
 
+# Snapshot console.log size before any seek so we only match a fatal from this render.
+CS2_LOG_OFFSET=$(wc -c < "${CS2_DIR}/game/csgo/console.log" 2>/dev/null || echo 0)
+CS2_LOG_OFFSET="${CS2_LOG_OFFSET//[!0-9]/}"; CS2_LOG_OFFSET="${CS2_LOG_OFFSET:-0}"
+
 while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   SEG_START="${SEG_STARTS[$SEG_IDX]:-0}"
   SEG_END="${SEG_ENDS[$SEG_IDX]:-0}"
@@ -854,6 +866,8 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # the kill isn't cut; the cap bounds any tail over-record if the signal ever
   # misfires. WALLCLOCK_DEADLINE_MS is a hard backstop against a wedged demo.
   say "STEP 7: capturing ${SEG_DURATION_MS}ms wall-clock (target tick ${SEG_END}, wall cap ${WALLCLOCK_DEADLINE_MS}ms)"
+  # Catch a fatal from the seek/lead-in before billing frozen frames.
+  fail_on_cs2_fatal
   PLAYED_MS=0
   UNBILLED_MS=0
   LAST_PHASE_ENDS=""
@@ -866,6 +880,10 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   LAST_POV_KILLS=""    # POV target's round_kills, to log the actual kill moment
   LOG_EVERY_TICKS=$(awk -v r="${CLIP_TICK_RATE:-64}" 'BEGIN{printf "%d", r * 1.5}')
   LOOP_ITERS=0
+  LAST_FATAL_CHECK_MS=0
+  GSI_SIG_FIRST=""     # frozen-capture guard: did GSI ever change?
+  GSI_SIG_CHANGED=0
+  GSI_SIG_POLLS=0
   now_ms WALLCLOCK_START_MS
   PREV_MS=$WALLCLOCK_START_MS
   while : ; do
@@ -873,6 +891,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
     fi
     now_ms NOW_MS
+    # ~1/s: catch a mid-capture fatal instead of billing frozen frames.
+    if [ $((NOW_MS - LAST_FATAL_CHECK_MS)) -ge 1000 ]; then
+      LAST_FATAL_CHECK_MS=$NOW_MS
+      fail_on_cs2_fatal
+    fi
     if [ $((NOW_MS - WALLCLOCK_START_MS)) -gt "$WALLCLOCK_DEADLINE_MS" ]; then
       say "WARN segment $SEG_IDX hit ${WALLCLOCK_DEADLINE_MS}ms wall cap (done=${CUR_DONE_TICKS}t) — stopping"
       spec_post /demo/pause '{"force": true}'
@@ -892,6 +915,15 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     fi
     IFS='|' read -r PHASE PHASE_ENDS MOTION GSIAGE MPHASE ROUND_NUM POV_KILLS <<<"$FS_LINE"
     GSI_FRESH=0; { [ -n "$GSIAGE" ] && [ "$GSIAGE" -le 750 ]; } && GSI_FRESH=1
+
+    # Frozen-capture guard: clock/motion shift during any real playback, so an
+    # identical snapshot all segment means the demo is halted.
+    GSI_SIG="${PHASE_ENDS}|${MOTION}|${POV_KILLS}|${ROUND_NUM}"
+    if [ "$GSI_SIG" != "|||" ]; then
+      GSI_SIG_POLLS=$((GSI_SIG_POLLS + 1))
+      if [ -z "$GSI_SIG_FIRST" ]; then GSI_SIG_FIRST="$GSI_SIG"
+      elif [ "$GSI_SIG" != "$GSI_SIG_FIRST" ]; then GSI_SIG_CHANGED=1; fi
+    fi
 
     # Anchor the bleed guard to the round we opened in (first fresh reading).
     if [ -z "$SEG_START_ROUND" ] && [ "$GSI_FRESH" = "1" ] && [ -n "$ROUND_NUM" ]; then
@@ -984,6 +1016,13 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   api_progress_settle wait
   if [ "$LOOP_ITERS" -gt 0 ]; then
     say "STEP 7: loop iters=${LOOP_ITERS} avg_period=$(( (NOW_MS - WALLCLOCK_START_MS) / LOOP_ITERS ))ms"
+  fi
+
+  # GSI never changed all segment -> demo halted -> frozen clip; fail and mark
+  # the session dead so the batch skips.
+  if [ "$GSI_SIG_POLLS" -ge 12 ] && [ "$GSI_SIG_CHANGED" = "0" ]; then
+    cs2_mark_fatal "demo never advanced (GSI flat over ${GSI_SIG_POLLS} polls): ${GSI_SIG_FIRST}"
+    die_failed "cs2 cannot play this demo (GetClassBaseline replay bug)"
   fi
 
   stop_capture_diag

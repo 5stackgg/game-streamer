@@ -39,6 +39,20 @@ patch_title_from_gsi() {
     || say "  WARN title patch failed for $job_id"
 }
 
+# Mark one batch job status=error (per-job creds — no shared status channel).
+batch_fail_job() {
+  local job_id="$1" token="$2" reason="$3" body
+  body=$(node "$CLIP_HELPERS" status-body "status=error" "error=${reason}" 2>/dev/null) \
+    || return 0
+  curl --fail --silent --show-error --max-time 10 \
+       --header "x-origin-auth: ${job_id}:${token}" \
+       --header "content-type: application/json" \
+       --data "$body" \
+       --output /dev/null \
+       "${STATUS_API_BASE}/clip-renders/${job_id}/status" \
+    || say "  WARN fail-status post failed for $job_id"
+}
+
 batch_render_one_job() {
   local job_json="$1"
 
@@ -53,6 +67,14 @@ batch_render_one_job() {
 
   if [ -z "$job_id" ] || [ -z "$token" ]; then
     say "  skipping malformed job blob"
+    return 0
+  fi
+
+  # Session already dead from an earlier fatal — fail fast, don't capture frozen.
+  if [ -f "$CS2_FATAL_SENTINEL" ]; then
+    local reason; reason=$(head -1 "$CS2_FATAL_SENTINEL" 2>/dev/null)
+    say "  $job_id: cs2 session dead from earlier fatal — skipping (${reason:-GetClassBaseline})"
+    batch_fail_job "$job_id" "$token" "cs2 engine fatal earlier in batch: ${reason:-GetClassBaseline failed}"
     return 0
   fi
 
@@ -123,6 +145,8 @@ process_batch_jobs() {
     say "no CLIP_BATCH_JOBS — nothing to render"
     return 0
   fi
+
+  rm -f "$CS2_FATAL_SENTINEL"   # fresh session — drop any stale fatal marker
 
   local count
   count=$(printf '%s' "$CLIP_BATCH_JOBS" | node "$CLIP_HELPERS" jobs-count)

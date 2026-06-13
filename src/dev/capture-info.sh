@@ -5,7 +5,7 @@
 # spending a match on it.
 #
 # Usage: src/dev/capture-info.sh [h265|h264]
-#   defaults to LIVE_VIDEO_CODEC (or h265). Honors LIVE_OUTPUT_DIMS, FPS,
+#   defaults to LIVE_VIDEO_CODEC (or h264). Honors LIVE_OUTPUT_DIMS, FPS,
 #   VIDEO_KBPS, GS_GPU_SCALE, GS_NVENC_ELEMENT just like the live pipeline.
 set -uo pipefail
 SCRIPT_TAG=capture-info
@@ -15,7 +15,7 @@ SCRIPT_TAG=capture-info
 # shellcheck disable=SC1091
 . "$LIB_DIR/cs2-tune.sh"
 
-CODEC="${1:-${LIVE_VIDEO_CODEC:-h265}}"
+CODEC="${1:-${LIVE_VIDEO_CODEC:-h264}}"
 OUT="${LIVE_OUTPUT_DIMS:-1920x1080}"
 W="${OUT%x*}"; H="${OUT#*x}"
 FPS="${FPS:-60}"
