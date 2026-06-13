@@ -11,7 +11,7 @@
 : "${SNAPSHOT_QUALITY:=70}"
 : "${SNAPSHOT_PID_FILE:=$LOG_DIR/snapshot.pid}"
 : "${SNAPSHOT_FILE:=$LOG_DIR/snapshot.jpg}"
-: "${STATUS_LAST_FILE:=$LOG_DIR/status.last}"
+: "${SNAPSHOT_GSI_MARKER:=$LOG_DIR/gsi-flowing}"
 
 # One-shot frame grab via gst-launch num-buffers=1 — independent of the
 # live encode pipeline, so a hiccup here can't drop the broadcast.
@@ -93,11 +93,12 @@ _snapshot_upload() {
   return "$rc"
 }
 
+# "Booted" = the demo is actually PLAYING (GSI flowing), not merely a cs2 window
+# up on a load/shader-compile screen. spec-server drops the gsi-flowing marker
+# on the first GSI event. Until then we stay on the fast boot cadence so the
+# no-GSI load window is densely snapshotted.
 _snapshot_booted() {
-  [ -f "$STATUS_LAST_FILE" ] || return 1
-  local st
-  IFS='|' read -r st _ <"$STATUS_LAST_FILE" 2>/dev/null || return 1
-  [ "$st" = "live" ]
+  [ -f "$SNAPSHOT_GSI_MARKER" ]
 }
 
 snapshot_once() {
@@ -145,9 +146,12 @@ start_snapshot_loop() {
   if snapshot_running; then
     return 0
   fi
+  # Clear any stale marker so a warm-reused pod starts on the fast cadence
+  # until this run's demo actually begins playing.
+  rm -f "$SNAPSHOT_GSI_MARKER" 2>/dev/null || true
   _snapshot_loop &
   echo $! >"$SNAPSHOT_PID_FILE"
-  log "snapshot: started (interval=${SNAPSHOT_BOOT_INTERVAL_SECONDS}s booting/${SNAPSHOT_INTERVAL_SECONDS}s cs2-up ${SNAPSHOT_WIDTH}x${SNAPSHOT_HEIGHT} q=${SNAPSHOT_QUALITY})"
+  log "snapshot: started (interval=${SNAPSHOT_BOOT_INTERVAL_SECONDS}s pre-GSI/${SNAPSHOT_INTERVAL_SECONDS}s playing ${SNAPSHOT_WIDTH}x${SNAPSHOT_HEIGHT} q=${SNAPSHOT_QUALITY})"
 }
 
 stop_snapshot_loop() {

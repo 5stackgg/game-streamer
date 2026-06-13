@@ -1,7 +1,9 @@
 import process from "node:process";
 import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import path from "node:path";
 
-import { AUTODIRECTOR_DEFAULT, HUD_GSI_FORWARD_URL, SRC_DIR } from "../env.mjs";
+import { AUTODIRECTOR_DEFAULT, HUD_GSI_FORWARD_URL, LOG_DIR, SRC_DIR } from "../env.mjs";
 import { applyGsiUpdate, gsiState } from "../state/gsi.mjs";
 import { bumpActivity } from "../state/demo.mjs";
 import { directorState, directorTick, startDirector } from "../director/index.mjs";
@@ -84,6 +86,9 @@ export function gsiHandler(_req, res, body) {
   }
 
   if (!wasReceiving) {
+    // Marker so the snapshot loop knows the demo is actually playing (not just
+    // a cs2 window up on a load/shader screen) and can drop to slow cadence.
+    try { writeFileSync(path.join(LOG_DIR, "gsi-flowing"), ""); } catch { /* best-effort */ }
     process.stderr.write(
       `[spec-server] gsi first event — map=${gsiState.mapName ?? "?"}/${gsiState.mapPhase ?? "?"} ` +
         `round=${gsiState.roundNumber ?? "?"} spec=${gsiState.spectatedSteamId ?? "?"}\n`,

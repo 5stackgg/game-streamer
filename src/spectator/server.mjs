@@ -6,6 +6,7 @@ import { BIND, DISPLAY, PORT } from "./env.mjs";
 import { dispatch } from "./routes/index.mjs";
 import { findCs2Window } from "./cs2/window.mjs";
 import { gsiState } from "./state/gsi.mjs";
+import { demoLoadedInProc } from "./state/demo.mjs";
 
 const server = createServer((req, res) => { void dispatch(req, res); });
 
@@ -13,16 +14,19 @@ server.listen(PORT, BIND, () => {
   process.stderr.write(`[spec-server] listening on ${BIND}:${PORT} (display=${DISPLAY})\n`);
 });
 
-// Warn if cs2 has been up but GSI never started flowing — usually a
-// missing/misconfigured gamestate_integration_5stack.cfg.
+// Warn if cs2 has been up but GSI never started flowing. demo_fd=yes means cs2
+// has the .dem open (loading the map / compiling shaders — inline in Source 2,
+// no console progress counter); demo_fd=no means it's stuck before demo load,
+// which points at a missing/misconfigured gamestate_integration cfg.
 let gsiWatchdogTicks = 0;
 setInterval(async () => {
   if (gsiState.lastReceivedMs > 0) return;
   if (!(await findCs2Window())) return;
   gsiWatchdogTicks++;
   if (gsiWatchdogTicks === 1 || gsiWatchdogTicks % 6 === 0) {
+    const demoFd = (await demoLoadedInProc()) ? "yes" : "no";
     process.stderr.write(
-      `[spec-server] WARN: cs2 up ${gsiWatchdogTicks * 10}s but no GSI events\n`,
+      `[spec-server] WARN: cs2 up ${gsiWatchdogTicks * 10}s but no GSI events (demo_fd=${demoFd})\n`,
     );
   }
 }, 10_000);
