@@ -102,9 +102,12 @@ start_capture() {
   # vkcapture consumer (no X-server contention) and overlay the JTs HUD in gst.
   # Used for live + demo when vkcapture + cs2 + the HUD window are present; any
   # miss falls back to the plain ximagesrc grab below (HUD via picom).
-  # HUD grab rate: cs2 renders via the present-hook (not X), so this HUD ximagesrc
-  # is the only X-server capture load. 30fps is smooth; tune via HUD_CAPTURE_FPS.
-  local hud_xid="" used_composite=0 hud_fps="${HUD_CAPTURE_FPS:-30}"
+  # HUD grab rate: match the OUTPUT fps so HUD elements (health/timer/money) update
+  # as smoothly as the game — grabbing at 30 over a 60fps composite made the HUD
+  # visibly choppy. cs2 renders via the present-hook (not X), so this ximagesrc is
+  # the only X-server capture load; LIVE-DIAG showed capture at ~1.2/2 cores, plenty
+  # of headroom for 60. Override with HUD_CAPTURE_FPS.
+  local hud_xid="" used_composite=0 hud_fps="${HUD_CAPTURE_FPS:-$fps}"
   # HUD show/hide control file (composite only): the consumer polls it to alpha
   # the HUD pad; its presence tells the spec-server we're compositing. Clear any
   # stale copy so a non-composite path doesn't look composite.
