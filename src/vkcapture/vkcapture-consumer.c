@@ -100,6 +100,9 @@ struct state {
     GstBuffer  *last_buf;        // last good frame, repeated while the layer is
                                  // gone (cs2 swapchain rebuild on seek) so the
                                  // stream holds instead of dying
+    bool        hold_black;      // VKCAP_BLACK_HOLD: repeat last frame over a demo-
+                                 // seek reload's black frame instead of flashing black
+    int         black_held;      // consecutive black frames held (capped)
 
     // present-lock: an eventfd we hand the (patched) layer via SCM_RIGHTS; it
     // pokes it on every vkQueuePresentKHR, so we push exactly one frame per
@@ -302,6 +305,21 @@ static void wc_copy(void *dst, const void *src, size_t n)
         memcpy(dst, src, n);
 }
 
+// Detect a (near-)black frame — the reload frame cs2 briefly presents on a demo
+// seek. Reads the just-copied SYSTEM buffer (fast; never the write-combined GPU
+// map). Strided sample (~every 128px); "lit" = any BGR channel clearly non-zero.
+// Tight threshold so dark gameplay (which still has lit pixels) is NOT black.
+static bool frame_is_black(const uint8_t *p, int stride, int height)
+{
+    const size_t sz = (size_t)stride * (size_t)height;
+    uint64_t lit = 0, n = 0;
+    for (size_t i = 0; i + 3 < sz; i += 512) {   // 512 % 4 == 0 → stays pixel-aligned
+        if (p[i] > 16 || p[i + 1] > 16 || p[i + 2] > 16) lit++;
+        n++;
+    }
+    return n > 0 && (lit * 1000) < n;            // < 0.1% of sampled pixels lit
+}
+
 // Build a buffer from the current shared frame (or repeat the last good frame
 // while the layer is transiently gone) and push it into the pipeline. Shared by
 // the fps timer (on_tick) and the per-present signal (on_present_signal).
@@ -355,12 +373,26 @@ static bool push_one_frame(void)
         } else {
             wc_copy(mi.data, src, sz);
         }
+        // Seek/reload black-frame hold: a demo seek makes cs2 present a pure-black
+        // reload frame. Detect it (fast read of the just-copied SYSTEM buffer) and
+        // repeat the last good frame instead, so a seek shows a brief hold→new-view
+        // rather than a black flash. Capped (~3s) so a genuinely black scene isn't
+        // frozen forever. Checked while still mapped.
+        bool black = st.hold_black && st.last_buf
+                     && frame_is_black(mi.data, st.strides[0], st.height);
         gst_buffer_unmap(buf, &mi);
 
-        // Keep this as the "last good frame" to repeat if the layer blips.
-        if (st.last_buf) gst_buffer_unref(st.last_buf);
-        st.last_buf = gst_buffer_ref(buf);
-        out = buf;  // push (transfers ownership)
+        if (black && st.black_held < st.fps * 3) {
+            st.black_held++;
+            gst_buffer_unref(buf);
+            out = gst_buffer_ref(st.last_buf);   // hold last good frame over the reload
+        } else {
+            st.black_held = 0;
+            // Keep this as the "last good frame" to repeat if the layer blips.
+            if (st.last_buf) gst_buffer_unref(st.last_buf);
+            st.last_buf = gst_buffer_ref(buf);
+            out = buf;  // push (transfers ownership)
+        }
     } else if (st.last_buf) {
         // Layer transiently gone (cs2 swapchain rebuild on seek): repeat the last
         // frame so the stream holds instead of dying + tripping client reconnects.
@@ -690,6 +722,9 @@ int main(int argc, char **argv)
     // Zero-copy defaults ON; only an explicit VKCAP_ZEROCOPY=0 disables it. (The
     // shell always exports an explicit value; this default is for bare manual runs.)
     { const char *z = getenv("VKCAP_ZEROCOPY"); st.zerocopy = !z || atoi(z) != 0; }
+    // Black-frame hold defaults ON (host-map/composite path only — needs pixel
+    // access; the zero-copy clip path doesn't read pixels). VKCAP_BLACK_HOLD=0 off.
+    { const char *z = getenv("VKCAP_BLACK_HOLD"); st.hold_black = !z || atoi(z) != 0; }
     for (int i = 0; i < 4; i++) st.fds[i] = -1;
 
     if (!st.test_mode) {
