@@ -118,15 +118,28 @@ start_capture() {
   if [ -n "$hud_xid" ]; then
     log "  composite: cs2 present-hook + HUD overlay (xid=$hud_xid, hud=${hud_fps}fps)"
     # sink_0 = cs2 (base), sink_1 = HUD on top. The HUD ximagesrc MUST carry alpha
-    # (BGRA) or it paints opaque over cs2 — verify this on-node first.
-    local cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
-    # leaky=downstream: a slow/blocked HUD grab drops its own frames instead of
-    # back-pressuring the compositor (which would stall the cs2 leg too).
-    local hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
-    # queue after the compositor = a thread boundary so the software blend and the
-    # upload/encode run on separate cores (else they serialize on one). Bounded by
-    # buffer count — raw frames are big, so the default byte cap would throttle.
-    local outchain="compositor name=comp background=black ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
+    # (BGRA) or it paints opaque over cs2.
+    local cs2_src hud_src outchain
+    if _gpu_compositor_ok "$codec"; then
+      # GPU HUD blend: upload both legs to CUDA and let cudacompositor alpha-blend
+      # on the GPU, then cudaconvertscale -> nvenc, all GPU-resident. Keeps the
+      # 1080p60 blend off the 2 capture CPU cores (the software compositor's cost).
+      # Opt-in (GS_GPU_COMPOSITOR=1); dies-on-spawn falls back to ximagesrc below.
+      log "  composite: GPU HUD blend (cudacompositor) — alpha-blend off the capture CPU"
+      cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! cudaupload ! comp.sink_0"
+      hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! cudaupload ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
+      outchain="cudacompositor name=comp background=black ! cudaconvertscale ! video/x-raw(memory:CUDAMemory),format=NV12,width=$out_w,height=$out_h,framerate=$fps/1 ! $enc ! $parse"
+    else
+      # Software compositor (default): CPU alpha-blend on the capture cores.
+      cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
+      # leaky=downstream: a slow/blocked HUD grab drops its own frames instead of
+      # back-pressuring the compositor (which would stall the cs2 leg too).
+      hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
+      # queue after the compositor = a thread boundary so the software blend and the
+      # upload/encode run on separate cores (else they serialize on one). Bounded by
+      # buffer count — raw frames are big, so the default byte cap would throttle.
+      outchain="compositor name=comp background=black ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
+    fi
     local pipeline
     if [ "$audio" = 1 ]; then
       pipeline="$outchain ! queue ! mux. \
@@ -216,6 +229,36 @@ $hud_src"
     fi
     sleep 1
   done
+
+  # Live perf sampler: every GS_LIVE_DIAG_INTERVAL s (default 15) while the stream
+  # runs, log GPU util/clock + cs2 CPU% + the CAPTURE pipeline's CPU%. This is the
+  # one signal we lacked for live: if capcpu pegs ~its pin (200% on 2 cores) the
+  # capture is CPU-bound — almost always the SOFTWARE compositor (composite path) —
+  # and GPU compositing is the fix; if cs2cpu/gpu dip with capcpu low it's cs2-side.
+  # Slow cadence so a multi-hour stream doesn't spam; GS_LIVE_DIAG=0 mutes. Detaches
+  # and self-exits when the capture pid dies.
+  if [ "${GS_LIVE_DIAG:-1}" = "1" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    (
+      cap_pid="$pid" comp="$used_composite"
+      cs2_pid=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
+      hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+      jif() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null; }
+      interval="${GS_LIVE_DIAG_INTERVAL:-15}"
+      pcs2=$(jif "$cs2_pid"); pcap=$(jif "$cap_pid"); pms=$(date +%s%3N 2>/dev/null || echo 0)
+      while kill -0 "$cap_pid" 2>/dev/null; do
+        sleep "$interval"
+        kill -0 "$cap_pid" 2>/dev/null || break
+        now_ms=$(date +%s%3N 2>/dev/null || echo 0); dt=$(( now_ms - pms )); [ "$dt" -le 0 ] && dt=$((interval * 1000))
+        g=$(nvidia-smi --query-gpu=utilization.gpu,memory.used,clocks.gr,temperature.gpu \
+              --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+        ccs2=$(jif "$cs2_pid"); ccap=$(jif "$cap_pid")
+        cs2cpu=$(awk -v a="${pcs2:-}" -v b="${ccs2:-}" -v dt="$dt" -v hz="$hz" 'BEGIN{if(a==""||b==""){print "?"}else printf "%.0f",(b-a)*1000.0/hz/dt*100}')
+        capcpu=$(awk -v a="${pcap:-}" -v b="${ccap:-}" -v dt="$dt" -v hz="$hz" 'BEGIN{if(a==""||b==""){print "?"}else printf "%.0f",(b-a)*1000.0/hz/dt*100}')
+        log "  LIVE-DIAG ${stream_id:0:8}: gpu(util,vramMiB,clkMHz,tempC)=${g} | cs2cpu=${cs2cpu}% capcpu=${capcpu}% (composite=${comp})"
+        pcs2=$ccs2; pcap=$ccap; pms=$now_ms
+      done
+    ) &
+  fi
 
   # Log the watchable HLS URL (grep "WATCH") for the early/boot phase.
   local dom="${GAME_STREAM_DOMAIN:-hls.5stack.gg}"
