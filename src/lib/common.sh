@@ -414,22 +414,6 @@ _cudaupload_dmabuf_ok() {
   [ "$GS_CUDAUPLOAD_DMABUF" = 1 ]
 }
 
-# True when GPU HUD compositing is usable for the live/demo composite: requested
-# (GS_GPU_COMPOSITOR=1), the active encoder is CUDA NVENC (so the
-# cudacompositor -> cudaconvertscale -> nvenc chain stays GPU-resident), and this
-# gst has cudacompositor. Moves the 1080p60 HUD alpha-blend off the 2 capture CPU
-# cores onto the GPU. Default OFF (opt-in); a miss => the software `compositor`.
-# Cached. Usage: _gpu_compositor_ok <codec>.
-_gpu_compositor_ok() {
-  case "${GS_GPU_COMPOSITOR:-0}" in 1|on|true|yes) ;; *) return 1 ;; esac
-  _active_encoder_is_cuda "${1:-h264}" || return 1
-  if [ -z "${GS_CUDACOMP_OK:-}" ]; then
-    if gst-inspect-1.0 cudacompositor >/dev/null 2>&1; then GS_CUDACOMP_OK=1; else GS_CUDACOMP_OK=0; fi
-    export GS_CUDACOMP_OK
-  fi
-  [ "$GS_CUDACOMP_OK" = 1 ]
-}
-
 # Emit the scale + colorspace-convert fragment that feeds the encoder.
 # When the active encoder is a CUDA NVENC element and cudaconvertscale is
 # present, the scale (e.g. 1440p->1080p) and RGBx->NV12 convert run on the

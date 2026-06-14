@@ -48,6 +48,13 @@ export const DIRECTOR_STICKY_PRIORITY_FLOOR = 140;
 // whiplashes between simultaneous events.
 export const DIRECTOR_MIN_DWELL_MS = 3_000;
 
+// Death of the current target still cuts fast, but NOT instantly: snapping at
+// 0ms cuts into cs2's death-cam/PVS transition (a black frame on the new POV, made
+// worse by GSI's ~10Hz alive-state lagging cs2's render tick) and reads as frantic.
+// A short grace lets the kill register + the new view settle, then cut. Also linger
+// a beat on the kill, which is natural broadcast feel. Tune/zero via env if needed.
+export const DIRECTOR_DEATH_GRACE_MS = 350;
+
 // Max time on one target before the camera is forced off — keeps the
 // view moving when nothing else is more interesting.
 export const DIRECTOR_DWELL_MAX_MS = {

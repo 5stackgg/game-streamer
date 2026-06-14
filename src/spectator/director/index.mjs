@@ -2,6 +2,7 @@ import process from "node:process";
 
 import {
   DIRECTOR_MIN_DWELL_MS,
+  DIRECTOR_DEATH_GRACE_MS,
   DIRECTOR_TICK_MS,
   KEY_AUTODIRECTOR_OFF,
 } from "../constants.mjs";
@@ -59,14 +60,17 @@ export async function directorTick() {
       : null;
     if (cur && cur.steamId === pick.target.steamId && cur.alive) return;
 
-    // Death of the current target is the only thing that bypasses the
-    // minimum dwell. Event bonuses (AWP kill, damage dealer, upset)
-    // already bumped priority — they wait their turn here.
+    // Death of the current target cuts fast but NOT instantly — a short grace
+    // (vs the full dwell) lets cs2's death-cam/PVS transition settle so we don't
+    // cut into a black frame, and avoids whiplash on multi-kill exchanges. Event
+    // bonuses (AWP kill, damage dealer, upset) already bumped priority — they wait
+    // the full dwell.
     const sinceLast = nowMs - directorState.lastSwitchMs;
-    if (!pick.forcedByDeath && sinceLast < DIRECTOR_MIN_DWELL_MS) {
+    const dwellFloor = pick.forcedByDeath ? DIRECTOR_DEATH_GRACE_MS : DIRECTOR_MIN_DWELL_MS;
+    if (sinceLast < dwellFloor) {
       logSkip(
         "skip: min-dwell",
-        `${sinceLast}ms < ${DIRECTOR_MIN_DWELL_MS}ms (want=${pick.target.name ?? pick.target.steamId} slot=${pick.target.slot})`,
+        `${sinceLast}ms < ${dwellFloor}ms (want=${pick.target.name ?? pick.target.steamId} slot=${pick.target.slot}${pick.forcedByDeath ? " death-grace" : ""})`,
       );
       return;
     }

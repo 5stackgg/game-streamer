@@ -118,28 +118,17 @@ start_capture() {
   if [ -n "$hud_xid" ]; then
     log "  composite: cs2 present-hook + HUD overlay (xid=$hud_xid, hud=${hud_fps}fps)"
     # sink_0 = cs2 (base), sink_1 = HUD on top. The HUD ximagesrc MUST carry alpha
-    # (BGRA) or it paints opaque over cs2.
-    local cs2_src hud_src outchain
-    if _gpu_compositor_ok "$codec"; then
-      # GPU HUD blend: upload both legs to CUDA and let cudacompositor alpha-blend
-      # on the GPU, then cudaconvertscale -> nvenc, all GPU-resident. Keeps the
-      # 1080p60 blend off the 2 capture CPU cores (the software compositor's cost).
-      # Opt-in (GS_GPU_COMPOSITOR=1); dies-on-spawn falls back to ximagesrc below.
-      log "  composite: GPU HUD blend (cudacompositor) — alpha-blend off the capture CPU"
-      cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! cudaupload ! comp.sink_0"
-      hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! cudaupload ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
-      outchain="cudacompositor name=comp background=black ! cudaconvertscale ! video/x-raw(memory:CUDAMemory),format=NV12,width=$out_w,height=$out_h,framerate=$fps/1 ! $enc ! $parse"
-    else
-      # Software compositor (default): CPU alpha-blend on the capture cores.
-      cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
-      # leaky=downstream: a slow/blocked HUD grab drops its own frames instead of
-      # back-pressuring the compositor (which would stall the cs2 leg too).
-      hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
-      # queue after the compositor = a thread boundary so the software blend and the
-      # upload/encode run on separate cores (else they serialize on one). Bounded by
-      # buffer count — raw frames are big, so the default byte cap would throttle.
-      outchain="compositor name=comp background=black ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
-    fi
+    # (BGRA) or it paints opaque over cs2 — verify this on-node first. The software
+    # compositor stays: LIVE-DIAG measured the capture at ~1.1 of its 2 cores, so the
+    # blend is NOT CPU-bound and GPU compositing would buy nothing here.
+    local cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
+    # leaky=downstream: a slow/blocked HUD grab drops its own frames instead of
+    # back-pressuring the compositor (which would stall the cs2 leg too).
+    local hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
+    # queue after the compositor = a thread boundary so the software blend and the
+    # upload/encode run on separate cores (else they serialize on one). Bounded by
+    # buffer count — raw frames are big, so the default byte cap would throttle.
+    local outchain="compositor name=comp background=black ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
     local pipeline
     if [ "$audio" = 1 ]; then
       pipeline="$outchain ! queue ! mux. \
@@ -153,6 +142,12 @@ $cs2_src \
 $hud_src"
     fi
     export VKCAP_FPS="$fps"
+    # With LIVE-DIAG on, also have the consumer log presents/s — present-locked,
+    # so presents/s == cs2's REAL render fps feeding the stream. This is the signal
+    # LIVE-DIAG lacked: presents/s consistently ≥ fps ⇒ the stream is true CFR and
+    # any "not 60" feel is the camera switching or viewer-side; presents/s dipping
+    # below fps ⇒ cs2 isn't holding the rate under live load (videorate then dups).
+    [ "${GS_LIVE_DIAG:-1}" = "1" ] && export VKCAP_DEBUG="${VKCAP_DEBUG:-1}"
     # Zero-copy is clip-only: the software `compositor` here blends in system
     # memory and can't consume a device-local dmabuf. Force it off so a global
     # VKCAP_ZEROCOPY=1 can't push this path into the ximagesrc fallback.
