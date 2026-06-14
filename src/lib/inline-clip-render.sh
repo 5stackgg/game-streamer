@@ -623,13 +623,34 @@ if [ -n "$CHIP_NAME" ] && [ -d "$MOTION_DIR" ]; then
                           height: Number(process.env.CHIP_OUT_H),
                           fps: Number(process.env.CHIP_OUT_FPS),
                         }))')
-  say "CHIP: rendering for '${CHIP_NAME}' (background)"
-  # Remotion render runs in parallel with the segment seek + capture.
-  # The chip mov is only consumed by the per-segment polish pass; we
-  # wait_for_chip_render before that block. Backgrounding overlaps the
-  # ~1-3s Chromium render with the ~3-10s capture wallclock.
+  # Don't launch the heavy Remotion/Chromium render here — defer it (see
+  # start_chip_render) so it doesn't compete with cs2 during capture.
+  CHIP_READY_TO_RENDER=1
+fi
+
+# Launch the player-chip render (Remotion/headless Chromium → transparent ProRes
+# .mov). Headless Chromium is heavy + multi-threaded, so:
+#  - It runs AFTER recording for the fused path (the common case) — zero overlap
+#    with capture, called post-segment-loop. This was the seg0-tail jitter: an
+#    unpinned Chromium render overlapping seg0 preempted cs2 right before the switch.
+#  - The non-fused path bakes the chip per-segment mid-loop, so it MUST launch
+#    before the loop; there it's pinned to the capture cores + nice 19 (never touches
+#    cs2's render cores 0-9; below the capture consumer). Affinity+nice are inherited
+#    by the Chromium children.
+# Idempotent — launches at most once per job (CHIP_LAUNCHED guard).
+start_chip_render() {
+  [ "${CHIP_READY_TO_RENDER:-0}" = "1" ] || return 0
+  [ "${CHIP_LAUNCHED:-0}" = "1" ] && return 0
+  CHIP_LAUNCHED=1
+  compute_cpu_split
+  local pin=()
+  if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
+    pin=(taskset -c "$GS_CAPTURE_CPUS")
+  fi
+  say "CHIP: rendering for '${CHIP_NAME}' (pinned ${GS_CAPTURE_CPUS:-none} + nice 19)"
   (
     cd "$MOTION_DIR" && \
+    "${pin[@]}" nice -n 19 \
     node node_modules/.bin/remotion render \
         src/index.ts PlayerChip "$CHIP_MOV" \
         --codec=prores --prores-profile=4444 \
@@ -638,7 +659,7 @@ if [ -n "$CHIP_NAME" ] && [ -d "$MOTION_DIR" ]; then
         --props="$CHIP_PROPS"
   ) >"$CHIP_RENDER_LOG" 2>&1 &
   CHIP_RENDER_PID=$!
-fi
+}
 
 wait_for_chip_render() {
   [ -z "$CHIP_RENDER_PID" ] && return 0
@@ -690,6 +711,12 @@ if [ "$OUTRO_WILL_APPEND" = "1" ] \
 elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ]; then
   say "concat: ${SEG_COUNT} segments exceeds fuse cap ${CLIP_MAX_FUSED_SEGMENTS} — per-segment polish + split-free concat"
 fi
+
+# Non-fused path bakes the chip per-segment INSIDE the capture loop, so it has to
+# render before the loop (pinned+niced off cs2's cores). The fused path consumes
+# the chip only at the final concat → it's deferred to after recording (post-loop
+# start_chip_render below) so Chromium never overlaps capture at all.
+[ "$WILL_FUSE_POLISH_OUTRO" != "1" ] && start_chip_render
 
 # Per-segment output paths + concat list. We render each segment to
 # its own file and let ffmpeg concat-demux glue them — this keeps each
@@ -776,6 +803,12 @@ warm_pipelines_if_cold() {
   local rate="${CLIP_WARMUP_RATE:-4}"
   [ "$rate" -lt 1 ] 2>/dev/null && rate=1
   local wait_ms=$(( dur_ms / rate + 2000 ))   # cover the range at $rate + compile-spike margin
+  # In-world warm only: fast-forward the range so the in-world pipelines (map,
+  # effects) compile before the real capture clears the cold opening. We do NOT
+  # POV-lock for the first-person viewmodel: deferring the chip render off the
+  # capture window (start_chip_render) removed the seg0 stutter, so the viewmodel
+  # was never the bottleneck — and locking here races the round-transition roster
+  # (verify_spec_lock then burns ~8s retrying a stale slot for no gain).
   say "WARM-UP: pre-compiling pipelines — replaying ${dur_ms}ms at ${rate}x (~${wait_ms}ms, uncaptured) [once per cs2]"
   spec_post /demo/pause  '{"force": true}'
   spec_post /demo/seek   "{\"tick\": ${start}}"
@@ -1091,7 +1124,9 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     # chip gets baked into the same filter_complex as the outro concat,
     # saving one full NVENC encode per clip.
     wait_for_chip_render
-    if [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] && [ -n "$CHIP_MOV" ]; then
+    # Chip = player intro card — overlay it ONCE, on the first segment only.
+    # Segments >0 fall through to the no-chip path (raw segment, silence-padded).
+    if [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] && [ -n "$CHIP_MOV" ] && [ "$SEG_IDX" = "0" ]; then
       # Reap the PREVIOUS segment's polish first — single-flight.
       reap_polish_bg
       POLISH_BG_LOG="${SEG_FILE}.polish.log"
@@ -1187,10 +1222,17 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   SEG_IDX=$((SEG_IDX + 1))
 done
 
+# Recording is DONE — render the player chip now (fused path), so the heavy
+# Chromium render never competes with cs2 during capture (the seg0-tail jitter).
+# No-op when already launched (non-fused path launched it before the loop) or when
+# there's no chip. It overlaps the light concat.txt prep below; reaped before STEP 9.
+start_chip_render
+
 # Wait for the last background polish, then write concat.txt in segment
 # order. Entries were recorded per index during the loop; nothing reads
 # concat.txt before this point.
 reap_polish_bg
+wait_for_chip_render   # ensure the chip .mov is finalized before any STEP 9 consumer
 for i in $(seq 0 $((SEG_COUNT - 1))); do
   [ -n "${CONCAT_ENTRY[$i]:-}" ] \
     && printf "file '%s'\n" "${CONCAT_ENTRY[$i]}" >>"$SEG_DIR/concat.txt"
@@ -1342,27 +1384,17 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
     # concat — one NVENC pass instead of two.
     say "STEP 9: ffmpeg fused polish+concat ${CAP_SEG_COUNT} seg(s) + outro"
 
-    # Chip is appended as one extra input after segments+outro. Split it
-    # once per captured segment when there's more than one segment (so
-    # each gets its own ~3.5s chip head, matching the per-segment polish
-    # behaviour). split=1 isn't valid, so single-segment skips the split.
+    # Chip = the player intro card; show it ONCE, on the FIRST segment only — not
+    # re-animated at every segment start. Appended as one extra input and overlaid
+    # on segment 0; all other segments pass through untouched (no split needed).
     if [ -n "$CHIP_MOV" ]; then
       CHIP_IDX=$SEG_COUNT
       CONCAT_INPUTS+=("-i" "$CHIP_MOV")
-      if [ "$CAP_SEG_COUNT" -gt 1 ]; then
-        FC+="[${CHIP_IDX}:v]split=${CAP_SEG_COUNT}"
-        for i in $(seq 0 $((CAP_SEG_COUNT - 1))); do FC+="[chip${i}]"; done
-        FC+=";"
-      fi
     fi
 
     for i in $(seq 0 $((CAP_SEG_COUNT - 1))); do
-      if [ -n "$CHIP_MOV" ]; then
-        if [ "$CAP_SEG_COUNT" -gt 1 ]; then
-          FC+="[${i}:v][chip${i}]overlay=0:0:eof_action=pass:format=auto"
-        else
-          FC+="[${i}:v][${CHIP_IDX}:v]overlay=0:0:eof_action=pass:format=auto"
-        fi
+      if [ -n "$CHIP_MOV" ] && [ "$i" = "0" ]; then
+        FC+="[${i}:v][${CHIP_IDX}:v]overlay=0:0:eof_action=pass:format=auto"
       else
         FC+="[${i}:v]null"
       fi
