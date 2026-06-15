@@ -43,4 +43,5 @@ jobs:
         with:
           package-name: game-streamer
           package-type: container
-          delete-only-untagged-versions: 'true'
+          min-versions-to-keep: 8
+          ignore-versions: '^buildcache-*'
