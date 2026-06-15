@@ -47,10 +47,11 @@ run_demo_flow() {
       report_status status=downloading_demo
       DEMO_URL_LC=$(printf '%s' "$DEMO_URL" | tr '[:upper:]' '[:lower:]')
       case "${DEMO_URL_LC%%[?#]*}" in
-        *.bz2) DEMO_NEEDS_BUNZIP=1 ;;
-        *)     DEMO_NEEDS_BUNZIP=0 ;;
+        *.bz2) DEMO_DECOMPRESS_CMD="bunzip2" ;;
+        *.gz)  DEMO_DECOMPRESS_CMD="gunzip" ;;
+        *)     DEMO_DECOMPRESS_CMD="" ;;
       esac
-      echo "GET $DEMO_URL (bunzip=$DEMO_NEEDS_BUNZIP)"
+      echo "GET $DEMO_URL (decompress=${DEMO_DECOMPRESS_CMD:-none})"
 
       # Heartbeat: emit bytes written every 5s while curl runs so a stuck
       # download is obvious instead of silent. Killed the moment curl
@@ -79,15 +80,15 @@ run_demo_flow() {
       if [ "$curl_rc" = 0 ]; then
         bytes=$(stat -c%s "$DEMO_FILE_BG.partial" 2>/dev/null || echo 0)
         echo "downloaded ${bytes} bytes"
-        if [ "$DEMO_NEEDS_BUNZIP" = "1" ]; then
-          echo "decompressing ${bytes} bytes (bunzip2)"
-          if bunzip2 -q -c "$DEMO_FILE_BG.partial" > "$DEMO_FILE_BG.tmp"; then
+        if [ -n "$DEMO_DECOMPRESS_CMD" ]; then
+          echo "decompressing ${bytes} bytes (${DEMO_DECOMPRESS_CMD})"
+          if "$DEMO_DECOMPRESS_CMD" -q -c "$DEMO_FILE_BG.partial" > "$DEMO_FILE_BG.tmp"; then
             out_bytes=$(stat -c%s "$DEMO_FILE_BG.tmp" 2>/dev/null || echo 0)
-            echo "bunzip2 done: ${out_bytes} bytes"
+            echo "${DEMO_DECOMPRESS_CMD} done: ${out_bytes} bytes"
             mv -f "$DEMO_FILE_BG.tmp" "$DEMO_FILE_BG"
             rm -f "$DEMO_FILE_BG.partial"
           else
-            echo "bunzip2 FAILED — marking download as failed"
+            echo "${DEMO_DECOMPRESS_CMD} FAILED — marking download as failed"
             rm -f "$DEMO_FILE_BG.tmp" "$DEMO_FILE_BG.partial"
             touch "$DEMO_FILE_BG.failed"
           fi

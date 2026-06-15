@@ -97,12 +97,12 @@ api_status() {
 API_PROGRESS_PID=""
 API_PROGRESS_LAST_MS=0
 api_status_progress_async() {
-  local now_ms="$1" frac="$2"
+  local now_ms="$1" frac="$2" status="${3:-rendering}"
   API_PROGRESS_LAST_MS=$now_ms
   curl --fail --silent --max-time 10 \
        --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
        --header "content-type: application/json" \
-       --data "$(printf '{"status":"rendering","progress":%s}' "$frac")" \
+       --data "$(printf '{"status":"%s","progress":%s}' "$status" "$frac")" \
        --output /dev/null \
        "${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/status" \
     >/dev/null 2>&1 &
@@ -1512,7 +1512,12 @@ UPLOAD_URL="${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/upload"
 say "POST $UPLOAD_URL"
 # --upload-file streams from disk; --data-binary @file slurps the whole
 # clip into RAM (matters with CLIP_BATCH_MAX_TAILS concurrent uploads).
-if ! curl --fail --silent --show-error \
+# Drop --silent so curl writes its progress meter to stderr; we tee that
+# through a parser that re-posts "uploading" progress (throttled 1/s,
+# single-flight via api_status_progress_async) so the bar actually moves
+# instead of jumping 0->1. PIPESTATUS[0] carries curl's real exit code.
+UPLOAD_ERR="/tmp/clip-upload-err-${CLIP_RENDER_JOB_ID}.log"
+curl --fail --show-error \
        --max-time 1800 \
        --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
        --header "content-type: application/octet-stream" \
@@ -1520,9 +1525,15 @@ if ! curl --fail --silent --show-error \
        --upload-file "$CLIP_OUT_FILE" \
        --request POST \
        --output "/tmp/clip-upload-response-${CLIP_RENDER_JOB_ID}.json" \
-       "$UPLOAD_URL"; then
-  die_failed "clip upload failed"
+       "$UPLOAD_URL" 2> >(tee "$UPLOAD_ERR" | parse_upload_progress)
+UPLOAD_RC=${PIPESTATUS[0]}
+api_progress_settle wait
+if [ "$UPLOAD_RC" -ne 0 ]; then
+  say "WARN upload curl stderr: $(tr '\r' '\n' < "$UPLOAD_ERR" | tail -3 | tr '\n' ' ')"
+  rm -f "$UPLOAD_ERR"
+  die_failed "clip upload failed (curl rc=${UPLOAD_RC})"
 fi
+rm -f "$UPLOAD_ERR"
 
 # Thumbnail is best-effort but we still want it posted before the
 # pod exits (batch mode reaps the job right after status=done).

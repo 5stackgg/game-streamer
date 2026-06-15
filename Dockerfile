@@ -32,7 +32,7 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl tini procps xz-utils binutils \
       gdb strace locales software-properties-common \
-      jq bzip2 \
+      jq bzip2 gzip \
     && add-apt-repository -y universe \
     && dpkg --add-architecture i386 \
     && apt-get update
