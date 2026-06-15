@@ -111,6 +111,17 @@ if [ ! -f "$DEMO_FILE" ]; then
         || die "demo bunzip2 failed for ${DEMO_FILE}.bz2"
       rm -f "${DEMO_FILE}.bz2"
       ;;
+    *.gz)
+      curl --fail --silent --show-error --location \
+           --retry 5 --retry-delay 2 --retry-all-errors \
+           --max-time "$DEMO_DOWNLOAD_TIMEOUT" \
+           --output "${DEMO_FILE}.gz" \
+           "$DEMO_URL" \
+        || die "demo download failed from $DEMO_URL"
+      gunzip -q -c "${DEMO_FILE}.gz" > "$DEMO_FILE" \
+        || die "demo gunzip failed for ${DEMO_FILE}.gz"
+      rm -f "${DEMO_FILE}.gz"
+      ;;
     *)
       curl --fail --silent --show-error --location \
            --retry 5 --retry-delay 2 --retry-all-errors \
