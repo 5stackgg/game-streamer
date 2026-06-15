@@ -118,6 +118,28 @@ api_progress_settle() {
   API_PROGRESS_PID=""
 }
 
+# Parse curl's stderr progress meter and re-post it as "uploading" progress.
+# The default meter is carriage-return delimited rows whose first column is
+# "% Total" = the upload percent for a --upload-file POST. Throttled 1/s +
+# single-flight like the render loop. Runs in a process-substitution subshell
+# (so it owns its own API_PROGRESS_* copies) and settles its final post at EOF.
+parse_upload_progress() {
+  local line pct now milli
+  while IFS= read -r line; do
+    pct=${line%%[![:space:]]*}; pct=${line#"$pct"}; pct=${pct%%[[:space:]]*}
+    case "$pct" in ''|*[!0-9]*) continue ;; esac
+    [ "$pct" -gt 100 ] && continue
+    now_ms now
+    if [ $((now - API_PROGRESS_LAST_MS)) -ge 1000 ] \
+       && { [ -z "$API_PROGRESS_PID" ] || ! kill -0 "$API_PROGRESS_PID" 2>/dev/null; }; then
+      milli=$((pct * 10))
+      api_status_progress_async "$now" \
+        "$(printf '%d.%03d' $((milli / 1000)) $((milli % 1000)))" uploading
+    fi
+  done < <(tr '\r' '\n')
+  api_progress_settle wait
+}
+
 spec_get_state() {
   curl --fail --silent --show-error --max-time 5 \
        "${SPEC_SERVER_URL}/demo/state"
@@ -1512,10 +1534,12 @@ UPLOAD_URL="${STATUS_API_BASE}/clip-renders/${CLIP_RENDER_JOB_ID}/upload"
 say "POST $UPLOAD_URL"
 # --upload-file streams from disk; --data-binary @file slurps the whole
 # clip into RAM (matters with CLIP_BATCH_MAX_TAILS concurrent uploads).
-# Drop --silent so curl writes its progress meter to stderr; we tee that
-# through a parser that re-posts "uploading" progress (throttled 1/s,
-# single-flight via api_status_progress_async) so the bar actually moves
-# instead of jumping 0->1. PIPESTATUS[0] carries curl's real exit code.
+# Drop --silent so curl writes its progress meter to stderr; pipe that
+# through tee (-> err log for diagnostics) into a parser that re-posts
+# "uploading" progress (throttled 1/s, single-flight) so the bar actually
+# moves instead of jumping 0->1. The shell awaits the whole pipeline before
+# PIPESTATUS[0] (curl's real exit code) is set; the parser settles its last
+# post at EOF. stdout is the --output file, so 2>&1 carries only the meter.
 UPLOAD_ERR="/tmp/clip-upload-err-${CLIP_RENDER_JOB_ID}.log"
 curl --fail --show-error \
        --max-time 1800 \
@@ -1525,9 +1549,8 @@ curl --fail --show-error \
        --upload-file "$CLIP_OUT_FILE" \
        --request POST \
        --output "/tmp/clip-upload-response-${CLIP_RENDER_JOB_ID}.json" \
-       "$UPLOAD_URL" 2> >(tee "$UPLOAD_ERR" | parse_upload_progress)
+       "$UPLOAD_URL" 2>&1 | tee "$UPLOAD_ERR" | parse_upload_progress
 UPLOAD_RC=${PIPESTATUS[0]}
-api_progress_settle wait
 if [ "$UPLOAD_RC" -ne 0 ]; then
   say "WARN upload curl stderr: $(tr '\r' '\n' < "$UPLOAD_ERR" | tail -3 | tr '\n' ' ')"
   rm -f "$UPLOAD_ERR"
