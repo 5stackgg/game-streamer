@@ -51,18 +51,24 @@ export async function renderClipHandler(_req, res, body) {
   // pod is host-networked, so the POST body is UNTRUSTED. Two gates:
   //  1. key allowlist — only CLIP_OUTRO_*/CLIP_BRAND_* may reach the render env.
   //  2. URL-value allowlist — the URL-bearing keys must share the S3/MinIO origin
-  //     the api presigns against (taken from DEMO_URL). Without this, an attacker
-  //     could point the logo <Img src> (headless Chromium) or the curl PUT at an
-  //     arbitrary internal URL (SSRF) / host (arbitrary write). A rejected URL key
-  //     is dropped → the render falls back to the baked stock outro.
+  //     the api presigns against (S3_PUBLIC_ORIGIN, falling back to DEMO_URL's
+  //     origin). Without this, an attacker could point the logo <Img src>
+  //     (headless Chromium) or the curl PUT at an arbitrary internal URL (SSRF) /
+  //     host (arbitrary write). A rejected URL key is dropped → the render falls
+  //     back to the baked stock outro.
   const URL_KEYS = new Set([
     "CLIP_OUTRO_URL",
     "CLIP_OUTRO_PUT_URL",
     "CLIP_BRAND_LOGO_URL",
   ]);
+  // Prefer the api-provided S3 presign origin (trusted pod env, independent of
+  // the demo's source so faceit/external demos still brand); fall back to
+  // DEMO_URL's origin for pods created before S3_PUBLIC_ORIGIN existed.
   let allowedOrigin = null;
   try {
-    allowedOrigin = new URL(process.env.DEMO_URL).origin;
+    allowedOrigin = new URL(
+      process.env.S3_PUBLIC_ORIGIN || process.env.DEMO_URL,
+    ).origin;
   } catch {
     allowedOrigin = null;
   }

@@ -56,6 +56,10 @@ ok "$(resolve_outro_file 1920x1080 60)" "$CACHE/outro_NEWVER_1920x1080_60.mp4" "
 reset; export CLIP_OUTRO_URL="https://s3/weird"
 ok "$(resolve_outro_file 1920x1080 60)" "$CACHE/outro_1920x1080_60.mp4" "unparseable url -> dims/fps cache key"
 
+# 7b) Basename with metacharacters -> sanitized to the safe dims/fps name
+reset; export CLIP_OUTRO_URL="https://s3/branding/outro_'evil_1920x1080_60.mp4?s=1"
+ok "$(resolve_outro_file 1920x1080 60)" "$CACHE/outro_1920x1080_60.mp4" "metachar basename -> safe dims/fps name"
+
 # 8) outro_will_append predicate (baked / none / URL / RENDER)
 reset; : >"$OUTRO_DIR/outro_1920x1080_60.mp4"
 if outro_will_append 1920x1080 60; then ok 0 0 "baked exists -> will append"; else ok 1 0 "baked exists -> will append"; fi
