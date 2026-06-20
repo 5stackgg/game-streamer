@@ -470,7 +470,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, acc
         >
           <Img
             src={logoUrl ?? staticFile("5stack-logo.png")}
-            style={{ width: "100%", height: "100%", objectFit: "contain" }}
+            style={{ width: "100%", height: "100%", ...(logoUrl ? { objectFit: "contain" } : {}) }}
           />
         </div>
 
