@@ -73,10 +73,14 @@ resolve_outro_file() {
   # masked by a stale dims/fps-only file. Falls back to dims/fps if unparseable.
   local cache_dir="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}/branded-outro"
   local fname; fname="$(_outro_url_basename "${CLIP_OUTRO_URL:-${CLIP_OUTRO_PUT_URL:-}}")"
-  case "$fname" in
-    outro_*.mp4) : ;;
-    *) fname="outro_${dims}_${fps}.mp4" ;;
-  esac
+  # Only a plain outro_<safe>.mp4 name may be used as-is; a basename with any
+  # metacharacter (which could break the ffmpeg concat list) falls back to the
+  # fixed dims/fps name.
+  if [[ "$fname" =~ ^outro_[A-Za-z0-9._-]+\.mp4$ ]]; then
+    :
+  else
+    fname="outro_${dims}_${fps}.mp4"
+  fi
   local cached="$cache_dir/$fname"
 
   [ -f "$cached" ] && { printf '%s' "$cached"; return 0; }   # in-pod cache (prior clip, same version)

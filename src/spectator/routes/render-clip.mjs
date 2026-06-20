@@ -60,9 +60,14 @@ export async function renderClipHandler(_req, res, body) {
     "CLIP_OUTRO_PUT_URL",
     "CLIP_BRAND_LOGO_URL",
   ]);
+  // Prefer the api-provided S3 presign origin (trusted pod env, independent of
+  // the demo's source so faceit/external demos still brand); fall back to
+  // DEMO_URL's origin for pods created before S3_PUBLIC_ORIGIN existed.
   let allowedOrigin = null;
   try {
-    allowedOrigin = new URL(process.env.DEMO_URL).origin;
+    allowedOrigin = new URL(
+      process.env.S3_PUBLIC_ORIGIN || process.env.DEMO_URL,
+    ).origin;
   } catch {
     allowedOrigin = null;
   }
