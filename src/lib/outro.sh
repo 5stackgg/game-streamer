@@ -8,13 +8,19 @@
 _outro_baked_path() {
   printf '%s/outro_%s_%s.mp4' "${OUTRO_DIR:-/opt/game-streamer/resources/video}" "$1" "$2"
 }
-_outro_cache_path() {
-  printf '%s/branded-outro/outro_%s_%s.mp4' "${CLIP_OUT_DIR:-/tmp/game-streamer/clips}" "$1" "$2"
+# Object basename from a presigned URL (strips the query/signature). The S3 key
+# embeds the branding version (outro_<version>_<dims>_<fps>.mp4), so keying the
+# in-pod cache on it prevents a stale outro after a mid-pod branding change.
+_outro_url_basename() {
+  local u="${1%%\?*}"   # strip query string
+  printf '%s' "${u##*/}"
 }
 
 # --- Mockable wrappers (tests override these) ---------------------------
-_outro_download() { curl --fail --silent --show-error --max-time 60 -o "$2" "$1"; }
-_outro_upload()   { curl --fail --silent --show-error --max-time 120 --upload-file "$1" "$2"; }
+# No --show-error: a curl failure must not print the (presigned, signature-bearing)
+# URL to pod logs; resolve_outro_file logs an opaque fallback message instead.
+_outro_download() { curl --fail --silent --max-time 60 -o "$2" "$1"; }
+_outro_upload()   { curl --fail --silent --max-time 120 --upload-file "$1" "$2"; }
 _outro_dims_ok() {
   local got; got=$(ffprobe -v error -select_streams v -show_entries stream=width,height \
     -of csv=s=x:p=0 "$1" 2>/dev/null)
@@ -31,7 +37,7 @@ _outro_render() {
     compute_cpu_split; [ -n "${GS_CAPTURE_CPUS:-}" ] && pin=(taskset -c "$GS_CAPTURE_CPUS")
   fi
   ( cd "${MOTION_DIR:-/opt/game-streamer/motion}" && \
-    "${pin[@]}" nice -n 19 node node_modules/.bin/remotion render src/index.ts Outro "$dest" \
+    ${pin[@]+"${pin[@]}"} nice -n 19 node node_modules/.bin/remotion render src/index.ts Outro "$dest" \
       --codec=h264 --pixel-format=yuv420p --log=error --props="$props" )
 }
 
@@ -55,12 +61,28 @@ outro_baked_exists() {
 # Prints the local outro mp4 path to append. Heavy — call once at concat time.
 resolve_outro_file() {
   local dims="$1" fps="$2"
-  local baked cached; baked="$(_outro_baked_path "$dims" "$fps")"; cached="$(_outro_cache_path "$dims" "$fps")"
+  local baked; baked="$(_outro_baked_path "$dims" "$fps")"
 
-  [ -f "$cached" ] && { printf '%s' "$cached"; return 0; }   # in-pod cache (prior clip)
+  # Inactive (no branding env) → baked stock outro.
+  if [ -z "${CLIP_OUTRO_URL:-}" ] && [ "${CLIP_OUTRO_RENDER:-0}" != "1" ]; then
+    printf '%s' "$baked"; return 0
+  fi
+
+  # Version-keyed in-pod cache filename, derived from the presigned URL's object
+  # basename (embeds the branding version) so a mid-pod branding change is not
+  # masked by a stale dims/fps-only file. Falls back to dims/fps if unparseable.
+  local cache_dir="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}/branded-outro"
+  local fname; fname="$(_outro_url_basename "${CLIP_OUTRO_URL:-${CLIP_OUTRO_PUT_URL:-}}")"
+  case "$fname" in
+    outro_*.mp4) : ;;
+    *) fname="outro_${dims}_${fps}.mp4" ;;
+  esac
+  local cached="$cache_dir/$fname"
+
+  [ -f "$cached" ] && { printf '%s' "$cached"; return 0; }   # in-pod cache (prior clip, same version)
 
   if [ -n "${CLIP_OUTRO_URL:-}" ]; then
-    mkdir -p "$(dirname "$cached")"
+    mkdir -p "$cache_dir"
     if _outro_download "$CLIP_OUTRO_URL" "$cached" && _outro_dims_ok "$cached" "$dims"; then
       printf '%s' "$cached"; return 0
     fi
@@ -68,19 +90,16 @@ resolve_outro_file() {
     rm -f "$cached"; printf '%s' "$baked"; return 0
   fi
 
-  if [ "${CLIP_OUTRO_RENDER:-0}" = "1" ]; then
-    mkdir -p "$(dirname "$cached")"
-    if _outro_render "$cached" "$dims" "$fps" \
-         "${CLIP_BRAND_LOGO_URL:-}" "${CLIP_BRAND_NAME:-}" "${CLIP_BRAND_ACCENT:-}" \
-       && _outro_dims_ok "$cached" "$dims"; then
-      if [ -n "${CLIP_OUTRO_PUT_URL:-}" ]; then
-        _outro_upload "$cached" "$CLIP_OUTRO_PUT_URL" || say "OUTRO: cache upload failed (non-fatal)"
-      fi
-      printf '%s' "$cached"; return 0
+  # CLIP_OUTRO_RENDER=1
+  mkdir -p "$cache_dir"
+  if _outro_render "$cached" "$dims" "$fps" \
+       "${CLIP_BRAND_LOGO_URL:-}" "${CLIP_BRAND_NAME:-}" "${CLIP_BRAND_ACCENT:-}" \
+     && _outro_dims_ok "$cached" "$dims"; then
+    if [ -n "${CLIP_OUTRO_PUT_URL:-}" ]; then
+      _outro_upload "$cached" "$CLIP_OUTRO_PUT_URL" || say "OUTRO: cache upload failed (non-fatal)"
     fi
-    say "OUTRO: branded render failed — using baked stock"
-    rm -f "$cached"; printf '%s' "$baked"; return 0
+    printf '%s' "$cached"; return 0
   fi
-
-  printf '%s' "$baked"
+  say "OUTRO: branded render failed — using baked stock"
+  rm -f "$cached"; printf '%s' "$baked"; return 0
 }

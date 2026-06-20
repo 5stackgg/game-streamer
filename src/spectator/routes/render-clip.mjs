@@ -10,7 +10,8 @@ export async function renderClipHandler(_req, res, body) {
   const jobId   = String(body.job_id ?? "");
   const token   = String(body.token  ?? "");
   const apiBase = String(body.api_base ?? "");
-  const outputDims = String(body.output_dims ?? "1920x1080");
+  const rawDims = String(body.output_dims ?? "1920x1080");
+  const outputDims = /^\d{2,4}x\d{2,4}$/.test(rawDims) ? rawDims : "1920x1080";
   const outputFps  = Number.parseInt(body.output_fps, 10) || 60;
 
   // Multi-segment editor sends `segments`; older callers send a single
@@ -46,15 +47,48 @@ export async function renderClipHandler(_req, res, body) {
     return;
   }
 
-  // Outro/branding env from the api (allowlisted prefixes only — defense in
-  // depth, since the body crosses the cluster network).
+  // Outro/branding env from the api. This endpoint is unauthenticated and the
+  // pod is host-networked, so the POST body is UNTRUSTED. Two gates:
+  //  1. key allowlist — only CLIP_OUTRO_*/CLIP_BRAND_* may reach the render env.
+  //  2. URL-value allowlist — the URL-bearing keys must share the S3/MinIO origin
+  //     the api presigns against (taken from DEMO_URL). Without this, an attacker
+  //     could point the logo <Img src> (headless Chromium) or the curl PUT at an
+  //     arbitrary internal URL (SSRF) / host (arbitrary write). A rejected URL key
+  //     is dropped → the render falls back to the baked stock outro.
+  const URL_KEYS = new Set([
+    "CLIP_OUTRO_URL",
+    "CLIP_OUTRO_PUT_URL",
+    "CLIP_BRAND_LOGO_URL",
+  ]);
+  let allowedOrigin = null;
+  try {
+    allowedOrigin = new URL(process.env.DEMO_URL).origin;
+  } catch {
+    allowedOrigin = null;
+  }
   const outroEnv = {};
   const outroSrc =
     body.outro_env && typeof body.outro_env === "object" ? body.outro_env : {};
   for (const [k, v] of Object.entries(outroSrc)) {
-    if ((k.startsWith("CLIP_OUTRO_") || k.startsWith("CLIP_BRAND_")) && v != null) {
-      outroEnv[k] = String(v);
+    if (!(k.startsWith("CLIP_OUTRO_") || k.startsWith("CLIP_BRAND_")) || v == null) {
+      continue;
     }
+    if (URL_KEYS.has(k)) {
+      let sameOrigin = false;
+      try {
+        sameOrigin =
+          !!allowedOrigin && new URL(String(v)).origin === allowedOrigin;
+      } catch {
+        sameOrigin = false;
+      }
+      if (!sameOrigin) {
+        process.stderr.write(
+          `[spec-server] render-clip: rejected ${k} (not the S3 origin) — outro falls back to baked\n`,
+        );
+        continue;
+      }
+    }
+    outroEnv[k] = String(v);
   }
 
   const child = spawn("bash", [`${SRC_DIR}/lib/inline-clip-render.sh`], {
