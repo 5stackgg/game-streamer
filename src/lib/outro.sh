@@ -44,6 +44,14 @@ outro_will_append() {
   return 1
 }
 
+# 0 if a baked stock outro for these dims/fps exists on disk, else 1. The fuse
+# decision in inline-clip-render.sh gates on this: a baked fallback guarantees
+# resolve_outro_file yields an existing file (so OUTRO_APPENDED stays 1) even if
+# a branded download/render fails, so a deferred chip is always baked.
+outro_baked_exists() {
+  [ -f "$(_outro_baked_path "$1" "$2")" ]
+}
+
 # Prints the local outro mp4 path to append. Heavy — call once at concat time.
 resolve_outro_file() {
   local dims="$1" fps="$2"

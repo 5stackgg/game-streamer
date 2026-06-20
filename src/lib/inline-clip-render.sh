@@ -724,11 +724,20 @@ fi
 # plus a split-free concat.
 CLIP_MAX_FUSED_SEGMENTS="${CLIP_MAX_FUSED_SEGMENTS:-6}"
 WILL_FUSE_POLISH_OUTRO=0
+# Fuse (defer the chip to a single final encode) only when a baked outro for
+# these dims/fps exists: that guarantees resolve_outro_file yields an existing
+# file at concat (OUTRO_APPENDED=1) even if a branded download/render fails, so
+# the deferred chip is always baked in the fused branch. For dims/fps with no
+# baked fallback (e.g. 30fps), skip fusing — the chip is baked per-segment,
+# which stays correct whether or not the branded outro ends up appended.
 if [ "$OUTRO_WILL_APPEND" = "1" ] \
+   && outro_baked_exists "${CLIP_OUTPUT_DIMS:-1920x1080}" "${CLIP_OUTPUT_FPS:-60}" \
    && [ -n "$CHIP_NAME" ] \
    && [ "$SEG_COUNT" -le "$CLIP_MAX_FUSED_SEGMENTS" ]; then
   WILL_FUSE_POLISH_OUTRO=1
-elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ]; then
+elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ] \
+     && [ "$SEG_COUNT" -gt "$CLIP_MAX_FUSED_SEGMENTS" ] \
+     && outro_baked_exists "${CLIP_OUTPUT_DIMS:-1920x1080}" "${CLIP_OUTPUT_FPS:-60}"; then
   say "concat: ${SEG_COUNT} segments exceeds fuse cap ${CLIP_MAX_FUSED_SEGMENTS} — per-segment polish + split-free concat"
 fi
 

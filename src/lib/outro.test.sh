@@ -44,4 +44,9 @@ if outro_will_append 1920x1080 60; then ok 0 0 "baked exists -> will append"; el
 rm -f "$OUTRO_DIR/outro_1920x1080_60.mp4"
 if outro_will_append 1920x1080 60; then ok 0 1 "no baked, no env -> will NOT append"; else ok 1 1 "no baked, no env -> will NOT append"; fi
 
+# 6) outro_baked_exists predicate (drives the fuse gate)
+: >"$OUTRO_DIR/outro_1920x1080_60.mp4"
+if outro_baked_exists 1920x1080 60; then ok 0 0 "baked 60 exists -> baked_exists true"; else ok 1 0 "baked 60 exists -> baked_exists true"; fi
+if outro_baked_exists 1920x1080 30; then ok 0 1 "no baked 30 -> baked_exists false"; else ok 1 1 "no baked 30 -> baked_exists false"; fi
+
 [ "$fails" -eq 0 ] && { echo "ALL PASS"; exit 0; } || { echo "$fails FAILED"; exit 1; }
