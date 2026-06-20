@@ -46,6 +46,17 @@ export async function renderClipHandler(_req, res, body) {
     return;
   }
 
+  // Outro/branding env from the api (allowlisted prefixes only — defense in
+  // depth, since the body crosses the cluster network).
+  const outroEnv = {};
+  const outroSrc =
+    body.outro_env && typeof body.outro_env === "object" ? body.outro_env : {};
+  for (const [k, v] of Object.entries(outroSrc)) {
+    if ((k.startsWith("CLIP_OUTRO_") || k.startsWith("CLIP_BRAND_")) && v != null) {
+      outroEnv[k] = String(v);
+    }
+  }
+
   const child = spawn("bash", [`${SRC_DIR}/lib/inline-clip-render.sh`], {
     detached: true,
     stdio: ["ignore", "inherit", "inherit"],
@@ -59,6 +70,7 @@ export async function renderClipHandler(_req, res, body) {
       CLIP_OUTPUT_FPS:    String(outputFps),
       CLIP_TICK_RATE:     String(demoState.tickRate || 64),
       SPEC_SERVER_URL:    `http://127.0.0.1:${PORT}`,
+      ...outroEnv,
     },
   });
   child.unref();
