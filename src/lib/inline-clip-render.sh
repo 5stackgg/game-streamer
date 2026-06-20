@@ -736,9 +736,13 @@ if [ "$OUTRO_WILL_APPEND" = "1" ] \
    && [ "$SEG_COUNT" -le "$CLIP_MAX_FUSED_SEGMENTS" ]; then
   WILL_FUSE_POLISH_OUTRO=1
 elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ] \
-     && [ "$SEG_COUNT" -gt "$CLIP_MAX_FUSED_SEGMENTS" ] \
      && outro_baked_exists "${CLIP_OUTPUT_DIMS:-1920x1080}" "${CLIP_OUTPUT_FPS:-60}"; then
+  # baked fallback exists but segment count exceeds the fuse cap
   say "concat: ${SEG_COUNT} segments exceeds fuse cap ${CLIP_MAX_FUSED_SEGMENTS} — per-segment polish + split-free concat"
+elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ]; then
+  # no baked fallback for these dims/fps (e.g. 30fps): can't guarantee the fused
+  # branch runs, so bake the chip per-segment; branded outro still appended if it renders
+  say "concat: no baked outro for ${CLIP_OUTPUT_DIMS:-1920x1080}@${CLIP_OUTPUT_FPS:-60} — not fusing; chip baked per-segment"
 fi
 
 # Non-fused path bakes the chip per-segment INSIDE the capture loop, so it has to
