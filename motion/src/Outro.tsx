@@ -34,6 +34,9 @@ export const outroSchema = z.object({
   height: z.number().int().positive().default(1080),
   fps: z.number().int().positive().default(60),
   durationS: z.number().positive().default(3),
+  logoUrl: z.string().optional(),
+  brandName: z.string().optional(),
+  accent: z.string().optional(),
 });
 
 export type OutroProps = z.infer<typeof outroSchema>;
@@ -47,9 +50,12 @@ export const DEFAULT_OUTRO_PROPS: OutroProps = {
 
 const easeOutCubic = (x: number) => 1 - Math.pow(1 - x, 3);
 
-export const Outro: React.FC<OutroProps> = ({ durationS }) => {
+export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, accent }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
+  const ACCENT = accent ?? "33 94% 58%";
+  const acc = (a: number) => `hsl(${ACCENT} / ${a})`;
+  const accSolid = `hsl(${ACCENT})`;
   const t = frame / fps;
   const totalFrames = Math.round(durationS * fps);
 
@@ -318,6 +324,12 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
     to: 1,
   });
 
+  const WORD = (brandName ?? "").trim().toUpperCase().slice(0, 14) || null;
+  // Auto-fit: shrink titleSize for long names so they never overflow.
+  const wordTitleSize = WORD
+    ? Math.min(titleSize, Math.round((width * 0.82) / Math.max(WORD.length, 1) / 0.62))
+    : titleSize;
+
   return (
     <AbsoluteFill
       style={{
@@ -345,7 +357,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
             top: logoY - logoSize * 0.4,
             width: logoSize * 1.6,
             height: logoSize * 1.6,
-            background: `conic-gradient(from ${180 + Math.sin(t * 0.5) * 6}deg at 50% 0%, transparent 165deg, hsl(33, 94%, 58%, 0.18) 175deg, hsl(33, 94%, 58%, 0.32) 180deg, hsl(33, 94%, 58%, 0.18) 185deg, transparent 195deg)`,
+            background: `conic-gradient(from ${180 + Math.sin(t * 0.5) * 6}deg at 50% 0%, transparent 165deg, ${acc(0.18)} 175deg, ${acc(0.32)} 180deg, ${acc(0.18)} 185deg, transparent 195deg)`,
             opacity: bgFade * 0.85,
             mixBlendMode: "screen",
             filter: "blur(14px)",
@@ -357,7 +369,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
           style={{
             position: "absolute",
             inset: 0,
-            background: `radial-gradient(ellipse 60% 45% at 50% 46%, hsl(33, 94%, 58%, ${0.16 + radialPulse * 0.06}) 0%, transparent 70%)`,
+            background: `radial-gradient(ellipse 60% 45% at 50% 46%, ${acc(0.16 + radialPulse * 0.06)} 0%, transparent 70%)`,
             opacity: bgFade,
             mixBlendMode: "screen",
           }}
@@ -384,9 +396,9 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
               width: p.size,
               height: p.size,
               borderRadius: "50%",
-              background: BRAND.amber,
+              background: accSolid,
               opacity: p.opacity,
-              boxShadow: `0 0 ${p.size * 4}px ${BRAND.amber}`,
+              boxShadow: `0 0 ${p.size * 4}px ${accSolid}`,
               pointerEvents: "none",
             }}
           />
@@ -399,8 +411,8 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
             left: leftBladeX,
             width: leftBladeWidth,
             height: bladeH,
-            background: `linear-gradient(90deg, transparent 0%, hsl(33, 94%, 58%, 0.35) 35%, ${BRAND.amber} 92%, #fff 100%)`,
-            boxShadow: `0 0 18px ${BRAND.amber}, 0 0 4px #fff`,
+            background: `linear-gradient(90deg, transparent 0%, ${acc(0.35)} 35%, ${accSolid} 92%, #fff 100%)`,
+            boxShadow: `0 0 18px ${accSolid}, 0 0 4px #fff`,
             opacity: bladeOpacity,
           }}
         />
@@ -411,8 +423,8 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
             left: rightBladeX,
             width: rightBladeWidth,
             height: bladeH,
-            background: `linear-gradient(90deg, #fff 0%, ${BRAND.amber} 8%, hsl(33, 94%, 58%, 0.35) 65%, transparent 100%)`,
-            boxShadow: `0 0 18px ${BRAND.amber}, 0 0 4px #fff`,
+            background: `linear-gradient(90deg, #fff 0%, ${accSolid} 8%, ${acc(0.35)} 65%, transparent 100%)`,
+            boxShadow: `0 0 18px ${accSolid}, 0 0 4px #fff`,
             opacity: bladeOpacity,
           }}
         />
@@ -453,12 +465,12 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
             opacity: logoOpacity,
             transform: `scale(${logoFinalScale})`,
             transformOrigin: "center center",
-            filter: `drop-shadow(0 0 ${24 * rimGlow}px hsl(33, 94%, 58%, ${0.55 * rimGlow})) drop-shadow(0 12px 28px rgba(0,0,0,0.6))`,
+            filter: `drop-shadow(0 0 ${24 * rimGlow}px ${acc(0.55 * rimGlow)}) drop-shadow(0 12px 28px rgba(0,0,0,0.6))`,
           }}
         >
           <Img
-            src={staticFile("5stack-logo.png")}
-            style={{ width: "100%", height: "100%" }}
+            src={logoUrl ?? staticFile("5stack-logo.png")}
+            style={{ width: "100%", height: "100%", objectFit: "contain" }}
           />
         </div>
 
@@ -472,7 +484,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
             left: 0,
             width: "100%",
             textAlign: "center",
-            fontSize: titleSize,
+            fontSize: WORD ? wordTitleSize : titleSize,
             fontWeight: 900,
             letterSpacing: "0.08em",
             lineHeight: 1,
@@ -480,128 +492,159 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
             transform: `scale(${wordmarkBreath})`,
             transformOrigin: "center center",
             textShadow:
-              "0 6px 22px rgba(0,0,0,0.7), 0 0 28px hsl(33, 94%, 58%, 0.18)",
+              `0 6px 22px rgba(0,0,0,0.7), 0 0 28px ${acc(0.18)}`,
           }}
         >
-          {STACK_CHARS.map((char, i) => {
-            const start = WORDMARK_START + i * LETTER_STAGGER - DECRYPT_PRE_T;
-            const resolve = WORDMARK_START + i * LETTER_STAGGER + LETTER_DURATION;
-            const cycling = t >= start && t < resolve;
-            const resolved = t >= resolve;
-            // Inline-block so each char can carry its own
-            // opacity/textShadow. Natural width — letter-spacing on
-            // the parent gives consistent visual gaps between
-            // chars regardless of glyph width.
-            const cellStyle: React.CSSProperties = {
-              display: "inline-block",
-            };
-            if (!cycling && !resolved) {
-              return (
-                <span
-                  key={i}
-                  style={{ ...cellStyle, opacity: 0 }}
-                >
-                  {char}
-                </span>
-              );
-            }
-            let display: string;
-            if (cycling) {
-              const cycleIdx = Math.floor((t - start) * fps / 2);
-              const idx = Math.floor(
-                random(`decrypt-${i}-${cycleIdx}`) * GLYPH_POOL.length,
-              );
-              display = GLYPH_POOL[idx];
-            } else {
-              display = char;
-            }
-            const resolveFlash = interpolate(
-              t,
-              [resolve - 0.01, resolve + 0.02, resolve + 0.22],
-              [0, 1, 0],
-              { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
-            );
-            return (
-              <span
-                key={i}
-                style={{
-                  ...cellStyle,
-                  color: resolved ? BRAND.textPrimary : BRAND.amber,
-                  opacity: cycling ? 0.85 : 1,
-                  textShadow:
-                    resolveFlash > 0.001
-                      ? `0 0 ${30 * resolveFlash}px ${BRAND.amber}, 0 0 ${60 * resolveFlash}px hsl(33, 94%, 58%, ${0.7 * resolveFlash})`
-                      : cycling
-                        ? `0 0 12px hsl(33, 94%, 58%, 0.6)`
-                        : undefined,
-                }}
-              >
-                {display}
-              </span>
-            );
-          })}
-
-          {/* .gg — bullets in scaled, then each char decrypts in
-              sequence. The last 'g' is the LOCK moment. */}
-          <span
-            style={{
-              display: "inline-block",
-              opacity: ggOpacity,
-              transform: `scale(${0.3 + 0.7 * ggSpring})`,
-              transformOrigin: "left center",
-            }}
-          >
-            {[".", "g", "g"].map((char, i) => {
-              const resolve = GG_RESOLVE_TIMES[i];
-              const cycling = t >= GG_TRIGGER_T && t < resolve;
-              const resolved = t >= resolve;
-              // Default to the natural char so the layout box is
-              // always reserved — prevents "5STACK" from snapping
-              // leftward when .gg first appears. The parent span's
-              // opacity/scale handle the visual entry.
-              let display: string = char;
-              if (cycling) {
-                const cycleIdx = Math.floor((t - GG_TRIGGER_T) * fps / 2);
-                const idx = Math.floor(
-                  random(`gg-${i}-${cycleIdx}`) * GLYPH_POOL.length,
+          {WORD
+            ? WORD.split("").map((char, i) => {
+                const start = WORDMARK_START + i * LETTER_STAGGER - DECRYPT_PRE_T;
+                const resolve = WORDMARK_START + i * LETTER_STAGGER + LETTER_DURATION;
+                const cycling = t >= start && t < resolve;
+                const resolved = t >= resolve;
+                if (!cycling && !resolved) {
+                  return <span key={i} style={{ display: "inline-block", opacity: 0 }}>{char}</span>;
+                }
+                let display = char;
+                if (cycling) {
+                  const cycleIdx = Math.floor(((t - start) * fps) / 2);
+                  display = GLYPH_POOL[Math.floor(random(`decrypt-${i}-${cycleIdx}`) * GLYPH_POOL.length)];
+                }
+                const resolveFlash = interpolate(t, [resolve - 0.01, resolve + 0.02, resolve + 0.22], [0, 1, 0],
+                  { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+                return (
+                  <span key={i} style={{
+                    display: "inline-block",
+                    color: resolved ? BRAND.textPrimary : accSolid,
+                    opacity: cycling ? 0.85 : 1,
+                    textShadow: resolveFlash > 0.001
+                      ? `0 0 ${30 * resolveFlash}px ${accSolid}, 0 0 ${60 * resolveFlash}px ${acc(0.7 * resolveFlash)}`
+                      : cycling ? `0 0 12px ${acc(0.6)}` : undefined,
+                  }}>{display}</span>
                 );
-                display = GLYPH_POOL[idx];
-              }
-              const isLast = i === GG_RESOLVE_TIMES.length - 1;
-              const resolveFlash = interpolate(
-                t,
-                [resolve - 0.01, resolve + 0.04, resolve + 0.3],
-                [0, 1, 0],
-                { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
-              );
-              const flashScale = isLast ? 2.0 : 1.0;
-              // Narrower cell for the lowercase ".gg" chars,
-              // and centred so the glyph swap doesn't jitter.
-              return (
+              })
+            : (/* existing 5STACK chars + .gg span — UNCHANGED stock path */
+              <>
+                {STACK_CHARS.map((char, i) => {
+                  const start = WORDMARK_START + i * LETTER_STAGGER - DECRYPT_PRE_T;
+                  const resolve = WORDMARK_START + i * LETTER_STAGGER + LETTER_DURATION;
+                  const cycling = t >= start && t < resolve;
+                  const resolved = t >= resolve;
+                  // Inline-block so each char can carry its own
+                  // opacity/textShadow. Natural width — letter-spacing on
+                  // the parent gives consistent visual gaps between
+                  // chars regardless of glyph width.
+                  const cellStyle: React.CSSProperties = {
+                    display: "inline-block",
+                  };
+                  if (!cycling && !resolved) {
+                    return (
+                      <span
+                        key={i}
+                        style={{ ...cellStyle, opacity: 0 }}
+                      >
+                        {char}
+                      </span>
+                    );
+                  }
+                  let display: string;
+                  if (cycling) {
+                    const cycleIdx = Math.floor((t - start) * fps / 2);
+                    const idx = Math.floor(
+                      random(`decrypt-${i}-${cycleIdx}`) * GLYPH_POOL.length,
+                    );
+                    display = GLYPH_POOL[idx];
+                  } else {
+                    display = char;
+                  }
+                  const resolveFlash = interpolate(
+                    t,
+                    [resolve - 0.01, resolve + 0.02, resolve + 0.22],
+                    [0, 1, 0],
+                    { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+                  );
+                  return (
+                    <span
+                      key={i}
+                      style={{
+                        ...cellStyle,
+                        color: resolved ? BRAND.textPrimary : accSolid,
+                        opacity: cycling ? 0.85 : 1,
+                        textShadow:
+                          resolveFlash > 0.001
+                            ? `0 0 ${30 * resolveFlash}px ${accSolid}, 0 0 ${60 * resolveFlash}px ${acc(0.7 * resolveFlash)}`
+                            : cycling
+                              ? `0 0 12px ${acc(0.6)}`
+                              : undefined,
+                      }}
+                    >
+                      {display}
+                    </span>
+                  );
+                })}
+
+                {/* .gg — bullets in scaled, then each char decrypts in
+                    sequence. The last 'g' is the LOCK moment. */}
                 <span
-                  key={i}
                   style={{
                     display: "inline-block",
-                    width: i === 0 ? "0.35em" : "0.55em",
-                    textAlign: "center",
-                    color: BRAND.amber,
-                    textShadow:
-                      resolveFlash > 0.001
-                        ? `0 0 ${36 * resolveFlash * flashScale}px ${BRAND.amber}, 0 0 ${80 * resolveFlash * flashScale}px hsl(33, 94%, 58%, ${0.75 * resolveFlash})`
-                        : cycling
-                          ? `0 0 18px hsl(33, 94%, 58%, 0.7), 0 0 36px hsl(33, 94%, 58%, 0.35)`
-                          : `0 0 28px hsl(33, 94%, 58%, ${0.55 + 0.45 * bulletFlashOpacity}), 0 0 12px hsl(33, 94%, 58%, ${0.4 + 0.6 * bulletFlashOpacity})`,
+                    opacity: ggOpacity,
+                    transform: `scale(${0.3 + 0.7 * ggSpring})`,
+                    transformOrigin: "left center",
                   }}
                 >
-                  {display}
+                  {[".", "g", "g"].map((char, i) => {
+                    const resolve = GG_RESOLVE_TIMES[i];
+                    const cycling = t >= GG_TRIGGER_T && t < resolve;
+                    const resolved = t >= resolve;
+                    // Default to the natural char so the layout box is
+                    // always reserved — prevents "5STACK" from snapping
+                    // leftward when .gg first appears. The parent span's
+                    // opacity/scale handle the visual entry.
+                    let display: string = char;
+                    if (cycling) {
+                      const cycleIdx = Math.floor((t - GG_TRIGGER_T) * fps / 2);
+                      const idx = Math.floor(
+                        random(`gg-${i}-${cycleIdx}`) * GLYPH_POOL.length,
+                      );
+                      display = GLYPH_POOL[idx];
+                    }
+                    const isLast = i === GG_RESOLVE_TIMES.length - 1;
+                    const resolveFlash = interpolate(
+                      t,
+                      [resolve - 0.01, resolve + 0.04, resolve + 0.3],
+                      [0, 1, 0],
+                      { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+                    );
+                    const flashScale = isLast ? 2.0 : 1.0;
+                    // Narrower cell for the lowercase ".gg" chars,
+                    // and centred so the glyph swap doesn't jitter.
+                    return (
+                      <span
+                        key={i}
+                        style={{
+                          display: "inline-block",
+                          width: i === 0 ? "0.35em" : "0.55em",
+                          textAlign: "center",
+                          color: accSolid,
+                          textShadow:
+                            resolveFlash > 0.001
+                              ? `0 0 ${36 * resolveFlash * flashScale}px ${accSolid}, 0 0 ${80 * resolveFlash * flashScale}px ${acc(0.75 * resolveFlash)}`
+                              : cycling
+                                ? `0 0 18px ${acc(0.7)}, 0 0 36px ${acc(0.35)}`
+                                : `0 0 28px ${acc(0.55 + 0.45 * bulletFlashOpacity)}, 0 0 12px ${acc(0.4 + 0.6 * bulletFlashOpacity)}`,
+                        }}
+                      >
+                        {display}
+                      </span>
+                    );
+                  })}
                 </span>
-              );
-            })}
-          </span>
+              </>
+            )}
         </div>
 
         {/* Bullet impact glow at GG_TRIGGER_T */}
-        {bulletFlashOpacity > 0.001 && (
+        {!WORD && bulletFlashOpacity > 0.001 && (
           <div
             style={{
               position: "absolute",
@@ -609,7 +652,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
               left: sparkX - titleSize * 0.5,
               width: titleSize,
               height: titleSize,
-              background: `radial-gradient(circle, rgba(255,255,255,0.9) 0%, hsl(33, 94%, 58%, 0.55) 30%, transparent 65%)`,
+              background: `radial-gradient(circle, rgba(255,255,255,0.9) 0%, ${acc(0.55)} 30%, transparent 65%)`,
               opacity: bulletFlashOpacity,
               mixBlendMode: "screen",
               pointerEvents: "none",
@@ -629,79 +672,83 @@ export const Outro: React.FC<OutroProps> = ({ durationS }) => {
           The . in "Yours." rhymes with the . in ".gg".
           ============================================================ */}
 
-      {/* Subtitle — fades in during the decrypt to set context */}
-      <div
-        style={{
-          position: "absolute",
-          top: subtitleTop,
-          left: 0,
-          width: "100%",
-          textAlign: "center",
-          fontFamily: FONT_STACK,
-          fontSize: Math.round(titleSize * 0.17),
-          fontWeight: 300,
-          letterSpacing: "0.42em",
-          textTransform: "uppercase",
-          color: BRAND.textMuted,
-          opacity: topTaglineO * 0.85,
-          transform: `translateY(${topTaglineDy}px)`,
-          textShadow: "0 2px 14px rgba(0,0,0,0.7)",
-          pointerEvents: "none",
-          // Trailing letter-spacing pushes visual centre right;
-          // nudge with matching left padding so it reads centred.
-          paddingLeft: "0.42em",
-        }}
-      >
-        The System Behind the Game
-      </div>
+      {!WORD && (
+        <>
+          {/* Subtitle — fades in during the decrypt to set context */}
+          <div
+            style={{
+              position: "absolute",
+              top: subtitleTop,
+              left: 0,
+              width: "100%",
+              textAlign: "center",
+              fontFamily: FONT_STACK,
+              fontSize: Math.round(titleSize * 0.17),
+              fontWeight: 300,
+              letterSpacing: "0.42em",
+              textTransform: "uppercase",
+              color: BRAND.textMuted,
+              opacity: topTaglineO * 0.85,
+              transform: `translateY(${topTaglineDy}px)`,
+              textShadow: "0 2px 14px rgba(0,0,0,0.7)",
+              pointerEvents: "none",
+              // Trailing letter-spacing pushes visual centre right;
+              // nudge with matching left padding so it reads centred.
+              paddingLeft: "0.42em",
+            }}
+          >
+            The System Behind the Game
+          </div>
 
-      {/* YOURS. — Oxanium 900, all caps, matching the wordmark's
-          voice. Appears after .gg locks. The period pulses
-          synchronously with .gg locking as the brand's signature
-          punctuation moment. */}
-      <div
-        style={{
-          position: "absolute",
-          top: yoursTop,
-          left: 0,
-          width: "100%",
-          textAlign: "center",
-          fontFamily: FONT_STACK,
-          fontSize: Math.round(titleSize * 0.42),
-          fontWeight: 900,
-          letterSpacing: "0.08em",
-          textTransform: "uppercase",
-          color: BRAND.amber,
-          opacity: bottomTaglineO,
-          transform: `translateY(${(1 - bottomTaglineSpring) * 12}px)`,
-          textShadow:
-            "0 0 22px hsl(33, 94%, 58%, 0.45), 0 0 8px hsl(33, 94%, 58%, 0.35), 0 4px 18px rgba(0,0,0,0.7)",
-          // Trailing letter-spacing pushes visual centre right;
-          // nudge with matching left padding so it reads centred.
-          paddingLeft: "0.08em",
-          pointerEvents: "none",
-        }}
-      >
-        <span>Yours</span>
-        <span
-          style={{
-            display: "inline-block",
-            transform: `scale(${periodPulse})`,
-            transformOrigin: "center 80%",
-            textShadow:
-              periodGlow > 0.001
-                ? `0 0 ${28 * periodGlow}px ${BRAND.amber}, 0 0 ${60 * periodGlow}px hsl(33, 94%, 58%, ${0.75 * periodGlow})`
-                : undefined,
-            color:
-              periodGlow > 0.001
-                ? `hsl(33, 100%, ${58 + 22 * periodGlow}%)`
-                : BRAND.amber,
-            paddingLeft: "0.02em",
-          }}
-        >
-          .
-        </span>
-      </div>
+          {/* YOURS. — Oxanium 900, all caps, matching the wordmark's
+              voice. Appears after .gg locks. The period pulses
+              synchronously with .gg locking as the brand's signature
+              punctuation moment. */}
+          <div
+            style={{
+              position: "absolute",
+              top: yoursTop,
+              left: 0,
+              width: "100%",
+              textAlign: "center",
+              fontFamily: FONT_STACK,
+              fontSize: Math.round(titleSize * 0.42),
+              fontWeight: 900,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              color: accSolid,
+              opacity: bottomTaglineO,
+              transform: `translateY(${(1 - bottomTaglineSpring) * 12}px)`,
+              textShadow:
+                `0 0 22px ${acc(0.45)}, 0 0 8px ${acc(0.35)}, 0 4px 18px rgba(0,0,0,0.7)`,
+              // Trailing letter-spacing pushes visual centre right;
+              // nudge with matching left padding so it reads centred.
+              paddingLeft: "0.08em",
+              pointerEvents: "none",
+            }}
+          >
+            <span>Yours</span>
+            <span
+              style={{
+                display: "inline-block",
+                transform: `scale(${periodPulse})`,
+                transformOrigin: "center 80%",
+                textShadow:
+                  periodGlow > 0.001
+                    ? `0 0 ${28 * periodGlow}px ${accSolid}, 0 0 ${60 * periodGlow}px ${acc(0.75 * periodGlow)}`
+                    : undefined,
+                color:
+                  periodGlow > 0.001
+                    ? `hsl(33, 100%, ${58 + 22 * periodGlow}%)`
+                    : accSolid,
+                paddingLeft: "0.02em",
+              }}
+            >
+              .
+            </span>
+          </div>
+        </>
+      )}
 
     </AbsoluteFill>
   );
