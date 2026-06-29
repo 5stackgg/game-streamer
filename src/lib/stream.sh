@@ -133,11 +133,12 @@ start_capture() {
     # buffer count — raw frames are big, so the default byte cap would throttle.
     local outchain="compositor name=comp background=black ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
     local pipeline
+    # Audio queue leaks like the video leg so it can't fall permanently behind.
     if [ "$audio" = 1 ]; then
       pipeline="$outchain ! queue ! mux. \
 $cs2_src \
 $hud_src \
-pulsesrc device=$pulse_source buffer-time=400000 provide-clock=false ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue ! mux. \
+pulsesrc device=$pulse_source buffer-time=400000 provide-clock=false ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
 mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=200"
     else
       pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=200 \
@@ -201,7 +202,7 @@ $hud_src"
           ! audioresample \
           ! opusenc bitrate=128000 \
           ! opusparse \
-          ! queue ! mux. \
+          ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
         mpegtsmux name=mux alignment=7 \
           ! srtsink uri="$url" latency=200
     else

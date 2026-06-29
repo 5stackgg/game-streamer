@@ -25,30 +25,6 @@ fps_max_ui 60
 
 // Disable VSync / latency stuff
 r_vsync 0
-r_dynamic 0
-
-// Shadows & lighting
-r_shadows 0
-r_shadow_quality 0
-r_csgo_water_effects 0
-
-// Textures / detail
-r_texture_filtering_quality 0
-r_detailtextures 0
-r_decals 0
-r_drawtracers_firstperson 0
-
-// Effects
-r_particle_lighting 0
-r_particle_shadows 0
-r_volumetric_lighting 0
-r_bloom 0
-
-// Anti-aliasing / post
-mat_antialias 0
-mat_aaquality 0
-mat_motion_blur_enabled 0
-mat_disable_bloom 1
 
 // Multicore
 mat_queue_mode -1
@@ -56,17 +32,14 @@ mat_queue_mode -1
 // Reduce input lag
 engine_low_latency_sleep_after_client_tick 0
 
-// Misc
+// Spectator/UI niceties (non-visual)
 cl_autohelp 0
 cl_showhelp 0
 cl_disablefreezecam 1
 cl_trueview_show_status 0
 
-// Boot trim — cheap suppressions of subsystems we don't need for
-// demo playback / spectator capture.
+// Boot trim
 sys_minidumpspewlines 0
-cl_disable_ragdolls 1
-r_drawscreenspaceparticles 0
 cl_disablehtmlmotd 1
 
 echo "PERF SETTINGS LOADED"
