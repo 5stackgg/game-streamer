@@ -129,13 +129,16 @@ static struct state st = { .listen_fd = -1, .client_fd = -1, .present_efd = -1 }
 // ---- fourcc -> GStreamer format ------------------------------------------
 // DRM fourccs are little-endian byte order in memory; map to the matching gst
 // raw format. CS2's swapchain is almost certainly XRGB/ARGB8888 (BGRx/BGRA).
+// Alpha is mapped to the opaque (x) sibling on purpose: cs2 drives the swapchain
+// alpha to 0 during a flashbang, so honoring it makes `compositor background=black`
+// paint the whole frame black on every flash (OBS's "Allow Transparency = OFF").
 static const char *fourcc_to_gst(uint32_t f)
 {
     switch (f) {
-    case DRM_FORMAT_XRGB8888: return "BGRx";
-    case DRM_FORMAT_ARGB8888: return "BGRA";
-    case DRM_FORMAT_XBGR8888: return "RGBx";
-    case DRM_FORMAT_ABGR8888: return "RGBA";
+    case DRM_FORMAT_XRGB8888:
+    case DRM_FORMAT_ARGB8888: return "BGRx";
+    case DRM_FORMAT_XBGR8888:
+    case DRM_FORMAT_ABGR8888: return "RGBx";
     default:                  return NULL;
     }
 }
@@ -145,10 +148,10 @@ static const char *fourcc_to_gst(uint32_t f)
 static GstVideoFormat fourcc_to_gst_vfmt(uint32_t f)
 {
     switch (f) {
-    case DRM_FORMAT_XRGB8888: return GST_VIDEO_FORMAT_BGRx;
-    case DRM_FORMAT_ARGB8888: return GST_VIDEO_FORMAT_BGRA;
-    case DRM_FORMAT_XBGR8888: return GST_VIDEO_FORMAT_RGBx;
-    case DRM_FORMAT_ABGR8888: return GST_VIDEO_FORMAT_RGBA;
+    case DRM_FORMAT_XRGB8888:
+    case DRM_FORMAT_ARGB8888: return GST_VIDEO_FORMAT_BGRx;
+    case DRM_FORMAT_XBGR8888:
+    case DRM_FORMAT_ABGR8888: return GST_VIDEO_FORMAT_RGBx;
     default:                  return GST_VIDEO_FORMAT_UNKNOWN;
     }
 }
