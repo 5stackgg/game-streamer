@@ -278,7 +278,15 @@ report_status status=live \
 
 # The api kills the Job when the stream ends; if we exit 0 the pod
 # tears down mid-match. cs2/gst are nohup'd so we can't wait on them.
+# Supervise the capture: srtsink auto-reconnect is off, so an SRT drop
+# errors the pipeline out instead of silently reconnecting into mediamtx's
+# stale HLS muxer (which desyncs audio). Respawn cleanly via restart_capture
+# (its 1s gap lets mediamtx expire the old session and rebuild a synced muxer).
 while :; do
-  sleep 3600 &
+  if ! stream_running "$MATCH_ID"; then
+    warn "live capture down — restarting to resync via a fresh mediamtx session"
+    restart_capture "$MATCH_ID" || warn "restart_capture failed; will retry"
+  fi
+  sleep 5 &
   wait $!
 done

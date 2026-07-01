@@ -139,9 +139,9 @@ start_capture() {
 $cs2_src \
 $hud_src \
 pulsesrc device=$pulse_source buffer-time=400000 provide-clock=false ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
-mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=200"
+mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=200 auto-reconnect=false"
     else
-      pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=200 \
+      pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=200 auto-reconnect=false \
 $cs2_src \
 $hud_src"
     fi
@@ -204,7 +204,7 @@ $hud_src"
           ! opusparse \
           ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
         mpegtsmux name=mux alignment=7 \
-          ! srtsink uri="$url" latency=200
+          ! srtsink uri="$url" latency=200 auto-reconnect=false
     else
       spawn_logged "$gst_tag" gst-launch-1.0 -e \
         ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
@@ -214,7 +214,7 @@ $hud_src"
           ! $enc \
           ! $parse \
           ! mpegtsmux alignment=7 \
-          ! srtsink uri="$url" latency=200
+          ! srtsink uri="$url" latency=200 auto-reconnect=false
     fi
   fi
 
