@@ -242,6 +242,28 @@ $hud_src"
       cs2_pid=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
       hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
       jif() { awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null; }
+      # AUDIO-DIAG: pulse-side per-stream latency (ms) — where seconds of audio lag
+      # can hide BEFORE the gst caps (skew slaving re-stamps late samples as live, so
+      # PTS never shows it). srcout = readers of the cs2 monitor (our capture);
+      # sinkin = cs2's write stream into the sink. Comma list = one value per stream;
+      # steady growth across samples = the backlog, and names the side it's on.
+      mon="${PULSE_SINK_NAME:-cs2}.monitor"
+      pa_lat() { # pa_lat <sink-inputs|source-outputs> <Sink:|Source:> <owner-idx>
+        pactl list "$1" 2>/dev/null | awk -v f="$2" -v idx="$3" '
+          function flush(){ if (cur==idx && lat>0) out=out (out?",":"") int(lat/1000) }
+          /^(Sink Input|Source Output) #/ { flush(); cur=""; lat=0 }
+          $1==f { cur=$2 }
+          /Latency:/ { for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) { lat+=$i; break } }
+          END { flush(); print (out ? out : "?") }'
+      }
+      audio_lat() {
+        local midx sidx
+        midx=$(pactl list short sources 2>/dev/null | awk -v s="$mon" '$2==s{print $1; exit}')
+        sidx=$(pactl list short sinks 2>/dev/null | awk -v s="${PULSE_SINK_NAME:-cs2}" '$2==s{print $1; exit}')
+        printf 'srcout=%sms sinkin=%sms' \
+          "$([ -n "$midx" ] && pa_lat source-outputs "Source:" "$midx" || echo '?')" \
+          "$([ -n "$sidx" ] && pa_lat sink-inputs "Sink:" "$sidx" || echo '?')"
+      }
       interval="${GS_LIVE_DIAG_INTERVAL:-15}"
       pcs2=$(jif "$cs2_pid"); pcap=$(jif "$cap_pid"); pms=$(date +%s%3N 2>/dev/null || echo 0)
       while kill -0 "$cap_pid" 2>/dev/null; do
@@ -253,7 +275,17 @@ $hud_src"
         ccs2=$(jif "$cs2_pid"); ccap=$(jif "$cap_pid")
         cs2cpu=$(awk -v a="${pcs2:-}" -v b="${ccs2:-}" -v dt="$dt" -v hz="$hz" 'BEGIN{if(a==""||b==""){print "?"}else printf "%.0f",(b-a)*1000.0/hz/dt*100}')
         capcpu=$(awk -v a="${pcap:-}" -v b="${ccap:-}" -v dt="$dt" -v hz="$hz" 'BEGIN{if(a==""||b==""){print "?"}else printf "%.0f",(b-a)*1000.0/hz/dt*100}')
-        log "  LIVE-DIAG ${stream_id:0:8}: gpu(util,vramMiB,clkMHz,tempC)=${g} | cs2cpu=${cs2cpu}% capcpu=${capcpu}% (composite=${comp})"
+        adiag=""
+        [ "$audio" = 1 ] && adiag=" | audio $(audio_lat)"
+        log "  LIVE-DIAG ${stream_id:0:8}: gpu(util,vramMiB,clkMHz,tempC)=${g} | cs2cpu=${cs2cpu}% capcpu=${capcpu}% (composite=${comp})${adiag}"
+        # One-shot raw dump so the parser can be validated against this pactl's
+        # output format straight from the log if the numbers look off.
+        if [ "$audio" = 1 ] && [ -z "${raw_dumped:-}" ]; then
+          raw_dumped=1
+          { pactl list source-outputs; pactl list sink-inputs; } 2>/dev/null \
+            | grep -E 'Source Output #|Sink Input #|Sink:|Source:|Latency|application\.name' \
+            | while IFS= read -r l; do log "    AUDIO-DIAG-RAW $l"; done
+        fi
         pcs2=$ccs2; pcap=$ccap; pms=$now_ms
       done
     ) &

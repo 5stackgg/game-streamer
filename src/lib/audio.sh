@@ -37,13 +37,19 @@ start_pulseaudio() {
   fi
 
   # Null sink for cs2's output. gstreamer reads from its .monitor.
+  # rate=48000 matches cs2 + the capture caps — the daemon default (44.1k)
+  # forces a double resample (cs2 48k->44.1k sink, monitor 44.1k->48k capture).
   # sink_properties with embedded spaces hits a parser bug — leave
   # description default; it's cosmetic.
   if ! pactl list short sinks 2>/dev/null | awk '{print $2}' | grep -qx "$PULSE_SINK_NAME"; then
-    pactl load-module module-null-sink sink_name="$PULSE_SINK_NAME" >/dev/null \
+    pactl load-module module-null-sink sink_name="$PULSE_SINK_NAME" rate=48000 channels=2 >/dev/null \
       || warn "module-null-sink load failed — apps will route to auto_null"
   fi
   pactl set-default-sink "$PULSE_SINK_NAME" 2>/dev/null || true
+
+  # Idle suspend re-bases stream clocks on resume (audible glitches + latency
+  # offsets); a capture box never wants it.
+  pactl unload-module module-suspend-on-idle 2>/dev/null || true
 
   # TCP listener so cs2 can find pulse via PULSE_SERVER even when
   # XDG_RUNTIME_DIR is scrubbed (Steam's -applaunch wrapper does that).

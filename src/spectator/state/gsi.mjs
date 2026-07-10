@@ -44,6 +44,7 @@ export function applyGsiUpdate(body) {
 
   const prevMapPhase = gsiState.mapPhase;
   const prevRoundPhase = gsiState.roundPhase;
+  const prevPhaseEndsIn = gsiState.phaseEndsIn;
   const wasReceiving = gsiState.lastReceivedMs > 0;
 
   gsiState.lastReceivedMs   = Date.now();
@@ -103,7 +104,7 @@ export function applyGsiUpdate(body) {
     gsiState.specSlots = slots;
     playersUpdated = true;
   }
-  return { prevMapPhase, prevRoundPhase, wasReceiving, playersUpdated };
+  return { prevMapPhase, prevRoundPhase, prevPhaseEndsIn, wasReceiving, playersUpdated };
 }
 
 export function aliveCount() {

@@ -1,4 +1,4 @@
-import { demoLoadedInProc, demoState, estimateCurrentTick } from "../state/demo.mjs";
+import { demoLoadedInProc, demoState, estimateCurrentTick, isSeeking } from "../state/demo.mjs";
 import { gsiState } from "../state/gsi.mjs";
 import { playingState } from "../reporters/demo-playing.mjs";
 import { sendJson } from "../util/http.mjs";
@@ -24,6 +24,7 @@ export async function demoStateHandler(_req, res) {
     tick_rate: demoState.tickRate,
     rate: demoState.rate,
     paused: demoState.paused,
+    seeking: isSeeking(),
     last_activity_ms_ago: Date.now() - demoState.lastActivityMs,
     demo_loaded: demoLoaded,
     gsi: gsiFresh

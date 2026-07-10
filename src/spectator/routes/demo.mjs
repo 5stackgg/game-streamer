@@ -1,16 +1,64 @@
+import process from "node:process";
+
 import {
-  KEY_DEMO_SKIP_BACK,
-  KEY_DEMO_SKIP_FWD,
   KEY_DEMO_TOGGLE,
   KEY_XRAY_TOGGLE,
   SPEED_KEY_BY_RATE,
 } from "../constants.mjs";
 import { execCfgCommand } from "../cs2/exec-cfg.mjs";
 import { sendKey } from "../cs2/input.mjs";
-import { bumpActivity, demoState, estimateCurrentTick } from "../state/demo.mjs";
+import {
+  bumpActivity,
+  clearSeek,
+  demoState,
+  estimateCurrentTick,
+  noteSeek,
+} from "../state/demo.mjs";
 import { loadRoundTicks } from "../state/bindings.mjs";
 import { resetPlayingState } from "../reporters/demo-playing.mjs";
 import { sendJson } from "../util/http.mjs";
+
+// Seeks coalesce: cs2 grinds through every gototick it's handed (each
+// one a multi-second stall for backward targets), so a burst of seek
+// clicks must collapse to the newest target instead of queueing. One
+// pending slot + one runner; overwriting the slot drops stale targets.
+let pendingSeek = null;
+let seekRunnerActive = false;
+
+function queueSeek(tick, pauseAfter) {
+  pendingSeek = { tick, pauseAfter };
+  // Pin the estimate at the target immediately so /demo/state (and the
+  // web scrubber reconciling from it) parks there while cs2 catches up.
+  noteSeek(tick);
+  demoState.paused = pauseAfter;
+  bumpActivity();
+  void runSeekQueue();
+}
+
+async function runSeekQueue() {
+  if (seekRunnerActive) {
+    return;
+  }
+  seekRunnerActive = true;
+  try {
+    while (pendingSeek) {
+      const { tick, pauseAfter } = pendingSeek;
+      pendingSeek = null;
+      // Explicit pause arg — cs2's post-gototick play state is not
+      // deterministic across builds; never let it decide.
+      const ok = await execCfgCommand(`demo_gototick ${tick} 0 ${pauseAfter ? 1 : 0}`);
+      if (!ok) {
+        process.stderr.write(`[spec-server] seek to ${tick} failed — cs2 not running?\n`);
+        clearSeek();
+      } else if (pendingSeek === null) {
+        // Restart the settle clock from when cs2 actually received it.
+        noteSeek(tick);
+      }
+    }
+  } finally {
+    seekRunnerActive = false;
+  }
+}
 
 export async function toggleHandler(_req, res) {
   const ok = await sendKey(KEY_DEMO_TOGGLE);
@@ -24,6 +72,9 @@ export async function toggleHandler(_req, res) {
 }
 
 export async function pauseHandler(_req, res) {
+  if (pendingSeek) {
+    pendingSeek.pauseAfter = true;
+  }
   const ok = await execCfgCommand("demo_pause");
   if (ok) {
     demoState.lastTickAtSeek = estimateCurrentTick();
@@ -35,6 +86,9 @@ export async function pauseHandler(_req, res) {
 }
 
 export async function resumeHandler(_req, res) {
+  if (pendingSeek) {
+    pendingSeek.pauseAfter = false;
+  }
   const ok = await execCfgCommand("demo_resume");
   if (ok) {
     demoState.paused = false;
@@ -50,18 +104,12 @@ export async function seekHandler(_req, res, body) {
     sendJson(res, 400, { error: "tick (non-negative int) required" });
     return;
   }
-  let cmd = `demo_gototick ${tick}`;
-  let nextPaused = demoState.paused;
-  if (body.pause_after === true)  { cmd = `demo_gototick ${tick} 0 1`; nextPaused = true;  }
-  if (body.pause_after === false) { cmd = `demo_gototick ${tick} 0 0`; nextPaused = false; }
-  const ok = await execCfgCommand(cmd);
-  if (ok) {
-    demoState.lastTickAtSeek = tick;
-    demoState.lastSeekRealMs = Date.now();
-    demoState.paused = nextPaused;
-    bumpActivity();
-  }
-  sendJson(res, ok ? 200 : 503, ok ? { ok, tick, paused: nextPaused } : { error: "cs2 not running" });
+  const pauseAfter =
+    body.pause_after === true ? true :
+    body.pause_after === false ? false :
+    demoState.paused;
+  queueSeek(tick, pauseAfter);
+  sendJson(res, 200, { ok: true, tick, paused: pauseAfter });
 }
 
 export async function skipHandler(_req, res, body) {
@@ -70,25 +118,11 @@ export async function skipHandler(_req, res, body) {
     sendJson(res, 400, { error: "secs (number) required" });
     return;
   }
-  let ok, via;
-  if (secs === -15 || secs === 15) {
-    const key = secs < 0 ? KEY_DEMO_SKIP_BACK : KEY_DEMO_SKIP_FWD;
-    ok = await sendKey(key);
-    via = `key:${key}`;
-  } else {
-    const target = Math.max(0, estimateCurrentTick() + Math.round(secs * demoState.tickRate));
-    ok = await execCfgCommand(`demo_gototick ${target}`);
-    via = "exec-cfg";
-  }
-  if (ok) {
-    demoState.lastTickAtSeek = Math.max(
-      0,
-      estimateCurrentTick() + Math.round(secs * demoState.tickRate),
-    );
-    demoState.lastSeekRealMs = Date.now();
-    bumpActivity();
-  }
-  sendJson(res, ok ? 200 : 503, ok ? { ok, secs, via } : { error: "cs2 not running" });
+  // Computed pod-side from the (anchored, seek-pinned) estimate — the
+  // client's estimate drifts and must not be the base for relative moves.
+  const target = Math.max(0, estimateCurrentTick() + Math.round(secs * demoState.tickRate));
+  queueSeek(target, demoState.paused);
+  sendJson(res, 200, { ok: true, secs, tick: target });
 }
 
 export async function speedHandler(_req, res, body) {
@@ -117,6 +151,8 @@ export async function speedHandler(_req, res, body) {
 export async function reloadHandler(_req, res) {
   const ok = await execCfgCommand(`playdemo /tmp/game-streamer/demo.dem`);
   if (ok) {
+    pendingSeek = null;
+    clearSeek();
     demoState.lastTickAtSeek = 0;
     demoState.lastSeekRealMs = Date.now();
     demoState.paused = false;
@@ -149,13 +185,8 @@ export async function roundHandler(_req, res, body) {
     sendJson(res, 404, { error: `no tick mapping for round ${round}` });
     return;
   }
-  const ok = await execCfgCommand(`demo_gototick ${entry.start_tick}`);
-  if (ok) {
-    demoState.lastTickAtSeek = entry.start_tick;
-    demoState.lastSeekRealMs = Date.now();
-    bumpActivity();
-  }
-  sendJson(res, ok ? 200 : 503, ok ? { ok, round, tick: entry.start_tick } : { error: "cs2 not running" });
+  queueSeek(entry.start_tick, demoState.paused);
+  sendJson(res, 200, { ok: true, round, tick: entry.start_tick });
 }
 
 export async function execHandler(_req, res, body) {

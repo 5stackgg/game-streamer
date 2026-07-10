@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { AUTODIRECTOR_DEFAULT, HUD_GSI_FORWARD_URL, LOG_DIR, SRC_DIR } from "../env.mjs";
 import { applyGsiUpdate, gsiState } from "../state/gsi.mjs";
-import { bumpActivity } from "../state/demo.mjs";
+import { bumpActivity, reconcileTickFromGsi } from "../state/demo.mjs";
 import { directorState, directorTick, startDirector } from "../director/index.mjs";
 import { reportDemoPlayingOnce } from "../reporters/demo-playing.mjs";
 import { maybeReverseSideOnFreezetime } from "../reporters/sides.mjs";
@@ -54,10 +54,11 @@ function forwardToHud(body) {
 }
 
 export function gsiHandler(_req, res, body) {
-  const { prevMapPhase, prevRoundPhase, wasReceiving, playersUpdated } =
+  const { prevMapPhase, prevRoundPhase, prevPhaseEndsIn, wasReceiving, playersUpdated } =
     applyGsiUpdate(body);
 
   bumpActivity();
+  reconcileTickFromGsi({ prevRoundPhase, prevPhaseEndsIn });
   sendJson(res, 200, { ok: true });
   forwardToHud(body);
   maybeReseedHudOnMapChange(gsiState.mapName);
