@@ -1,0 +1,109 @@
+# shellcheck shell=bash
+# Branded-outro resolution for inline-clip-render.sh. Sourced, not executed.
+# Resolves a single local outro mp4: branded S3 cache (hit), freshly rendered
+# + uploaded (miss), or the baked stock outro (inactive / any failure).
+# Env contract (set by the api): CLIP_OUTRO_URL | CLIP_OUTRO_RENDER(+CLIP_OUTRO_PUT_URL)
+# + CLIP_BRAND_LOGO_URL / CLIP_BRAND_NAME / CLIP_BRAND_ACCENT.
+
+_outro_baked_path() {
+  printf '%s/outro_%s_%s.mp4' "${OUTRO_DIR:-/opt/game-streamer/resources/video}" "$1" "$2"
+}
+# Object basename from a presigned URL (strips the query/signature). The S3 key
+# embeds the branding version (outro_<version>_<dims>_<fps>.mp4), so keying the
+# in-pod cache on it prevents a stale outro after a mid-pod branding change.
+_outro_url_basename() {
+  local u="${1%%\?*}"   # strip query string
+  printf '%s' "${u##*/}"
+}
+
+# --- Mockable wrappers (tests override these) ---------------------------
+# No --show-error: a curl failure must not print the (presigned, signature-bearing)
+# URL to pod logs; resolve_outro_file logs an opaque fallback message instead.
+_outro_download() { curl --fail --silent --max-time 60 -o "$2" "$1"; }
+_outro_upload()   { curl --fail --silent --max-time 120 --upload-file "$1" "$2"; }
+_outro_dims_ok() {
+  local got; got=$(ffprobe -v error -select_streams v -show_entries stream=width,height \
+    -of csv=s=x:p=0 "$1" 2>/dev/null)
+  [ "$got" = "$2" ]
+}
+_outro_render() {
+  local dest="$1" dims="$2" fps="$3" logo="$4" name="$5" accent="$6"
+  local w="${dims%x*}" h="${dims#*x}"
+  local props
+  props=$(LOGO="$logo" NAME="$name" ACCENT="$accent" W="$w" H="$h" F="$fps" node -e \
+    'process.stdout.write(JSON.stringify({width:+process.env.W,height:+process.env.H,fps:+process.env.F,durationS:3,logoUrl:process.env.LOGO||undefined,brandName:process.env.NAME||undefined,accent:process.env.ACCENT||undefined}))')
+  local pin=()
+  if command -v taskset >/dev/null 2>&1 && declare -F compute_cpu_split >/dev/null 2>&1; then
+    compute_cpu_split; [ -n "${GS_CAPTURE_CPUS:-}" ] && pin=(taskset -c "$GS_CAPTURE_CPUS")
+  fi
+  ( cd "${MOTION_DIR:-/opt/game-streamer/motion}" && \
+    ${pin[@]+"${pin[@]}"} nice -n 19 node node_modules/.bin/remotion render src/index.ts Outro "$dest" \
+      --codec=h264 --pixel-format=yuv420p --log=error --props="$props" )
+}
+
+# --- Public API ---------------------------------------------------------
+# 0 if an outro will be appended (cheap; no download/render), else 1.
+outro_will_append() {
+  [ -n "${CLIP_OUTRO_URL:-}" ] && return 0
+  [ "${CLIP_OUTRO_RENDER:-0}" = "1" ] && return 0
+  [ -f "$(_outro_baked_path "$1" "$2")" ] && return 0
+  return 1
+}
+
+# 0 if a baked stock outro for these dims/fps exists on disk, else 1. The fuse
+# decision in inline-clip-render.sh gates on this: a baked fallback guarantees
+# resolve_outro_file yields an existing file (so OUTRO_APPENDED stays 1) even if
+# a branded download/render fails, so a deferred chip is always baked.
+outro_baked_exists() {
+  [ -f "$(_outro_baked_path "$1" "$2")" ]
+}
+
+# Prints the local outro mp4 path to append. Heavy — call once at concat time.
+resolve_outro_file() {
+  local dims="$1" fps="$2"
+  local baked; baked="$(_outro_baked_path "$dims" "$fps")"
+
+  # Inactive (no branding env) → baked stock outro.
+  if [ -z "${CLIP_OUTRO_URL:-}" ] && [ "${CLIP_OUTRO_RENDER:-0}" != "1" ]; then
+    printf '%s' "$baked"; return 0
+  fi
+
+  # Version-keyed in-pod cache filename, derived from the presigned URL's object
+  # basename (embeds the branding version) so a mid-pod branding change is not
+  # masked by a stale dims/fps-only file. Falls back to dims/fps if unparseable.
+  local cache_dir="${CLIP_OUT_DIR:-/tmp/game-streamer/clips}/branded-outro"
+  local fname; fname="$(_outro_url_basename "${CLIP_OUTRO_URL:-${CLIP_OUTRO_PUT_URL:-}}")"
+  # Only a plain outro_<safe>.mp4 name may be used as-is; a basename with any
+  # metacharacter (which could break the ffmpeg concat list) falls back to the
+  # fixed dims/fps name.
+  if [[ "$fname" =~ ^outro_[A-Za-z0-9._-]+\.mp4$ ]]; then
+    :
+  else
+    fname="outro_${dims}_${fps}.mp4"
+  fi
+  local cached="$cache_dir/$fname"
+
+  [ -f "$cached" ] && { printf '%s' "$cached"; return 0; }   # in-pod cache (prior clip, same version)
+
+  if [ -n "${CLIP_OUTRO_URL:-}" ]; then
+    mkdir -p "$cache_dir"
+    if _outro_download "$CLIP_OUTRO_URL" "$cached" && _outro_dims_ok "$cached" "$dims"; then
+      printf '%s' "$cached"; return 0
+    fi
+    say "OUTRO: branded cache download failed/mismatch — using baked stock"
+    rm -f "$cached"; printf '%s' "$baked"; return 0
+  fi
+
+  # CLIP_OUTRO_RENDER=1
+  mkdir -p "$cache_dir"
+  if _outro_render "$cached" "$dims" "$fps" \
+       "${CLIP_BRAND_LOGO_URL:-}" "${CLIP_BRAND_NAME:-}" "${CLIP_BRAND_ACCENT:-}" \
+     && _outro_dims_ok "$cached" "$dims"; then
+    if [ -n "${CLIP_OUTRO_PUT_URL:-}" ]; then
+      _outro_upload "$cached" "$CLIP_OUTRO_PUT_URL" || say "OUTRO: cache upload failed (non-fatal)"
+    fi
+    printf '%s' "$cached"; return 0
+  fi
+  say "OUTRO: branded render failed — using baked stock"
+  rm -f "$cached"; printf '%s' "$baked"; return 0
+}

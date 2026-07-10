@@ -8,6 +8,8 @@ SCRIPT_TAG=inline-clip
 . "$LIB_DIR/clip-capture.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/stream.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/outro.sh"
 
 require_env CLIP_RENDER_JOB_ID CLIP_RENDER_TOKEN STATUS_API_BASE \
             SPEC_SERVER_URL
@@ -702,18 +704,14 @@ CLIP_OUT_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.mp4"
 CLIP_THUMB_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.jpg"
 rm -f "$CLIP_OUT_FILE" "$CLIP_THUMB_FILE"
 
-# Precompute: will an outro be appended at concat time? If yes AND we
-# would have run a per-segment chip-overlay pass, we can fuse both into
-# a single ffmpeg encode at the end — eliminating
-# one full 1080p60 NVENC pass per clip. The polish-skip gate below
-# reads OUTRO_WILL_APPEND; the fused encode reads it at concat time.
+# Will an outro be appended at concat time? Cheap predicate only (no
+# download/render) — the actual file (cache download / branded render /
+# baked stock) is resolved at concat time via resolve_outro_file. The
+# polish-skip gate below reads OUTRO_WILL_APPEND; the fused encode reads it
+# at concat time.
 OUTRO_WILL_APPEND=0
-OUTRO_FUSED_FILE=""
 if [ "$BRANDING_ENABLED" = "1" ] && [ "${CLIP_DISABLE_OUTRO:-0}" != "1" ]; then
-  OUTRO_DIMS_PRE="${CLIP_OUTPUT_DIMS:-1920x1080}"
-  OUTRO_FPS_PRE="${CLIP_OUTPUT_FPS:-60}"
-  OUTRO_FUSED_FILE="${OUTRO_DIR:-/opt/game-streamer/resources/video}/outro_${OUTRO_DIMS_PRE}_${OUTRO_FPS_PRE}.mp4"
-  if [ -f "$OUTRO_FUSED_FILE" ]; then
+  if outro_will_append "${CLIP_OUTPUT_DIMS:-1920x1080}" "${CLIP_OUTPUT_FPS:-60}"; then
     OUTRO_WILL_APPEND=1
   fi
 fi
@@ -726,12 +724,25 @@ fi
 # plus a split-free concat.
 CLIP_MAX_FUSED_SEGMENTS="${CLIP_MAX_FUSED_SEGMENTS:-6}"
 WILL_FUSE_POLISH_OUTRO=0
+# Fuse (defer the chip to a single final encode) only when a baked outro for
+# these dims/fps exists: that guarantees resolve_outro_file yields an existing
+# file at concat (OUTRO_APPENDED=1) even if a branded download/render fails, so
+# the deferred chip is always baked in the fused branch. For dims/fps with no
+# baked fallback (e.g. 30fps), skip fusing — the chip is baked per-segment,
+# which stays correct whether or not the branded outro ends up appended.
 if [ "$OUTRO_WILL_APPEND" = "1" ] \
+   && outro_baked_exists "${CLIP_OUTPUT_DIMS:-1920x1080}" "${CLIP_OUTPUT_FPS:-60}" \
    && [ -n "$CHIP_NAME" ] \
    && [ "$SEG_COUNT" -le "$CLIP_MAX_FUSED_SEGMENTS" ]; then
   WILL_FUSE_POLISH_OUTRO=1
-elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ]; then
+elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ] \
+     && outro_baked_exists "${CLIP_OUTPUT_DIMS:-1920x1080}" "${CLIP_OUTPUT_FPS:-60}"; then
+  # baked fallback exists but segment count exceeds the fuse cap
   say "concat: ${SEG_COUNT} segments exceeds fuse cap ${CLIP_MAX_FUSED_SEGMENTS} — per-segment polish + split-free concat"
+elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ]; then
+  # no baked fallback for these dims/fps (e.g. 30fps): can't guarantee the fused
+  # branch runs, so bake the chip per-segment; branded outro still appended if it renders
+  say "concat: no baked outro for ${CLIP_OUTPUT_DIMS:-1920x1080}@${CLIP_OUTPUT_FPS:-60} — not fusing; chip baked per-segment"
 fi
 
 # Non-fused path bakes the chip per-segment INSIDE the capture loop, so it has to
@@ -1276,16 +1287,14 @@ fi
 # and the Remotion outro pushes the outro ~30s past in stream-copy).
 OUTRO_APPENDED=0
 if [ "$BRANDING_ENABLED" = "1" ] && [ "${CLIP_DISABLE_OUTRO:-0}" != "1" ]; then
-  OUTRO_DIMS="${CLIP_OUTPUT_DIMS:-1920x1080}"
-  OUTRO_FPS="${CLIP_OUTPUT_FPS:-60}"
-  OUTRO_FILE="${OUTRO_DIR:-/opt/game-streamer/resources/video}/outro_${OUTRO_DIMS}_${OUTRO_FPS}.mp4"
+  OUTRO_FILE="$(resolve_outro_file "${CLIP_OUTPUT_DIMS:-1920x1080}" "${CLIP_OUTPUT_FPS:-60}")"
   if [ -f "$OUTRO_FILE" ]; then
     say "OUTRO: appending $OUTRO_FILE"
     printf "file '%s'\n" "$OUTRO_FILE" >>"$SEG_DIR/concat.txt"
     SEG_COUNT=$((SEG_COUNT + 1))
     OUTRO_APPENDED=1
   else
-    say "OUTRO: missing $OUTRO_FILE — shipping without outro"
+    say "OUTRO: no outro available ($OUTRO_FILE) — shipping without outro"
   fi
 fi
 
