@@ -12,26 +12,29 @@ import {
   clearSeek,
   demoState,
   estimateCurrentTick,
+  notePauseCommanded,
   noteSeek,
 } from "../state/demo.mjs";
 import { loadRoundTicks } from "../state/bindings.mjs";
 import { resetPlayingState } from "../reporters/demo-playing.mjs";
+import { pushStateSoon } from "../reporters/state-push.mjs";
 import { sendJson } from "../util/http.mjs";
 
-// Seeks coalesce: cs2 grinds through every gototick it's handed (each
-// one a multi-second stall for backward targets), so a burst of seek
-// clicks must collapse to the newest target instead of queueing. One
-// pending slot + one runner; overwriting the slot drops stale targets.
+// cs2 executes every gototick it's handed (multi-second stalls), so
+// seeks coalesce: one pending slot, newest target wins.
 let pendingSeek = null;
 let seekRunnerActive = false;
 
 function queueSeek(tick, pauseAfter) {
   pendingSeek = { tick, pauseAfter };
-  // Pin the estimate at the target immediately so /demo/state (and the
-  // web scrubber reconciling from it) parks there while cs2 catches up.
+  // Pin now so /demo/state parks at the target during catch-up.
   noteSeek(tick);
   demoState.paused = pauseAfter;
+  if (pauseAfter) {
+    notePauseCommanded();
+  }
   bumpActivity();
+  pushStateSoon();
   void runSeekQueue();
 }
 
@@ -44,8 +47,8 @@ async function runSeekQueue() {
     while (pendingSeek) {
       const { tick, pauseAfter } = pendingSeek;
       pendingSeek = null;
-      // Explicit pause arg — cs2's post-gototick play state is not
-      // deterministic across builds; never let it decide.
+      // cs2's post-gototick play state isn't deterministic across
+      // builds — always pass the explicit pause arg.
       const ok = await execCfgCommand(`demo_gototick ${tick} 0 ${pauseAfter ? 1 : 0}`);
       if (!ok) {
         process.stderr.write(`[spec-server] seek to ${tick} failed — cs2 not running?\n`);
@@ -64,9 +67,13 @@ export async function toggleHandler(_req, res) {
   const ok = await sendKey(KEY_DEMO_TOGGLE);
   if (ok) {
     demoState.paused = !demoState.paused;
-    if (demoState.paused) demoState.lastTickAtSeek = estimateCurrentTick();
+    if (demoState.paused) {
+      demoState.lastTickAtSeek = estimateCurrentTick();
+      notePauseCommanded();
+    }
     demoState.lastSeekRealMs = Date.now();
     bumpActivity();
+    pushStateSoon();
   }
   sendJson(res, ok ? 200 : 503, ok ? { ok, paused: demoState.paused } : { error: "cs2 not running" });
 }
@@ -80,7 +87,9 @@ export async function pauseHandler(_req, res) {
     demoState.lastTickAtSeek = estimateCurrentTick();
     demoState.paused = true;
     demoState.lastSeekRealMs = Date.now();
+    notePauseCommanded();
     bumpActivity();
+    pushStateSoon();
   }
   sendJson(res, ok ? 200 : 503, ok ? { ok, paused: true } : { error: "cs2 not running" });
 }
@@ -94,6 +103,7 @@ export async function resumeHandler(_req, res) {
     demoState.paused = false;
     demoState.lastSeekRealMs = Date.now();
     bumpActivity();
+    pushStateSoon();
   }
   sendJson(res, ok ? 200 : 503, ok ? { ok, paused: false } : { error: "cs2 not running" });
 }
@@ -118,8 +128,7 @@ export async function skipHandler(_req, res, body) {
     sendJson(res, 400, { error: "secs (number) required" });
     return;
   }
-  // Computed pod-side from the (anchored, seek-pinned) estimate — the
-  // client's estimate drifts and must not be the base for relative moves.
+  // Relative moves must use the pod estimate — the client's drifts.
   const target = Math.max(0, estimateCurrentTick() + Math.round(secs * demoState.tickRate));
   queueSeek(target, demoState.paused);
   sendJson(res, 200, { ok: true, secs, tick: target });
@@ -142,6 +151,7 @@ export async function speedHandler(_req, res, body) {
   if (ok) {
     demoState.rate = clamped;
     bumpActivity();
+    pushStateSoon();
   }
   sendJson(res, ok ? 200 : 503,
     ok ? { ok, rate: clamped, via: presetKey ? "key" : "console" } : { error: "cs2 not running" },
@@ -158,6 +168,7 @@ export async function reloadHandler(_req, res) {
     demoState.paused = false;
     resetPlayingState();
     bumpActivity();
+    pushStateSoon();
   }
   sendJson(res, ok ? 200 : 503, ok ? { ok } : { error: "cs2 not running" });
 }

@@ -20,7 +20,10 @@ export async function reportDemoPlayingOnce() {
   if (playingState.reported) return;
   playingState.reported = true;
 
-  void execCfgCommand("demo_pause").catch(() => undefined);
+  // No boot pause — the demo autoplays from tick 0. Real-time playback
+  // from 0 keeps the estimate honest (freezetime anchors absorb drift),
+  // and a demo_pause here raced cs2's not-yet-interactable window anyway.
+  //
   // GSI lands AFTER the demoui panel renders; defer so the toggle
   // actually flips visible → hidden instead of no-op'ing pre-paint.
   // 500ms was tested and the demoui panel was still showing up in
@@ -32,7 +35,7 @@ export async function reportDemoPlayingOnce() {
       .finally(() => { playingState.demouiHidden = true; });
   }, 3000);
 
-  demoState.paused         = true;
+  demoState.paused         = false;
   demoState.lastTickAtSeek = 0;
   demoState.lastSeekRealMs = Date.now();
 

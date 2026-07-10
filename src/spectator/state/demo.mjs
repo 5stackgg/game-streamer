@@ -6,12 +6,8 @@ import { findCs2Window } from "../cs2/window.mjs";
 import { gsiState } from "./gsi.mjs";
 import { loadRoundTicks } from "./bindings.mjs";
 
-// A demo_gototick is not instant: cs2 stalls ~2s on a forward seek and
-// replays from tick 0 on a backward one (the [[seek stall]] the clip
-// renderer works around). While a seek is settling we freeze the
-// estimate at the target instead of dead-reckoning past it — the
-// scrubber parks where the user asked and `seeking` tells the UI why
-// the video is frozen.
+// demo_gototick is not instant: ~2s stall forward, replay from tick 0
+// backward. While settling, the estimate pins at the target.
 const SEEK_SETTLE_CEILING_MS = 20_000;
 // GSI events already in flight when the seek was issued still describe
 // the pre-seek world; ignore them for this long.
@@ -29,7 +25,14 @@ export const demoState = {
   seekTargetTick: null,
   seekIssuedMs: 0,
   worldMotionAtSeek: 0,
+  // GSI frames in flight still show advancing time briefly after a real
+  // pause lands; the pause-truth check ignores that window.
+  lastPauseCmdMs: 0,
 };
+
+export function notePauseCommanded() {
+  demoState.lastPauseCmdMs = Date.now();
+}
 
 export function bumpActivity() {
   demoState.lastActivityMs = Date.now();
@@ -62,8 +65,7 @@ export function isSeeking() {
     return false;
   }
   if (Date.now() - demoState.seekIssuedMs > SEEK_SETTLE_CEILING_MS) {
-    // Never heard back from GSI (demo paused pre-landing, GSI hiccup).
-    // Un-pin so the estimator resumes rather than freezing forever.
+    // No GSI confirmation (e.g. paused mid-settle) — un-pin.
     demoState.lastTickAtSeek = demoState.seekTargetTick;
     demoState.lastSeekRealMs = Date.now();
     demoState.seekTargetTick = null;
@@ -95,15 +97,9 @@ function roundContainingTick(roundTicks, tick) {
   return null;
 }
 
-// Called on every GSI event. Two jobs:
-//  1. While a seek is settling: detect that cs2 actually landed
-//     (demo time advancing again, and — when we can tell — in the
-//     round the target sits in, so a backward seek's replay-from-zero
-//     sweep doesn't count as landed) and un-pin the estimate.
-//  2. Otherwise: re-anchor the estimate to ground truth whenever the
-//     demo enters freezetime. GSI map.round is the count of COMPLETED
-//     rounds, so freezetime of parser round N reports map.round = N-1;
-//     round_ticks rounds are 1-based.
+// Seek-settle detection + freezetime anchoring. GSI map.round counts
+// COMPLETED rounds: freezetime of parser round N reports map.round =
+// N-1; round_ticks rounds are 1-based.
 export function reconcileTickFromGsi(prev) {
   const now = Date.now();
 
@@ -129,6 +125,34 @@ export function reconcileTickFromGsi(prev) {
     demoState.lastSeekRealMs = now;
     demoState.seekTargetTick = null;
     return;
+  }
+
+  // cs2 can lose a demo_pause (exec-cfg keypress on a not-yet-
+  // interactable cs2); if demo time advances while we believe paused,
+  // adopt reality.
+  const timeAdvanced =
+    prev.prevPhaseEndsIn !== null &&
+    gsiState.phaseEndsIn !== null &&
+    prev.prevPhaseEndsIn !== gsiState.phaseEndsIn;
+  if (
+    timeAdvanced &&
+    demoState.paused &&
+    now - demoState.lastPauseCmdMs > 2_500
+  ) {
+    demoState.paused = false;
+    demoState.lastSeekRealMs = now;
+    // Mid-round the round's start tick is the best available re-ground.
+    if (gsiState.mapPhase !== "warmup" && gsiState.roundNumber !== null) {
+      const entry = loadRoundTicks().find(
+        (r) => r.round === gsiState.roundNumber + 1,
+      );
+      if (entry && entry.start_tick > demoState.lastTickAtSeek) {
+        demoState.lastTickAtSeek = entry.start_tick;
+      }
+    }
+    process.stderr.write(
+      "[spec-server] pause desync: demo time advancing while paused=true — adopting playing\n",
+    );
   }
 
   const enteredFreezetime =

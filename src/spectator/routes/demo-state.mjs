@@ -3,12 +3,10 @@ import { gsiState } from "../state/gsi.mjs";
 import { playingState } from "../reporters/demo-playing.mjs";
 import { sendJson } from "../util/http.mjs";
 
-export async function demoStateHandler(_req, res) {
+export function buildDemoState({ demoLoaded }) {
   const gsiFresh =
     gsiState.lastReceivedMs > 0 &&
     Date.now() - gsiState.lastReceivedMs < 30_000;
-  const demoLoaded =
-    gsiFresh && gsiState.mapPhase != null ? true : await demoLoadedInProc();
   // Sum of every player's position — a real "is the demo advancing"
   // signal. The `tick` above is a wall-clock estimate that advances the
   // moment we mark playback resumed, so it can't detect a frozen cs2;
@@ -18,7 +16,7 @@ export async function demoStateHandler(_req, res) {
     if (p.position) worldMotion += p.position[0] + p.position[1] + p.position[2];
   }
   worldMotion = Math.round(worldMotion);
-  sendJson(res, 200, {
+  return {
     tick: estimateCurrentTick(),
     total_ticks: demoState.totalTicks,
     tick_rate: demoState.tickRate,
@@ -45,5 +43,14 @@ export async function demoStateHandler(_req, res) {
           demoui_hidden: playingState.demouiHidden,
         }
       : null,
-  });
+  };
+}
+
+export async function demoStateHandler(_req, res) {
+  const gsiFresh =
+    gsiState.lastReceivedMs > 0 &&
+    Date.now() - gsiState.lastReceivedMs < 30_000;
+  const demoLoaded =
+    gsiFresh && gsiState.mapPhase != null ? true : await demoLoadedInProc();
+  sendJson(res, 200, buildDemoState({ demoLoaded }));
 }
