@@ -279,6 +279,18 @@ spec_pov_state() {
     "${SPEC_SERVER_URL}/demo/pov-state?pov=${1:-}" || true
 }
 
+# "round_phase|phase_ends_in|world_motion|gsi_age_ms|map_phase|round_number|pov_round_kills".
+# A failed fetch yields an empty line -> all fields empty, which every caller
+# reads as "no GSI this poll".
+capture_fields_line() {
+  if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
+    curl --fail --silent --max-time 5 \
+      "${SPEC_SERVER_URL}/demo/capture-fields?pov=${1:-}" || true
+  else
+    spec_get_state | node "$CLIP_HELPERS" capture-fields "${1:-}" || true
+  fi
+}
+
 log_state() {
   local label="$1"
   local s tick paused motion slots spectated
@@ -398,30 +410,43 @@ verify_spec_lock() {
   return 1
 }
 
-# Confirm cs2 actually resumed playback by watching for tick advance.
-# The wallclock loop counts real time from the moment we think play
-# started — if the resume cfg never landed (focus race, demoui repaint,
-# cs2 mid-seek), the gst capture writes the frozen frame for the entire
-# segment duration. Caller is expected to retry resume on failure.
-verify_play_resumed() {
-  local baseline_tick="$1"
-  # ~2s deadline matches the old 6-iter loop's effective span (node
-  # spawn per poll).
-  local s tick line start=$SECONDS
-  while [ $((SECONDS - start)) -lt 2 ]; do
+# Confirm from GSI that the demo is REALLY advancing before the wallclock loop
+# starts billing. /demo/state's tick cannot answer this: estimateCurrentTick()
+# extrapolates from real time once paused=false, so it climbs even while cs2 is
+# wedged — a resume that never landed still reports a rising tick. The two honest
+# signals are GSI's phase clock (phase_ends_in counts down with DEMO time) and
+# world_motion (sum of player positions); either one changing means frames are
+# moving. Both come from the same capture-fields read STEP 7 already polls.
+# Re-presses play at the halfway mark for the cases the original toggle missed
+# (focus race, demoui repaint, cs2 still finishing the seek).
+# Returns 0 once motion is confirmed, 1 if it never was (caller records anyway).
+confirm_playback_started() {
+  local timeout_ms="${1:-3000}"
+  local phase_ends motion age
+  local base_ends="" base_motion="" waited=0 repressed=0
+  while [ "$waited" -lt "$timeout_ms" ]; do
+    IFS='|' read -r _ phase_ends motion age _ _ _ <<<"$(capture_fields_line "${SEG_POV_STEAMID:-}")"
+    if [ -n "$age" ] && [ "$age" -le 750 ] 2>/dev/null; then
+      if [ -z "$base_ends" ] && [ -z "$base_motion" ]; then
+        base_ends="$phase_ends"
+        base_motion="$motion"
+      elif [ "$phase_ends" != "$base_ends" ] || [ "$motion" != "$base_motion" ]; then
+        say "STEP 5: playback confirmed after ${waited}ms (clock=${phase_ends:-?} motion=${motion:-?})"
+        return 0
+      fi
+    fi
+    if [ "$repressed" = "0" ] && [ "$waited" -ge $((timeout_ms / 2)) ]; then
+      repressed=1
+      say "WARN STEP 5: no demo motion after ${waited}ms — re-pressing play"
+      spec_post /demo/pause '{"force": true}'
+      sleep 0.15
+      spec_post /demo/toggle '{}'
+      waited=$((waited + 150))
+    fi
     sleep 0.1
-    if [ "$POV_STATE_FAST" = "1" ]; then
-      line=$(spec_pov_state)
-      tick="${line##*|}"
-    else
-      s=$(spec_get_state || true)
-      [ -z "$s" ] && continue
-      tick=$(printf '%s' "$s" | node "$CLIP_HELPERS" state-tick)
-    fi
-    if [ -n "$tick" ] && [ "$tick" != "?" ] && [ "$tick" -gt "$baseline_tick" ] 2>/dev/null; then
-      return 0
-    fi
+    waited=$((waited + 100))
   done
+  say "WARN STEP 5: demo never showed motion within ${timeout_ms}ms — billing anyway (freeze guard takes over)"
   return 1
 }
 
@@ -928,6 +953,15 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
+  # Block until the capture is confirmed writing frames. Spawning the process is
+  # NOT the same as recording: on the vkcapture path cs2's obs-vkcapture layer
+  # retries connect() on a 1s cadence and the swapchain handshake follows it, so
+  # the first buffer can be ~0.5-2s out. Pressing play before then played the
+  # entire pre-kill lead into a pipeline that recorded none of it — the clip then
+  # opened right on the kill (worse on slower GPUs, where startup is longer).
+  # Waiting here costs nothing in the output: no frames exist yet, so this adds no
+  # frozen head padding — the mp4 starts at the first recorded frame either way.
+  wait_clip_capture_ready || true
   start_capture_diag "${CLIP_CAPTURE_PID:-}"
 
   # Force-pause then toggle → deterministic PLAYING (a bare relative toggle
@@ -945,6 +979,14 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     [ -n "$POV_SLOT_AFTER_PLAY" ] && spec_post /spec/slot "{\"slot\": ${POV_SLOT_AFTER_PLAY}}"
   fi
   log_spec_slots "after-play"
+
+  # Gate the budget on GSI actually showing demo motion. Everything up to here
+  # only proves we SENT a play command — cs2 can still be finishing the backward
+  # seek, and billing wall-clock against a demo that hasn't moved spends the
+  # pre-kill lead on frozen frames. STEP 7's freeze guard also catches this, but
+  # its withholding is capped at CLIP_UNBILLED_CAP_MS for the WHOLE segment;
+  # gating here keeps that budget in reserve for a genuine mid-clip stall.
+  confirm_playback_started "${CLIP_PLAY_CONFIRM_TIMEOUT_MS:-3000}" || true
 
   # STEP 7: record SEG_DURATION of playback, billed by WALL-CLOCK. rate is
   # forced to 1, so wall-time == demo-time once playing (we opened the capture
@@ -998,15 +1040,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     DELTA_MS=$((NOW_MS - PREV_MS))
     PREV_MS=$NOW_MS
 
-    # Pipe-delimited capture fields. Fast path: one in-process GET on the
-    # spec-server. Fallback (stale server): the old curl+node pipeline.
-    # A failed fetch yields an empty line -> all fields empty, same as before.
-    if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
-      FS_LINE=$(curl --fail --silent --max-time 5 \
-        "${SPEC_SERVER_URL}/demo/capture-fields?pov=${SEG_POV_STEAMID:-}" || true)
-    else
-      FS_LINE=$(spec_get_state | node "$CLIP_HELPERS" capture-fields "${SEG_POV_STEAMID:-}" || true)
-    fi
+    FS_LINE=$(capture_fields_line "${SEG_POV_STEAMID:-}")
     IFS='|' read -r PHASE PHASE_ENDS MOTION GSIAGE MPHASE ROUND_NUM POV_KILLS <<<"$FS_LINE"
     GSI_FRESH=0; { [ -n "$GSIAGE" ] && [ "$GSIAGE" -le 750 ]; } && GSI_FRESH=1
 

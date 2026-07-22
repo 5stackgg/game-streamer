@@ -122,6 +122,13 @@ struct state {
     GstPad     *hud_pad;
     char       *hud_ctl_path;
     int         hud_visible;      // last applied (1 visible / 0 hidden)
+
+    // VKCAP_READY_FILE: touched the instant the FIRST buffer reaches the pipeline.
+    // The caller starts the demo playing only once this exists — the layer retries
+    // connect() on a 1s cadence, so a fresh consumer can be several hundred ms from
+    // recording anything, and anything played before then is simply not in the mp4.
+    char       *ready_path;
+    bool        ready_signalled;
 };
 
 static struct state st = { .listen_fd = -1, .client_fd = -1, .present_efd = -1 };
@@ -414,6 +421,18 @@ static bool push_one_frame(void)
         log_msg("appsrc push returned %d — stopping", fr);
         g_main_loop_quit(st.loop);
         return false;
+    }
+    if (!st.ready_signalled) {
+        st.ready_signalled = true;
+        if (st.ready_path) {
+            FILE *f = fopen(st.ready_path, "w");
+            if (f) {
+                fclose(f);
+            } else {
+                log_msg("WARN: could not write ready file %s: %s", st.ready_path, strerror(errno));
+            }
+        }
+        log_msg("first frame pushed — recording");
     }
     return true;
 }
@@ -728,6 +747,7 @@ int main(int argc, char **argv)
     // Black-frame hold defaults ON (host-map/composite path only — needs pixel
     // access; the zero-copy clip path doesn't read pixels). VKCAP_BLACK_HOLD=0 off.
     { const char *z = getenv("VKCAP_BLACK_HOLD"); st.hold_black = !z || atoi(z) != 0; }
+    { const char *p = getenv("VKCAP_READY_FILE"); st.ready_path = (p && *p) ? (char *)p : NULL; }
     for (int i = 0; i < 4; i++) st.fds[i] = -1;
 
     if (!st.test_mode) {
