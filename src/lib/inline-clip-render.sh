@@ -328,6 +328,47 @@ wait_seek_settled() {
   return 1
 }
 
+# "phase_ends|world_motion" — the GSI fields that advance only while the demo is
+# actually rolling. Returns 1 (empty) when GSI is stale, so callers can tell
+# "no signal" apart from "not moving yet".
+playback_sig() {
+  local line _p _pe _mo _age _mp _rn _pk
+  if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
+    line=$(curl --fail --silent --max-time 5 \
+      "${SPEC_SERVER_URL}/demo/capture-fields?pov=${1:-}" || true)
+  else
+    line=$(spec_get_state | node "$CLIP_HELPERS" capture-fields "${1:-}" || true)
+  fi
+  IFS='|' read -r _p _pe _mo _age _mp _rn _pk <<<"$line"
+  { [ -n "$_age" ] && [ "$_age" -le 750 ]; } 2>/dev/null || return 1
+  printf '%s|%s' "$_pe" "$_mo"
+}
+
+# Block until the demo is demonstrably MOVING after the unpause. cs2 holds the
+# paused frame for a while after a big backward seek, and the capture is already
+# armed by then — those held frames are what made clips open on a second of
+# statues. Unlike the arrival check this runs with playback requested, so the
+# signal is unambiguous: either field changing means frames are worth recording.
+# Returns 0 on confirmed motion, 1 on timeout (caller opens the gate anyway).
+wait_playback_moving() {
+  local baseline="$1"
+  # Generous by design: while the demo is still frozen no demo time is passing, so
+  # holding the gate costs nothing, and the post-seek stall this covers runs ~2s.
+  local timeout_ms="${CLIP_PLAY_CONFIRM_TIMEOUT_MS:-2500}"
+  local waited=0 sig
+  while [ "$waited" -lt "$timeout_ms" ]; do
+    sig=$(playback_sig "${SEG_POV_STEAMID:-}") || sig=""
+    if [ -n "$sig" ] && [ "$sig" != "$baseline" ]; then
+      say "STEP 5: playback moving after ${waited}ms"
+      return 0
+    fi
+    sleep 0.05
+    waited=$((waited + 50))
+  done
+  say "WARN playback not confirmed moving within ${timeout_ms}ms — recording anyway"
+  return 1
+}
+
 log_state() {
   local label="$1"
   local s tick paused motion slots spectated
@@ -957,11 +998,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # Recording therefore opens exactly at the pre-roll — previously we played
   # first and only started capturing after wait-advancing + POV re-press + the
   # ~0.3s gst spawn, during which the demo drifted ~1-2s past SEG_START and ate
-  # most of the 3s lead (the kill landed almost immediately). The only frames
-  # recorded before playback are the brief held SEG_START frame (gst spawn + the
-  # documented post-seek stall); they sit at the very top of the lead-in and
-  # STEP 7's phase-clock freeze-withholding keeps them from being billed, so the
-  # full pre-roll still plays before the kill.
+  # most of the 3s lead (the kill landed almost immediately). The capture arms
+  # here but records nothing yet — it holds every frame until STEP 5 confirms the
+  # demo is moving and opens its gate, so the SEG_START frame cs2 holds while it
+  # digests a big backward unpause never reaches the mp4 (clips opened on a second
+  # of statues). The ximagesrc fallback has no gate and still records it.
   say "STEP 6: start capture (paused at $SEG_START) -> $SEG_FILE"
   if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
@@ -979,7 +1020,19 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   say "STEP 5: PRESS PLAY (force-pause then toggle)"
   spec_post /demo/pause '{"force": true}'
   sleep 0.15
+  PLAY_SIG_BEFORE=$(playback_sig "${SEG_POV_STEAMID:-}") || PLAY_SIG_BEFORE=""
   spec_post /demo/toggle '{}'
+
+  # The capture is armed but holding: open its gate only once the demo is really
+  # rolling, so the clip opens on motion instead of on the frame cs2 holds while it
+  # digests the unpause. Skipped when GSI is stale — with no signal to wait for,
+  # blocking would just hold the gate through the whole timeout.
+  if [ -n "$PLAY_SIG_BEFORE" ]; then
+    wait_playback_moving "$PLAY_SIG_BEFORE" || true
+  else
+    say "STEP 5: GSI stale — opening the capture gate without a motion check"
+  fi
+  clip_capture_go
 
   # Re-press POV after play; the re-seek reset it and the pre-play re-press
   # no-ops while paused. observer_slot may also have shifted.
