@@ -18,6 +18,7 @@
 # produce empty segments instead of degrading cleanly.
 start_clip_capture() {
   local method="${CLIP_CAPTURE_METHOD:-vkcapture}"
+  CLIP_CAPTURE_READY_FILE=""
   if [ "$method" = "vkcapture" ]; then
     if ! command -v vkcapture-consumer >/dev/null 2>&1; then
       warn "CLIP_CAPTURE_METHOD=vkcapture but vkcapture-consumer not installed — using ximagesrc"
@@ -77,6 +78,12 @@ _start_clip_capture_vkcapture() {
 
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
+
+  # The consumer touches this the instant its first buffer reaches the pipeline.
+  # wait_clip_capture_ready blocks on it before the caller starts playback.
+  CLIP_CAPTURE_READY_FILE="${out_file}.ready"
+  rm -f "$CLIP_CAPTURE_READY_FILE"
+  export VKCAP_READY_FILE="$CLIP_CAPTURE_READY_FILE"
 
   _clip_resolve_encoder "$gop" "$kbps"
   local codec="$CLIP_CODEC" enc="$CLIP_ENC" parse_caps="$CLIP_PARSE_CAPS"
@@ -179,6 +186,11 @@ _start_clip_capture_gst() {
   local kbps="${3:-16000}"
   local audio="${4:-1}"
 
+  # ximagesrc grabs as soon as the pipeline hits PLAYING, so this path has no
+  # first-frame marker to wait on (also clears a marker left by a failed
+  # vkcapture attempt that fell through to here).
+  CLIP_CAPTURE_READY_FILE=""
+
   local pulse_source="${PULSE_SINK_NAME:-cs2}.monitor"
   local gop=$((fps * 2))
   local gst_tag="gst-clip"
@@ -246,12 +258,44 @@ _start_clip_capture_gst() {
   return 0
 }
 
+# Block until the capture is actually writing frames, so the caller never starts
+# playback into a pipeline that isn't recording yet. On the vkcapture path the
+# obs-vkcapture layer inside cs2 retries connect() on a 1s cadence and the
+# swapchain handshake follows, so a freshly spawned consumer can be ~0.5-2s from
+# its first buffer — every one of those seconds used to be demo time that played
+# with nothing being recorded, which is what ate the pre-kill lead.
+# Returns 0 when frames are confirmed flowing, 1 on timeout (caller proceeds
+# anyway — a late clip beats no clip).
+wait_clip_capture_ready() {
+  local timeout_ms="${CLIP_CAPTURE_READY_TIMEOUT_MS:-8000}"
+  local marker="${CLIP_CAPTURE_READY_FILE:-}"
+  if [ -z "$marker" ]; then
+    return 0
+  fi
+  local waited=0
+  while [ "$waited" -lt "$timeout_ms" ]; do
+    if [ -f "$marker" ]; then
+      log "  clip capture recording after ${waited}ms"
+      return 0
+    fi
+    if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
+      warn "clip capture died before its first frame"
+      return 1
+    fi
+    sleep 0.05
+    waited=$((waited + 50))
+  done
+  warn "clip capture never reported a first frame within ${timeout_ms}ms — starting playback anyway"
+  return 1
+}
+
 # SIGINT + gst -e = clean EOS so qtmux finalises moov. SIGTERM truncates.
 stop_clip_capture() {
   local pid="${CLIP_CAPTURE_PID:-}"
   if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
     return 0
   fi
+  [ -n "${CLIP_CAPTURE_READY_FILE:-}" ] && rm -f "$CLIP_CAPTURE_READY_FILE"
   kill -INT "$pid" 2>/dev/null || true
   # 0.1s polls: gst usually flushes EOS in <100ms, and every extra poll
   # period is dead time between segments. Same 15s cap as before.
