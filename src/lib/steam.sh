@@ -1402,6 +1402,42 @@ kill_steam() {
   rm -rf /tmp/dumps* /tmp/source_engine_*.lock /tmp/steam_pipe_* 2>/dev/null || true
 }
 
+# Summed RSS (kB) of every steamwebhelper process, 0 when none are up.
+steam_webhelper_rss_kb() {
+  local total=0 pid rss
+  for pid in $(pgrep -f steamwebhelper 2>/dev/null); do
+    rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null)
+    case "$rss" in ''|*[!0-9]*) continue ;; esac
+    total=$(( total + rss ))
+  done
+  printf '%s\n' "$total"
+}
+
+# steamwebhelper is Steam's CEF UI: ~1GB RSS across 8 processes, and every
+# dialog we drive through it (cloud-out-of-date, shader skip, Play) is done by
+# the time cs2 is up. Reap it once here; if Steam respawns it we leave it be
+# rather than fight a kill loop. Call AFTER wait_for_cs2_process. GS_REAP_WEBHELPER=0 opts out.
+trim_steam_webhelper() {
+  case "${GS_REAP_WEBHELPER:-1}" in 0|off|false|no) return 0 ;; esac
+  pgrep -f '/linuxsteamrt64/cs2' >/dev/null 2>&1 || {
+    log "trim_steam_webhelper: cs2 not running — skipping"
+    return 0
+  }
+  local before after
+  before=$(steam_webhelper_rss_kb)
+  [ "$before" -gt 0 ] || return 0
+  pkill -f steamwebhelper 2>/dev/null || true
+  sleep 2
+  pkill -9 -f steamwebhelper 2>/dev/null || true
+  sleep 2
+  after=$(steam_webhelper_rss_kb)
+  if [ "$after" -gt 0 ]; then
+    log "trim_steam_webhelper: respawned ($(( after / 1024 ))MB) — leaving it alone"
+  else
+    log "trim_steam_webhelper: freed $(( before / 1024 ))MB"
+  fi
+}
+
 # Launch Steam with login prefilled. UI visible so we can watch via the
 # debug stream and complete any 2FA/captcha. Steam's stdout/stderr are
 # tagged [steam] and stream to the k8s pod log via spawn_logged.
