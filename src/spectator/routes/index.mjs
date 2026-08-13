@@ -40,10 +40,12 @@ import { renderClipHandler } from "./render-clip.mjs";
 import { switchMatchHandler } from "./switch-match.mjs";
 import { reconnectHandler } from "./reconnect.mjs";
 import { skipShadersHandler } from "./skip-shaders.mjs";
+import { cameraStateHandler, cameraWhepHandler } from "./camera.mjs";
 
 const HEALTH_GET_URLS = new Set(["/", "/health", "/spec/health"]);
 
 const ROUTES = new Map([
+  ["GET /camera/state", cameraStateHandler],
   ["GET /demo/state", demoStateHandler],
   ["GET /demo/capture-fields", captureFieldsHandler],
   ["GET /demo/pov-state", povStateHandler],
@@ -95,6 +97,15 @@ export async function dispatch(req, res) {
     // Route on the path only — /demo/capture-fields carries a query string.
     const qIdx = url.indexOf("?");
     const path = qIdx >= 0 ? url.slice(0, qIdx) : url;
+
+    // Handled ahead of the table: the steam id is a path segment, and the body
+    // is application/sdp rather than the JSON every other route expects.
+    if (method === "POST" && /^\/camera\/\d{17}\/whep$/.test(path)) {
+      await cameraWhepHandler(req, res);
+      logResponse(method, path, res);
+      return;
+    }
+
     const handler = ROUTES.get(`${method} ${path}`);
     if (!handler) {
       sendJson(res, 404, { error: "not found" });
@@ -126,6 +137,8 @@ export async function dispatch(req, res) {
 const QUIET_URLS = new Set([
   "/gsi", "/demo/state", "/demo/capture-fields", "/demo/pov-state",
   "/demo/seek-state",
+  // Polled by the HUD overlay to follow the spectated player.
+  "/camera/state",
 ]);
 
 function logResponse(method, url, res) {
