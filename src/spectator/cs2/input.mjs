@@ -5,16 +5,20 @@ import { findCs2Window } from "./window.mjs";
 
 // XTest keystrokes land on whatever currently holds X input focus -- xdotool's
 // `--window` (XSendEvent) is filtered by cs2 and dropped, so targeting is not
-// an option. That makes the whole spectator input path silently no-op if
-// anything takes focus away from cs2, which is easy on this display: there is
-// no window manager, only a compositor, so destroying the focused window (a
-// steam dialog, the webhelper being reaped) leaves focus unset rather than
-// reassigning it, and every key after that goes nowhere.
+// an option. The whole spectator input path therefore silently no-ops the
+// moment focus leaves cs2, while anything driven over HTTP (the hud) keeps
+// working -- which is exactly how this presents.
 //
-// So re-point focus at cs2 before sending. windowfocus is XSetInputFocus and
-// does NOT restack -- unlike windowactivate, which would raise cs2 above the
-// HUD overlay and break compositing.
+// Observed on a live pod: focus had moved to Steam's Friends List and cs2's
+// window was IsUnMapped, so it could not be focused back at all. Recovery is
+// map-then-focus, and windowfocus is XSetInputFocus so it does NOT restack --
+// unlike windowactivate, which would raise cs2 above the HUD overlay.
 let lastFocusWarning = "";
+
+async function isMapped(win) {
+  const info = await run(["xwininfo", "-id", win]);
+  return /Map State:\s*IsViewable/.test(info.stdout);
+}
 
 async function focusCs2(win) {
   const current = await run(["xdotool", "getwindowfocus"]);
@@ -30,8 +34,18 @@ async function focusCs2(win) {
   if (lastFocusWarning !== focused) {
     lastFocusWarning = focused;
     process.stderr.write(
-      `[spec-input] focus was ${focused || "unset"}, expected cs2 ${win} — re-pointing\n`,
+      `[spec-input] focus was ${focused || "unset"}, expected cs2 ${win} — recovering\n`,
     );
+  }
+
+  // cs2 runs -noborder at exactly screen size, so it behaves as borderless
+  // fullscreen and withdraws its own window when it loses focus. Nothing maps
+  // it back -- there is no window manager -- and XSetInputFocus on an unmapped
+  // window is a BadMatch, so focus can never return on its own and every key
+  // after that goes to whatever stole it. Map it first, then focus.
+  if (!(await isMapped(win))) {
+    process.stderr.write(`[spec-input] cs2 window ${win} unmapped — remapping\n`);
+    await run(["xdotool", "windowmap", "--sync", win]);
   }
 
   await run(["xdotool", "windowfocus", "--sync", win]);
@@ -50,6 +64,7 @@ export async function focusState() {
 
   return {
     cs2_window: win,
+    cs2_mapped: win === null ? null : await isMapped(win),
     focused_window: focused,
     focused_name: focusedName,
     cs2_has_focus: win !== null && focused === win,
