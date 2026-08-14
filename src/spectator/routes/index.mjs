@@ -20,6 +20,7 @@ import {
   jumpHandler,
   playerHandler,
   slotHandler,
+  specFocusHandler,
   specScoreboardHandler,
   specXrayHandler,
 } from "./spec.mjs";
@@ -45,6 +46,7 @@ import { cameraStateHandler, cameraWhepHandler } from "./camera.mjs";
 const HEALTH_GET_URLS = new Set(["/", "/health", "/spec/health"]);
 
 const ROUTES = new Map([
+  ["GET /spec/focus", specFocusHandler],
   ["GET /camera/state", cameraStateHandler],
   ["GET /demo/state", demoStateHandler],
   ["GET /demo/capture-fields", captureFieldsHandler],
