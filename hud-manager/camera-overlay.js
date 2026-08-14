@@ -8,23 +8,62 @@
 // GSI, so the camera always follows what viewers are actually watching. The
 // SDP exchange is proxied by that same server because it holds the pod's match
 // credentials and this page must not.
+//
+// The feed takes over the spectated player's avatar rather than floating in a
+// corner. JTs Hud's own camera pipeline is not reusable here -- it renders from
+// simple-peer connections held in the hud-manager process, keyed off players who
+// joined through its camera hub -- so we mount into the slot its markup already
+// provides and hide the avatar image behind it.
 (() => {
+  // Injection is wired to did-finish-load, which fires again on any in-page
+  // reload -- without this a second poll loop, observer and peer connection
+  // stack on top of the first.
+  if (window.__FIVESTACK_CAMERA_DISPOSE__) {
+    window.__FIVESTACK_CAMERA_DISPOSE__();
+  }
+
   const SPEC_BASE = window.__FIVESTACK_SPEC_BASE__ || "http://127.0.0.1:1350";
   const POLL_MS = 2000;
   // A player with no camera fails every attempt; back off rather than
   // renegotiating a doomed peer connection every couple of seconds.
   const RETRY_BACKOFF_MS = 15000;
+  // The 140x140 box the HUD floats above the spectated player's bar. Present in
+  // both hud variants -- `.observed` is not scoped to `.layout-*`.
+  const AVATAR_SELECTOR = ".observed .avatar_container .avatar";
 
   const video = document.createElement("video");
   video.autoplay = true;
   video.muted = true;
   video.playsInline = true;
   video.id = "fivestack-camera";
-  Object.assign(video.style, {
+
+  const AVATAR_STYLE = {
+    position: "absolute",
+    inset: "0",
+    width: "100%",
+    height: "100%",
+    right: "auto",
+    bottom: "auto",
+    borderRadius: "4px",
+    border: "none",
+    boxShadow: "0 4px 15px rgba(0,0,0,0.5)",
+    background: "#000",
+    zIndex: "9",
+    opacity: "0",
+    transition: "opacity 220ms ease",
+    pointerEvents: "none",
+    objectFit: "cover",
+  };
+
+  // Only reached on a hud whose markup has no observed-player avatar. Keeping a
+  // corner box means the feature degrades rather than silently disappearing.
+  const CORNER_STYLE = {
     position: "fixed",
+    inset: "auto",
     right: "24px",
     bottom: "96px",
     width: "260px",
+    height: "auto",
     borderRadius: "6px",
     border: "2px solid rgba(0,0,0,0.55)",
     boxShadow: "0 8px 28px rgba(0,0,0,0.55)",
@@ -34,15 +73,75 @@
     transition: "opacity 220ms ease",
     pointerEvents: "none",
     objectFit: "cover",
-  });
-  document.body.appendChild(video);
+  };
 
   let currentSteamId = null;
   let pc = null;
   const failedUntil = new Map();
 
-  const show = (visible) => {
-    video.style.opacity = visible ? "1" : "0";
+  let mode = null;
+  let visible = false;
+  let hiddenImage = null;
+
+  function restoreAvatarImage() {
+    if (hiddenImage) {
+      hiddenImage.style.removeProperty("visibility");
+      hiddenImage = null;
+    }
+  }
+
+  // React owns this subtree and rebuilds it whenever the spectated player
+  // changes, which both drops our video and restores the avatar it replaced --
+  // so re-attaching is a steady-state operation, not just a startup one.
+  function attach() {
+    const anchor = document.querySelector(AVATAR_SELECTOR);
+    const parent = anchor ?? document.body;
+    const nextMode = anchor ? "avatar" : "corner";
+
+    if (video.parentElement !== parent) {
+      parent.appendChild(video);
+    }
+
+    if (mode !== nextMode) {
+      mode = nextMode;
+      video.removeAttribute("style");
+      Object.assign(video.style, nextMode === "avatar" ? AVATAR_STYLE : CORNER_STYLE);
+      video.style.opacity = visible ? "1" : "0";
+    }
+
+    const image = anchor?.querySelector("img") ?? null;
+
+    if (visible && anchor && image) {
+      if (hiddenImage !== image) {
+        restoreAvatarImage();
+        hiddenImage = image;
+      }
+      image.style.visibility = "hidden";
+      return;
+    }
+
+    restoreAvatarImage();
+  }
+
+  let attachQueued = false;
+  const observer = new MutationObserver(() => {
+    if (attachQueued) {
+      return;
+    }
+    attachQueued = true;
+    requestAnimationFrame(() => {
+      attachQueued = false;
+      attach();
+    });
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  attach();
+
+  const show = (next) => {
+    visible = next;
+    video.style.opacity = next ? "1" : "0";
+    attach();
   };
 
   function teardown() {
@@ -145,6 +244,13 @@
     }
   }
 
-  setInterval(tick, POLL_MS);
+  const timer = setInterval(tick, POLL_MS);
   void tick();
+
+  window.__FIVESTACK_CAMERA_DISPOSE__ = () => {
+    clearInterval(timer);
+    observer.disconnect();
+    teardown();
+    video.remove();
+  };
 })();
