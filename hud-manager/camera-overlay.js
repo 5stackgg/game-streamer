@@ -37,13 +37,20 @@
   video.playsInline = true;
   video.id = "fivestack-camera";
 
+  // The hud's avatar box is a 140px square while a webcam is 16:9, so filling it
+  // exactly crops away most of the shot. Overflowing the box horizontally keeps
+  // the same height but shows noticeably more of the frame -- `.observed` is
+  // 380px wide and sets overflow:visible, so nothing clips it.
+  const AVATAR_WIDTH_PX = 200;
+
   const AVATAR_STYLE = {
     position: "absolute",
-    inset: "0",
-    width: "100%",
+    inset: "auto",
+    top: "0",
+    left: "50%",
+    transform: `translateX(-50%)`,
+    width: `${AVATAR_WIDTH_PX}px`,
     height: "100%",
-    right: "auto",
-    bottom: "auto",
     borderRadius: "4px",
     border: "none",
     boxShadow: "0 4px 15px rgba(0,0,0,0.5)",
