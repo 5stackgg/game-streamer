@@ -24,11 +24,17 @@
 # "horizontal" because that's what the bundled default HUD's "default"
 # variant renders as (they're identical layouts).
 : "${HUD_MODE:=horizontal}"
+# Injected into the overlay window by auto-overlay.patch, which reads it from
+# disk at did-finish-load. Unset it to run without the camera overlay.
+: "${HUD_CAMERA_OVERLAY_JS:=/opt/hud-manager/camera-overlay.js}"
+# Where that overlay reaches the spec-server for the spectated player and the
+# WHEP proxy; it never holds the match credentials itself.
+: "${SPEC_BASE:=http://127.0.0.1:${SPEC_PORT:-1350}}"
 : "${API_BASE:=}"
 : "${API_TOKEN:=}"
 
 export HUD_BIN HUD_PORT HUD_GSI_PORT HUD_HOST HUD_USERDATA \
-       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE
+       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE HUD_CAMERA_OVERLAY_JS SPEC_BASE
 
 picom_running() { pgrep -x picom >/dev/null 2>&1; }
 

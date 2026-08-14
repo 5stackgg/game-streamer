@@ -640,7 +640,7 @@ if [ -n "${MATCH_ID:-}" ]; then
   LIVE_CAPTURE_STOPPED=1
 fi
 
-# CLIP_BAKE_BRANDING=1 enables the player chip + outro. Default off.
+# CLIP_BAKE_BRANDING enables the player chip + outro. Default on.
 BRANDING_ENABLED="${CLIP_BAKE_BRANDING:-1}"
 say "BRANDING enabled=${BRANDING_ENABLED}"
 
@@ -764,6 +764,11 @@ mkdir -p "$CLIP_OUT_DIR"
 CLIP_OUT_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.mp4"
 CLIP_THUMB_FILE="${CLIP_OUT_DIR}/${CLIP_RENDER_JOB_ID}.jpg"
 rm -f "$CLIP_OUT_FILE" "$CLIP_THUMB_FILE"
+
+# Survives across the per-clip `bash inline-clip-render.sh` invocations of a
+# batch run (each clip is its own process), so the encoder-matched outro is
+# transcoded once per pod instead of once per clip.
+OUTRO_CACHE_DIR="${OUTRO_CACHE_DIR:-$CLIP_OUT_DIR/.outro-cache}"
 
 # Precompute: will an outro be appended at concat time? If yes AND we
 # would have run a per-segment chip-overlay pass, we can fuse both into
@@ -1406,10 +1411,24 @@ fi
 # mismatched params on some pods. Re-encode is the fallback for that
 # case, using the same codec family as the segments to keep file
 # sizes consistent.
+# Cache path for the encoder-matched outro, keyed on everything that changes its
+# bytes — source file identity, encoder args, fps — so a codec/tier switch on a
+# later clip can never reuse a mismatched file.
+matched_outro_cache_path() {
+  mkdir -p "$OUTRO_CACHE_DIR" || return 1
+  local stamp key
+  stamp=$(stat -c '%s:%Y' "$OUTRO_FILE" 2>/dev/null || echo '?')
+  key=$(printf '%s|%s|%s|%s' \
+          "$OUTRO_FILE" "$stamp" "${FFMPEG_VENC_ARGS[*]}" "${CLIP_OUTPUT_FPS:-60}" \
+        | md5sum | cut -c1-12)
+  printf '%s/outro-%s.mp4\n' "$OUTRO_CACHE_DIR" "$key"
+}
+
 # Stream-copy fast path for the outro concat: when every captured
 # segment went through the per-segment polish (one uniform encoder
-# invocation), transcode the short outro once with the same args and
-# concat-demux `-c copy` the whole montage — skipping the second full
+# invocation), transcode the short outro to match those args — once per
+# pod, cached across the clips of a batch — and concat-demux `-c copy`
+# the whole montage, skipping the second full
 # re-encode. The trailing-PTS concern documented below applies to RAW
 # gst captures; polished files are clean ffmpeg muxes. PTS pathologies
 # survive -c copy silently, so the output duration is verified; any
@@ -1420,25 +1439,34 @@ try_concat_copy() {
   [ "$WILL_FUSE_POLISH_OUTRO" != "1" ] || return 1
   [ "$COPY_ELIGIBLE" = "1" ] || return 1
 
-  local outro_matched="$SEG_DIR/outro-matched.mp4"
-  local in_args=(-i "$OUTRO_FILE")
-  local map_args=(-map 0:v -map 0:a)
-  if ! has_audio_stream "$OUTRO_FILE"; then
-    in_args+=(-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000)
-    map_args=(-map 0:v -map 1:a -shortest)
-  fi
-  say "STEP 9: concat fast path — transcoding outro to match polished segments"
-  if ! ffmpeg -y -hide_banner -loglevel warning \
-       "${in_args[@]}" \
-       "${map_args[@]}" \
-       "${FFMPEG_VENC_ARGS[@]}" \
-       -r "${CLIP_OUTPUT_FPS:-60}" \
-       -c:a aac -b:a 192k -ar 48000 -ac 2 \
-       -movflags +faststart \
-       "$outro_matched"; then
-    say "  concat: outro transcode failed — falling back to re-encode"
-    rm -f "$outro_matched"
-    return 1
+  local outro_matched
+  outro_matched=$(matched_outro_cache_path) || return 1
+  if [ -s "$outro_matched" ]; then
+    say "STEP 9: concat fast path — reusing cached matched outro"
+  else
+    local in_args=(-i "$OUTRO_FILE")
+    local map_args=(-map 0:v -map 0:a)
+    if ! has_audio_stream "$OUTRO_FILE"; then
+      in_args+=(-f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000)
+      map_args=(-map 0:v -map 1:a -shortest)
+    fi
+    say "STEP 9: concat fast path — transcoding outro to match polished segments (cached for later clips)"
+    # Transcode to a scratch file and rename in — a killed render must never
+    # leave a truncated outro behind for the next clip to concat.
+    local staging="${outro_matched}.$$.tmp"
+    if ! ffmpeg -y -hide_banner -loglevel warning \
+         "${in_args[@]}" \
+         "${map_args[@]}" \
+         "${FFMPEG_VENC_ARGS[@]}" \
+         -r "${CLIP_OUTPUT_FPS:-60}" \
+         -c:a aac -b:a 192k -ar 48000 -ac 2 \
+         -movflags +faststart \
+         "$staging"; then
+      say "  concat: outro transcode failed — falling back to re-encode"
+      rm -f "$staging"
+      return 1
+    fi
+    mv -f "$staging" "$outro_matched" || { rm -f "$staging"; return 1; }
   fi
 
   local copy_list="$SEG_DIR/concat-copy.txt"

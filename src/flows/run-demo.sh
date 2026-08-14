@@ -320,6 +320,7 @@ do_applaunch
 wait_for_cs2_process do_applaunch
 
 minimize_steam_windows
+trim_steam_webhelper  # ~1GB of CEF we no longer need once cs2 is up
 
 report_status status=connecting_to_game
 WIN=""
