@@ -42,7 +42,7 @@ index 16f3fad..7ad7455 100644
  import path from 'path'
  import fs from 'fs'
  import net from 'net'
-@@ -52,66 +52,98 @@ const getCfgPath = (steamPath: string) =>
+@@ -52,66 +52,104 @@ const getCfgPath = (steamPath: string) =>
 
  let activeOverlay: BrowserWindow | null = null
 
@@ -157,6 +157,12 @@ index 16f3fad..7ad7455 100644
 +  activeOverlay = overlayWindow
 +  overlayWindow.setIgnoreMouseEvents(true, { forward: true })
 +  overlayWindow.loadURL(hudUrl)
++
++  // 5stack: the overlay renderer is otherwise a black box -- surface its
++  // console in the pod log so injected scripts can be diagnosed without a rebuild.
++  overlayWindow.webContents.on('console-message', (_e, _level, message, line, sourceId) => {
++    console.log(`[overlay-console] ${message} (${sourceId}:${line})`)
++  })
 +
 +  // 5stack: the spectated player's camera. Loaded from disk and injected
 +  // rather than embedded here so the overlay stays a normal reviewable file,
