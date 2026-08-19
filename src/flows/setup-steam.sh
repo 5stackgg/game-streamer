@@ -58,6 +58,8 @@ fi
 HUD_DEFERRED=0
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
   log "CLIP_BATCH_MODE=1 — skipping hud-manager"
+elif [ "${NADE_BATCH_MODE:-0}" = "1" ]; then
+  log "NADE_BATCH_MODE=1 — skipping hud-manager"
 elif [ -n "${BAKE_NODE_ID:-}" ]; then
   log "shader bake — skipping hud-manager"
 elif [ -x "$HUD_BIN" ]; then

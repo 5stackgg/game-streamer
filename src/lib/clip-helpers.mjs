@@ -275,6 +275,58 @@ switch (subcmd) {
     break;
   }
 
+  // [stdin: nade job_json] -> every field batch-nades.sh exports, each
+  // NUL-TERMINATED (same shape as job-fields above). The spec keys mirror the
+  // nade_lineups column names so the api can splat a row into it. Order:
+  //   job_id token lineup_id lineup_name map_name nade_type side
+  //   origin(x,y,z) eye_z view_yaw view_pitch flight_time_ms has_seed
+  //   confidence plugin_runtime output_dims output_fps
+  // has_seed follows the plugin's own rule (all six initial_* present AND a
+  // non-zero velocity) unless the api states it outright — a lineup without it
+  // cannot be re-emitted exactly and gets skipped rather than approximated.
+  case "nade-fields": {
+    const d = readStdinJson();
+    const s = d?.spec ?? {};
+    const S = (v) => (typeof v === "string" ? v.replaceAll("\u0000", "") : "");
+    const N = (v) => (typeof v === "number" && Number.isFinite(v) ? String(v) : "");
+    const seedKeys = [
+      "initial_pos_x", "initial_pos_y", "initial_pos_z",
+      "initial_vel_x", "initial_vel_y", "initial_vel_z",
+    ];
+    let hasSeed = s.has_seed === true;
+    if (!hasSeed && s.has_seed !== false) {
+      const vals = seedKeys.map((k) => s[k]);
+      const complete = vals.every((v) => typeof v === "number" && Number.isFinite(v));
+      const speed = complete
+        ? Math.hypot(s.initial_vel_x, s.initial_vel_y, s.initial_vel_z)
+        : 0;
+      hasSeed = complete && speed > 0;
+    }
+    const origin = ["origin_x", "origin_y", "origin_z"].map((k) => N(s[k]));
+    const fps = parseInt(s?.output?.fps, 10);
+    const flight = Number(s.flight_time_ms);
+    process.stdout.write([
+      S(d?.job_id),
+      S(d?.token),
+      S(s.lineup_id),
+      S(s.lineup_name ?? s.name),
+      S(s.map_name),
+      S(s.nade_type),
+      S(s.side),
+      origin.every(Boolean) ? origin.join(",") : "",
+      N(s.eye_z),
+      N(s.view_yaw),
+      N(s.view_pitch),
+      Number.isFinite(flight) && flight > 0 ? String(Math.round(flight)) : "0",
+      hasSeed ? "1" : "0",
+      S(s.confidence),
+      S(s.plugin_runtime),
+      s?.output?.resolution === "720p" ? "1280x720" : "1920x1080",
+      String(Number.isFinite(fps) ? fps : 60),
+    ].map((f) => f + "\u0000").join(""));
+    break;
+  }
+
   // [stdin: job_json] -> top-level job_id.
   case "job-id": {
     const d = readStdinJson();

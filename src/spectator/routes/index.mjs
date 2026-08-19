@@ -37,6 +37,7 @@ import {
   toggleHandler,
   xrayHandler,
 } from "./demo.mjs";
+import { nadeSelfHandler, nadeWatchArmHandler, nadeWatchStateHandler } from "./nade-watch.mjs";
 import { renderClipHandler } from "./render-clip.mjs";
 import { switchMatchHandler } from "./switch-match.mjs";
 import { reconnectHandler } from "./reconnect.mjs";
@@ -52,6 +53,9 @@ const ROUTES = new Map([
   ["GET /demo/capture-fields", captureFieldsHandler],
   ["GET /demo/pov-state", povStateHandler],
   ["GET /demo/seek-state", seekStateHandler],
+  ["GET /nade/watch", nadeWatchStateHandler],
+  ["GET /nade/self", nadeSelfHandler],
+  ["POST /nade/watch", nadeWatchArmHandler],
   ["POST /gsi", gsiHandler],
 
   ["POST /spec/click",        clickHandler],
@@ -139,6 +143,8 @@ export async function dispatch(req, res) {
 const QUIET_URLS = new Set([
   "/gsi", "/demo/state", "/demo/capture-fields", "/demo/pov-state",
   "/demo/seek-state",
+  // Polled at ~10Hz by the nade preview recorder while a throw is in flight.
+  "/nade/watch", "/nade/self",
   // Polled by the HUD overlay to follow the spectated player.
   "/camera/state",
 ]);
