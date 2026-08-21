@@ -197,6 +197,13 @@ nade_gate_probe() {
   say "  console tail:"
   tail -c +$((NADE_GATE_LOG_OFFSET + 1)) "$log" | tail -n 8 | sed 's/^/    | /' 1>&2
   NADE_GATE_LOG_OFFSET=$size
+  # And the other half of the gate's condition, so a log reads "in the map
+  # per console, no GSI per spec-server" without anyone having to correlate.
+  local self watch
+  self=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || echo "unreachable")
+  watch=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/watch" || echo "unreachable")
+  say "  gsi self  (age|steam|team|health|activity|pos|fwd): ${self}"
+  say "  gsi watch (armed|age|since|thrown|det|bloom|active|type|blocks_seen): ${watch}"
 }
 
 # The boot-time connect (+connect launch arg and the autoexec both) fires
@@ -267,6 +274,15 @@ wait_for_nade_session() {
       esac
     fi
     if [ "$waited" -ge "$NADE_SESSION_READY_TIMEOUT" ]; then
+      # The console tail is the diagnosis; the guesses are only for a log that
+      # never got written.
+      local postmortem="" gate_log="${CS2_CONSOLE_LOG:-$CS2_DIR/game/csgo/console.log}"
+      if [ -f "$gate_log" ]; then
+        postmortem=$(tail -n 5 "$gate_log" | tr '\n' ';' | cut -c1-260)
+      fi
+      if [ -n "$postmortem" ]; then
+        die "never spawned on the practice server within ${NADE_SESSION_READY_TIMEOUT}s — console: ${postmortem}"
+      fi
       die "never spawned on the practice server within ${NADE_SESSION_READY_TIMEOUT}s (wrong password, server down, or the client is stuck in team select)"
     fi
     waited=$((waited + 1))

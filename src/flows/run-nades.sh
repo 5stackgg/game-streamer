@@ -44,8 +44,17 @@ else
   die "no practice server to connect to — set CONNECT_ADDR (+CONNECT_PASSWORD)"
 fi
 
+# The api resolves this via get_server_host: an SDR relay token ([A:1:...]) on
+# a relay region, else host:port. A relay server answers ONLY over Steam
+# datagram, so a raw ip:port here lands the client on cs2's loopback map.
+log "connect target: $CS2_CONNECT_ADDR"
+
 : "${NADE_OUT_DIR:=/tmp/game-streamer/nades}"
 : "${NADE_OUTPUT_FPS:=60}"
+# A render that keeps snapshotting should not throttle to the 30s "playing"
+# cadence the moment GSI flows -- keep it dense so a throw is actually visible.
+: "${SNAPSHOT_INTERVAL_SECONDS:=${SNAPSHOT_BOOT_INTERVAL_SECONDS:-5}}"
+export SNAPSHOT_INTERVAL_SECONDS
 # The capture samples cs2's swapchain, so cs2 must render ABOVE the capture
 # rate for every sample to be a fresh frame — same 2x headroom the demo flow
 # uses on the vkcapture path.
@@ -185,7 +194,16 @@ timeout 5 xdotool windowfocus --sync "$WIN" 2>/dev/null || true
     && report_status status=errored "error=cs2 process exited unexpectedly"
 ) &
 
-stop_snapshot_loop
+# Keep watching. The loop normally stops here so the screen grab cannot
+# compete with a clip capture -- but the connect/join/wait phase (where a
+# render most often wedges) has no capture running, and a live view of it is
+# the whole point while debugging. NADE_KEEP_SNAPSHOTS=0 restores the old
+# stop-before-filming behaviour.
+if [ "${NADE_KEEP_SNAPSHOTS:-1}" = "1" ]; then
+  log "snapshot: keeping the loop running through the batch (NADE_KEEP_SNAPSHOTS=1)"
+else
+  stop_snapshot_loop
+fi
 # shellcheck disable=SC1091
 . "$LIB_DIR/batch-nades.sh"
 process_nade_jobs
