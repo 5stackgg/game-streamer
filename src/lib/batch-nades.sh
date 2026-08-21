@@ -138,6 +138,53 @@ reap_oldest_nade_tail() {
   TAIL_MARKERS=("${TAIL_MARKERS[@]:1}")
 }
 
+# A connecting client lands in team select and stays there: the practice plugin
+# only reacts to OnPlayerJoinTeam, it never assigns one, and the pod is on
+# nobody's roster. Somebody has to press a team.
+#
+# That somebody used to be nade-clip.sh's join_if_not_spawned -- but that runs
+# inside a job, and no job starts until the gate below reports a spawned player.
+# The gate waited for a spawn that only a job could cause, so it always ran out
+# the clock and died "never spawned ... stuck in team select". Joining here is
+# what breaks the cycle; the per-job join still covers a mid-batch death.
+# NEVER press this while already alive: jointeam on a live pawn respawns it, so
+# a re-press loop that ignores health kills the player on a loop. The gate can
+# sit here with health>0 whenever some OTHER condition is holding it up (a stale
+# GSI reading, say), which is exactly when an unguarded re-press does damage.
+nade_join_team() {
+  local self health
+  self=$(curl --fail --silent --max-time 5 \
+    "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
+  if [ -n "$self" ]; then
+    IFS='|' read -r _age _sid _team health _rest <<<"$self"
+    case "${health:-0}" in
+      ''|*[!0-9]*) ;;
+      *) [ "$health" -gt 0 ] && return 0 ;;
+    esac
+  fi
+  curl --fail --silent --max-time 5 \
+       --header "content-type: application/json" \
+       --data "{\"cmd\": \"jointeam ${NADE_BATCH_JOIN_TEAM:-3}\"}" \
+       --output /dev/null \
+       "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
+}
+
+# Same side mapping nade-clip.sh uses, read off the batch's first lineup so the
+# opening spawn is already on the right side.
+nade_batch_join_team() {
+  printf '%s' "${NADE_BATCH_JOBS:-}" | node -e '
+    let s = "";
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      let team = "3";
+      try {
+        const side = String(JSON.parse(s)?.[0]?.spec?.side ?? "");
+        if (/^t/i.test(side)) team = "2";
+      } catch {}
+      process.stdout.write(team);
+    });
+  ' 2>/dev/null || printf '3'
+}
+
 # Connected, in-game and alive is the only state in which `.load` does
 # anything, so the batch waits for GSI to say so before the first lineup.
 # die() fans the failure out to every job, so a server that never comes up is
@@ -145,7 +192,9 @@ reap_oldest_nade_tail() {
 wait_for_nade_session() {
   local waited=0 line age health map_name
   NADE_SESSION_MAP=""
+  NADE_BATCH_JOIN_TEAM=$(nade_batch_join_team)
   say "waiting for the practice server (GSI + spawned player)"
+  say "  joining team ${NADE_BATCH_JOIN_TEAM} (nothing else does)"
   while :; do
     line=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
     if [ -n "$line" ]; then
@@ -170,6 +219,9 @@ wait_for_nade_session() {
       die "never spawned on the practice server within ${NADE_SESSION_READY_TIMEOUT}s (wrong password, server down, or the client is stuck in team select)"
     fi
     waited=$((waited + 1))
+    # Re-press rather than fire once: the first attempt can land before the
+    # client is far enough through connecting for the command to take.
+    [ $((waited % "${NADE_JOIN_RETRY_SECONDS:-5}")) -eq 0 ] && nade_join_team
     [ $((waited % 15)) -eq 0 ] && say "  still waiting (${waited}s)"
     sleep 1
   done

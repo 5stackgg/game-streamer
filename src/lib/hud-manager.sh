@@ -208,7 +208,11 @@ write_gsi_cfg() {
   "timeout" "5.0"
   "buffer" "0.0"
   "throttle" "0.1"
-  "heartbeat" "10.0"
+  # A motionless player generates no state changes, so the heartbeat is the
+  # only thing that keeps GSI fresh -- and the nade flow reads a player who is
+  # deliberately standing perfectly still. It lowers this; live and demo keep
+  # the cheap 10s pulse.
+  "heartbeat" "${GSI_HEARTBEAT:-10.0}"
   "auth" { "token" "5stack-spec" }
   "data"
   {

@@ -101,6 +101,13 @@ EOF
 # flushes console commands through) doesn't error before the first write.
 : > "$CS2_CFG_DIR/5stack_exec.cfg"
 
+# The camera check demands a GSI reading no older than NADE_GSI_MAX_AGE_MS
+# (2s) taken while the player stands still at the lineup -- which is exactly
+# when cs2 stops emitting state changes. At the default 10s heartbeat the check
+# is only evaluable for ~2s out of every 10, and reported "GSI is stale" for
+# the rest. Pulse faster than the freshness window it is checked against.
+: "${GSI_HEARTBEAT:=0.5}"
+export GSI_HEARTBEAT
 write_gsi_cfg
 
 for base in libpangoft2-1.0 libpango-1.0; do

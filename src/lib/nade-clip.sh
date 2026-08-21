@@ -312,6 +312,7 @@ cs2_exec_template "$NADE_CMD_LOAD"
 # Position AND angle both have to match: the alignment is the product, so a
 # clip shot from the right spot facing the wrong way is a wrong clip.
 CAMERA_FAIL="no GSI player state yet"
+CAMERA_FAIL_MEASURED=""
 camera_confirmed() {
   read_self || { CAMERA_FAIL="spec-server /nade/self unreachable"; return 1; }
   case "${S_AGE:-}" in ''|-1|*[!0-9]*) CAMERA_FAIL="GSI has not fired yet"; return 1 ;; esac
@@ -357,6 +358,11 @@ camera_confirmed() {
     3) CAMERA_FAIL="looking along ${S_FX},${S_FY},${S_FZ}, lineup wants yaw=${NADE_VIEW_YAW} pitch=${NADE_VIEW_PITCH}" ;;
     *) CAMERA_FAIL="lineup origin '${NADE_ORIGIN}' is malformed" ;;
   esac
+  # Every poll overwrites CAMERA_FAIL, so the timeout used to report whichever
+  # reason the LAST poll happened to hit -- and the ambient ones (stale GSI, not
+  # yet spawned) drown out the one that tells you anything. A reading we could
+  # actually measure is the diagnosis; keep it and report that instead.
+  CAMERA_FAIL_MEASURED="$CAMERA_FAIL"
   return 1
 }
 
@@ -378,6 +384,12 @@ while [ "$WAITED" -lt "$NADE_CAMERA_CONFIRM_MS" ]; do
   fi
 done
 if [ "$CAMERA_OK" != "1" ]; then
+  if [ -n "${CAMERA_FAIL_MEASURED:-}" ]; then
+    # We saw the player clearly at least once and they were in the wrong place,
+    # so the lineup loaded and the map is right -- this is an alignment problem,
+    # not a connection one.
+    die_skipped "camera never reached the lineup within ${NADE_CAMERA_CONFIRM_MS}ms: ${CAMERA_FAIL_MEASURED}"
+  fi
   die_skipped "camera never reached the lineup within ${NADE_CAMERA_CONFIRM_MS}ms: ${CAMERA_FAIL} — wrong map, not spawned, or the plugin has no lineup named '${NADE_LINEUP_NAME}'"
 fi
 api_status "status=rendering" "progress=0.15"
