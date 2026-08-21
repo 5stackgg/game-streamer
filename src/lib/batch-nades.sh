@@ -169,6 +169,57 @@ nade_join_team() {
        "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
 }
 
+# The gate's black-box breaker. Zero GSI can mean "in the menu", "kicked", or
+# "in team select with the exec keystrokes landing nowhere" -- three different
+# bugs. CS2's own console (-condebug) tells them apart, and `status` printing
+# there at all proves the exec-cfg keystroke path works: the command travels
+# spec-server -> cfg file -> BACKSPACE keybind -> console, so its output is a
+# health check of the whole chain, not just a connection report.
+NADE_GATE_LOG_OFFSET=0
+nade_gate_probe() {
+  curl --fail --silent --max-time 5 \
+       --header "content-type: application/json" \
+       --data '{"cmd": "status"}' \
+       --output /dev/null \
+       "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
+  sleep 2
+  local log="${CS2_CONSOLE_LOG:-$CS2_DIR/game/csgo/console.log}"
+  if [ ! -f "$log" ]; then
+    say "  console.log missing — -condebug is not writing, cs2 may not be up"
+    return 0
+  fi
+  local size
+  size=$(stat -c %s "$log" 2>/dev/null || echo 0)
+  if [ "$size" -le "$NADE_GATE_LOG_OFFSET" ]; then
+    say "  console silent since last probe — the status keystroke is not reaching cs2 (window focus?)"
+    return 0
+  fi
+  say "  console tail:"
+  tail -c +$((NADE_GATE_LOG_OFFSET + 1)) "$log" | tail -n 8 | sed 's/^/    | /' 1>&2
+  NADE_GATE_LOG_OFFSET=$size
+}
+
+# The boot-time connect (+connect launch arg and the autoexec both) fires
+# exactly once, before the client is fully up -- if it misses, the client sits
+# in the main menu forever and nothing in the flow ever tries again. While GSI
+# has NEVER fired (age -1: not in any map, menus emit nothing) the gate
+# re-issues it. A client that is actually in-game has GSI, so this can never
+# yank a working session.
+nade_reconnect() {
+  [ -n "${CS2_CONNECT_ADDR:-}" ] || return 0
+  local line age
+  line=$(curl --fail --silent --max-time 5 \
+    "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
+  IFS='|' read -r age _rest <<<"$line"
+  [ "${age:-'-1'}" = "-1" ] || return 0
+  say "  no GSI yet — re-issuing connect to ${CS2_CONNECT_ADDR}"
+  curl --fail --silent --max-time 5 \
+       --header "content-type: application/json" \
+       --data "{\"cmd\": \"password \\\"${CS2_CONNECT_PASSWORD:-}\\\"; connect ${CS2_CONNECT_ADDR}\"}" \
+       --output /dev/null \
+       "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
+}
+
 # Same side mapping nade-clip.sh uses, read off the batch's first lineup so the
 # opening spawn is already on the right side.
 nade_batch_join_team() {
@@ -222,7 +273,11 @@ wait_for_nade_session() {
     # Re-press rather than fire once: the first attempt can land before the
     # client is far enough through connecting for the command to take.
     [ $((waited % "${NADE_JOIN_RETRY_SECONDS:-5}")) -eq 0 ] && nade_join_team
-    [ $((waited % 15)) -eq 0 ] && say "  still waiting (${waited}s)"
+    if [ $((waited % 15)) -eq 0 ]; then
+      say "  still waiting (${waited}s)"
+      nade_gate_probe
+    fi
+    [ $((waited % 45)) -eq 0 ] && nade_reconnect
     sleep 1
   done
 }
