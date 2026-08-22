@@ -194,6 +194,12 @@ position_hud_overlay() {
 # Data fields are the union of what both consumers need (the HUD's set
 # from src/main/ipc.ts:GSI_CFG_CONTENT plus the director's position /
 # weapons / match_stats).
+# A motionless player generates no GSI state changes, so the heartbeat is the
+# only thing that keeps GSI fresh while a nade render stands perfectly still on
+# a lineup -- run-nades lowers GSI_HEARTBEAT for that; live/demo keep the cheap
+# 10s pulse. The value goes into the cfg via the heredoc below; the explanation
+# stays HERE, because a '#' comment inside a Valve KeyValues file is a parse
+# error ("got } in key") that makes cs2 reject the whole GSI config.
 write_gsi_cfg() {
   local cfg_dir="$CS2_DIR/game/csgo/cfg"
   mkdir -p "$cfg_dir"
@@ -208,10 +214,6 @@ write_gsi_cfg() {
   "timeout" "5.0"
   "buffer" "0.0"
   "throttle" "0.1"
-  # A motionless player generates no state changes, so the heartbeat is the
-  # only thing that keeps GSI fresh -- and the nade flow reads a player who is
-  # deliberately standing perfectly still. It lowers this; live and demo keep
-  # the cheap 10s pulse.
   "heartbeat" "${GSI_HEARTBEAT:-10.0}"
   "auth" { "token" "5stack-spec" }
   "data"

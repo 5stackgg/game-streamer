@@ -208,18 +208,26 @@ nade_gate_probe() {
 
 # The boot-time connect (+connect launch arg and the autoexec both) fires
 # exactly once, before the client is fully up -- if it misses, the client sits
-# in the main menu forever and nothing in the flow ever tries again. While GSI
-# has NEVER fired (age -1: not in any map, menus emit nothing) the gate
-# re-issues it. A client that is actually in-game has GSI, so this can never
-# yank a working session.
+# in the main menu and nothing else retries. While GSI has NEVER fired (age -1)
+# the gate may re-issue it.
+#
+# STRICTLY CAPPED: a client that DID connect but whose GSI is misconfigured also
+# reads age -1, and re-issuing connect there reconnects a joined client over and
+# over -- cs2 counts each rejoin as a suicide and kicks it "for suiciding too
+# many times". A couple of nudges for a genuinely-missed connect is worth it; an
+# unbounded loop is what turned a bad GSI cfg into a suicide kick. A late clip
+# beats a kicked one, so after the cap we just wait out the gate.
+NADE_RECONNECT_ATTEMPTS=0
 nade_reconnect() {
   [ -n "${CS2_CONNECT_ADDR:-}" ] || return 0
+  [ "$NADE_RECONNECT_ATTEMPTS" -ge "${NADE_RECONNECT_MAX:-2}" ] && return 0
   local line age
   line=$(curl --fail --silent --max-time 5 \
     "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
   IFS='|' read -r age _rest <<<"$line"
   [ "${age:-'-1'}" = "-1" ] || return 0
-  say "  no GSI yet — re-issuing connect to ${CS2_CONNECT_ADDR}"
+  NADE_RECONNECT_ATTEMPTS=$((NADE_RECONNECT_ATTEMPTS + 1))
+  say "  no GSI yet — re-issuing connect to ${CS2_CONNECT_ADDR} (attempt ${NADE_RECONNECT_ATTEMPTS}/${NADE_RECONNECT_MAX:-2})"
   curl --fail --silent --max-time 5 \
        --header "content-type: application/json" \
        --data "{\"cmd\": \"password \\\"${CS2_CONNECT_PASSWORD:-}\\\"; connect ${CS2_CONNECT_ADDR}\"}" \
