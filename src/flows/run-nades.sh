@@ -117,6 +117,14 @@ EOF
 # the rest. Pulse faster than the freshness window it is checked against.
 : "${GSI_HEARTBEAT:=0.5}"
 export GSI_HEARTBEAT
+
+# A live-pawn render never receives the observer-only GSI grenade feed (cs2
+# only sends allgrenades to a spectator), so the recorded flight time is the
+# ONLY detonation signal available. An `exact` lineup carries an accurate
+# flight time, so the clip is correctly timed even though the pod flags it
+# unverified. Without this the throw step dies "no detonation signal".
+: "${NADE_ALLOW_TIMED_DETONATION:=1}"
+export NADE_ALLOW_TIMED_DETONATION
 write_gsi_cfg
 
 for base in libpangoft2-1.0 libpango-1.0; do

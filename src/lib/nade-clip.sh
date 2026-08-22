@@ -43,15 +43,27 @@ say() { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
 : "${NADE_CONFIDENCE:=}"
 : "${NADE_PLUGIN_RUNTIME:=swiftlys2}"
 
-# Plugin verbs. Swiftly registers them as sw_<verb>, CounterStrikeSharp as
-# css_<verb>; both also answer to the chat form (`say .load ...`) if a future
-# build stops forwarding the console name. {name} expands to the lineup name,
-# which is what `.load` matches on — the plugin has no id lookup.
+# Plugin verbs. The plugin registers load/rethrow with registerRaw:false, so
+# the console name (sw_load / css_load) is a SERVER concommand: a connected
+# client that execs `sw_load` in its own console gets "unknown command" and it
+# is NEVER forwarded upstream, so the plugin never sees it (zero OnLoad in the
+# server log). The chat form always round-trips — `say` reaches the server and
+# Swiftly's chat hook dispatches it — which is exactly how a real player fires
+# these. `/` is the silent prefix so no chat text lands in the clip. {name}
+# expands to the lineup name, which is what `.load` matches on (no id lookup).
 # Escaped closing brace: an unescaped `{name}` inside `${VAR:=...}` ends the
-# expansion early and the default silently truncates to "sw_load {name".
-: "${NADE_CMD_PREFIX:=sw_}"
-: "${NADE_CMD_LOAD:=${NADE_CMD_PREFIX}load {name\}}"
-: "${NADE_CMD_THROW:=${NADE_CMD_PREFIX}rethrow}"
+# expansion early and the default silently truncates to "load {name".
+: "${NADE_CMD_LOAD:=say /load {name\}}"
+: "${NADE_CMD_THROW:=say /rethrow}"
+# How the throw is produced. `real` (default) makes the render bot throw its OWN
+# held grenade with +attack/-attack: cs2 renders a client-initiated throw
+# reliably, whereas a server-spawned ghost projectile (`.rethrow`) never draws
+# on this headless client -- the alignment was perfect but the clip was frozen
+# because the phantom nade was invisible. `command` falls back to NADE_CMD_THROW.
+: "${NADE_THROW_MODE:=real}"
+# The pin is pulled on +attack and the nade released on -attack; they must land
+# on different ticks, so hold briefly between them.
+: "${NADE_THROW_HOLD_MS:=350}"
 # Only the plugin's connect gate is automatic — nothing puts this client on a
 # team, and a client in team-select has no pawn to teleport. `=` not `:=` so
 # the api can switch the join off with an explicitly empty value.
@@ -180,6 +192,37 @@ cs2_exec_template() {
   tmpl="${tmpl//\{name\}/\"$NADE_LINEUP_NAME\"}"
   tmpl="${tmpl//\{lineup\}/$NADE_LINEUP_ID}"
   cs2_exec "$tmpl"
+}
+
+# The weapon name for `use`, so the bot is definitely holding the grenade before
+# it presses attack (a stray gun/knife in hand would shoot/slash instead).
+nade_weapon() {
+  case "$(printf '%s' "$NADE_NADE_TYPE" | tr '[:upper:]' '[:lower:]')" in
+    smoke*)                 printf 'weapon_smokegrenade' ;;
+    flash*)                 printf 'weapon_flashbang' ;;
+    high*|he|frag|grenade)  printf 'weapon_hegrenade' ;;
+    # molotov is T-side, incendiary is CT-side; the render joins by side.
+    molo*|incend*|fire*)
+      [ "${NADE_JOIN_TEAM:-3}" = 2 ] && printf 'weapon_molotov' || printf 'weapon_incgrenade' ;;
+    decoy*)                 printf 'weapon_decoy' ;;
+    *)                      printf '' ;;
+  esac
+}
+
+# Throw the bot's OWN held grenade so cs2 renders it. See NADE_THROW_MODE.
+nade_do_throw() {
+  case "$(printf '%s' "$NADE_THROW_MODE" | tr '[:upper:]' '[:lower:]')" in
+    real|client|attack)
+      local w; w=$(nade_weapon)
+      [ -n "$w" ] && { cs2_exec "use $w"; sleep 0.2; }
+      cs2_exec "+attack"
+      sleep "$(awk -v ms="$NADE_THROW_HOLD_MS" 'BEGIN{printf "%.3f", ms/1000}')"
+      cs2_exec "-attack"
+      ;;
+    *)
+      cs2_exec_template "$NADE_CMD_THROW"
+      ;;
+  esac
 }
 
 console_log_size() {
@@ -326,7 +369,21 @@ camera_confirmed() {
     return 1
   fi
   if [ -z "${S_X:-}" ] || [ -z "${S_FX:-}" ]; then
-    CAMERA_FAIL="GSI reported no position/forward"
+    # CS2 GSI carries position/forward ONLY for a SPECTATED player, never for
+    # your own live pawn -- and a render throws from a live pawn (an observer
+    # has none to teleport). So a live-pawn render can never read its own camera
+    # back to verify it; confirmed live (health>0, activity=playing, fresh GSI)
+    # is everything GSI will ever give.
+    #
+    # .load is a deterministic server-side teleport to the lineup's exact origin
+    # AND angle, so once it has settled the camera IS on the lineup by
+    # construction. Trust it rather than wait out the clock on a reading cs2
+    # will never send.
+    if [ "${WAITED:-0}" -ge "${NADE_CAMERA_TRUST_LOAD_MS:-4000}" ]; then
+      say "STEP 1: cs2 sends no own-player position; trusting .load placement (alive, playing, ${WAITED}ms settled)"
+      return 0
+    fi
+    CAMERA_FAIL="settling after .load (cs2 sends no own-player GSI position)"
     return 1
   fi
   local rc=0
@@ -424,7 +481,7 @@ api_status "status=rendering" "progress=0.3"
 # --- STEP 4: throw, then wait for the detonation to actually happen ----------
 
 THROW_LOG_OFFSET=$(console_log_size)
-cs2_exec_template "$NADE_CMD_THROW"
+nade_do_throw
 now_ms THROW_MS
 
 DETONATE_DEADLINE_MS=$(awk -v f="$NADE_FLIGHT_TIME_MS" -v k="$NADE_DETONATE_FACTOR" \
