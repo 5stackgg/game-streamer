@@ -4,11 +4,20 @@ on:
   push:
     branches:
       - "main"
+      - "beta"
   workflow_dispatch:
+
+env:
+  CHANNEL: ${{ github.ref_name == 'main' && 'latest' || 'beta' }}
+  TAG_PREFIX: ${{ github.ref_name != 'main' && 'beta-' || '' }}
+  CACHE_TAG: ${{ github.ref_name == 'main' && 'buildcache' || 'buildcache-beta' }}
 
 jobs:
   build-push-and-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -27,21 +36,49 @@ jobs:
         with:
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/game-streamer:latest
-            ghcr.io/${{ github.repository_owner }}/game-streamer:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/game-streamer:${{ env.CHANNEL }}
+            ghcr.io/${{ github.repository_owner }}/game-streamer:${{ env.TAG_PREFIX }}${{ github.sha }}
           # Registry-backed cache: a dedicated :buildcache tag on ghcr stores
           # the layer cache across runs (no 10GB GHA-cache ceiling, survives
           # branch/PR boundaries). First build is a full rebuild; every
           # subsequent build reuses unchanged apt/steamcmd/CS2 layers.
           cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:${{ env.CACHE_TAG }}
           cache-to: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache,mode=max
+            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:${{ env.CACHE_TAG }},mode=max
 
-      - name: Delete Package Versions
-        uses: actions/delete-package-versions@v5
+      - name: Prune old images for channel
+        uses: actions/github-script@v7
         with:
-          package-name: game-streamer
-          package-type: container
-          min-versions-to-keep: 8
-          ignore-versions: '^buildcache-*'
+          script: |
+            const channel = context.ref === 'refs/heads/main' ? 'main' : 'beta';
+            const keep = 8;
+            const owner = context.repo.owner;
+            const pkg = 'game-streamer';
+            const isBuildcache = (t) => t.startsWith('buildcache');
+            const isBeta = (t) => t === 'beta' || t.startsWith('beta-');
+            const { data: ownerInfo } = await github.rest.users.getByUsername({ username: owner });
+            const isOrg = ownerInfo.type === 'Organization';
+            const listFn = isOrg
+              ? github.rest.packages.getAllPackageVersionsForPackageOwnedByOrg
+              : github.rest.packages.getAllPackageVersionsForPackageOwnedByUser;
+            const listArgs = isOrg
+              ? { package_type: 'container', package_name: pkg, org: owner, per_page: 100 }
+              : { package_type: 'container', package_name: pkg, username: owner, per_page: 100 };
+            const versions = await github.paginate(listFn, listArgs);
+            const inChannel = versions.filter((v) => {
+              const tags = v.metadata?.container?.tags || [];
+              if (tags.length === 0) return false;
+              if (tags.some(isBuildcache)) return false;
+              const beta = tags.some(isBeta);
+              return channel === 'beta' ? beta : !beta;
+            });
+            inChannel.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const toDelete = inChannel.slice(keep);
+            for (const v of toDelete) {
+              await (isOrg
+                ? github.rest.packages.deletePackageVersionForOrg({ package_type: 'container', package_name: pkg, org: owner, package_version_id: v.id })
+                : github.rest.packages.deletePackageVersionForUser({ package_type: 'container', package_name: pkg, username: owner, package_version_id: v.id }));
+              core.info(`deleted ${pkg} ${v.id} [${(v.metadata?.container?.tags || []).join(', ')}]`);
+            }
+            core.info(`channel=${channel} candidates=${inChannel.length} deleted=${toDelete.length}`);
