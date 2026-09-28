@@ -24,7 +24,7 @@ function fakeCs2({ opensAt = 0, interactableAt = 0, reopensAt = null, readable =
       settle();
       if (!readable) return null;
       const score = open ? 0.99 : 0.2;
-      return { visible: score >= DEMOUI_BAR_THRESHOLD, score };
+      return { visible: score >= DEMOUI_BAR_THRESHOLD, score, mean: 90 };
     },
     toggle: async () => {
       toggles.push(t);

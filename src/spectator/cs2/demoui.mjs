@@ -56,7 +56,10 @@ export async function demouiBarVisible() {
   const gray = await grabScreenGray();
   if (!gray) return null;
   const score = demouiBarScore(gray, GRAB_W, GRAB_H);
-  return { visible: score >= DEMOUI_BAR_THRESHOLD, score };
+  // Average brightness: ~0 means the grab came back black rather than showing cs2.
+  let sum = 0;
+  for (let i = 0; i < GRAB_W * GRAB_H; i++) sum += gray[i];
+  return { visible: score >= DEMOUI_BAR_THRESHOLD, score, mean: sum / (GRAB_W * GRAB_H) };
 }
 
 export function logDemoui(msg) {
@@ -89,6 +92,8 @@ export async function hideDemoui({
   let seen = false;
   let toggles = 0;
   let closedChecks = 0;
+  let lowest = Infinity;
+  let highest = 0;
   await sleep(CHECK_MS);
   while (isCurrent()) {
     const bar = await check();
@@ -98,6 +103,8 @@ export async function hideDemoui({
       await toggle();
       return "blind";
     }
+    lowest = Math.min(lowest, bar.score);
+    highest = Math.max(highest, bar.score);
     if (bar.visible) {
       if (toggles >= MAX_TOGGLES) {
         log(`still showing after ${toggles} toggles (score ${bar.score.toFixed(2)}) — giving up`);
@@ -115,7 +122,7 @@ export async function hideDemoui({
         return "hidden";
       }
       if (!seen && now() - start >= NEVER_SEEN_MS) {
-        log(`never showed in ${NEVER_SEEN_MS}ms — nothing to hide`);
+        log(`never showed in ${NEVER_SEEN_MS}ms (scores ${lowest.toFixed(2)}-${highest.toFixed(2)}, brightness ${bar.mean.toFixed(0)}) — nothing to hide`);
         return "never-showed";
       }
     }
