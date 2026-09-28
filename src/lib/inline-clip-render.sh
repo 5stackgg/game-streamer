@@ -24,6 +24,12 @@ CLIP_UNBILLED_CAP_MS="${CLIP_UNBILLED_CAP_MS:-2200}"
 # Demo time played unrecorded before each segment, so the seek's aftermath (held
 # frames, smokes re-blooming, sound restarting) never reaches the clip. 0 disables.
 CLIP_PREROLL_MS="${CLIP_PREROLL_MS:-2000}"
+# Motion blur: capture at 2x CLIP_OUTPUT_FPS and blend each frame pair down, so motion
+# reads smooth instead of stepping. 0 = capture at the output rate (no blur).
+CLIP_MOTION_BLUR="${CLIP_MOTION_BLUR:-1}"
+# Repeated-frame fill (A/B, off by default): replace frames cs2 rendered too late to
+# capture with interpolated ones. off | blend (fast, can ghost) | mci (motion-compensated, ~15x realtime).
+CLIP_DEDUP_INTERP="${CLIP_DEDUP_INTERP:-off}"
 CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
 : "${ROUND_TICKS_PATH:=${LOG_DIR:-/tmp/game-streamer}/demo-round-ticks.json}"
 
@@ -958,6 +964,35 @@ warm_pipelines_if_cold() {
   say "WARM-UP: done — pipelines warmed for this cs2 process"
 }
 
+# Per-segment video pass, before any polish/concat so everything downstream still sees
+# CLIP_OUTPUT_FPS: blend a 2x-rate capture down (motion blur), then optionally refill
+# repeated frames. Audio is copied. Keeps the raw capture if ffmpeg fails.
+postprocess_segment() {
+  local f="$1" out="${1}.post.mp4" want="${CLIP_OUTPUT_FPS:-60}" fps vf
+  local filters=()
+  fps=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
+    -of csv=p=0 "$f" 2>/dev/null | awk -F/ '{printf "%d", ($2 > 0) ? $1 / $2 + 0.5 : $1}')
+  if [ "${fps:-0}" -ge $((want * 2)) ]; then
+    filters+=("tmix=frames=2" "fps=${want}")
+  elif [ "${fps:-0}" -gt "$want" ]; then
+    filters+=("fps=${want}")
+  fi
+  case "$CLIP_DEDUP_INTERP" in
+    blend) filters+=("mpdecimate" "minterpolate=fps=${want}:mi_mode=blend") ;;
+    mci) filters+=("mpdecimate" "minterpolate=fps=${want}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1") ;;
+  esac
+  [ "${#filters[@]}" -eq 0 ] && return 0
+  vf=$(IFS=,; printf '%s' "${filters[*]}")
+  say "  post[$SEG_IDX]: ${fps}fps -> ${want}fps via ${vf}"
+  if nice -n 5 ffmpeg -y -hide_banner -loglevel warning -i "$f" -vf "$vf" \
+       -map 0:v -map 0:a? "${FFMPEG_VENC_ARGS[@]}" -c:a copy -movflags +faststart "$out"; then
+    mv -f "$out" "$f"
+  else
+    rm -f "$out"
+    say "  WARN post[$SEG_IDX] failed — keeping the raw capture"
+  fi
+}
+
 # Re-press POV after play: the re-seek reset it and the pre-play re-press no-ops
 # while paused. observer_slot may also have shifted.
 repress_pov_after_play() {
@@ -1076,7 +1111,15 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   say "STEP 6: start capture (paused at $SEG_PRE) -> $SEG_FILE"
   # The gate now also waits out the pre-roll; keep the consumer's record-anyway backstop past it.
   export VKCAP_START_TIMEOUT_MS="${VKCAP_START_TIMEOUT_MS:-20000}"
-  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
+  # Motion blur records at 2x (and 2x bitrate, so the intermediate keeps its quality).
+  SEG_CAPTURE_FPS="${CLIP_OUTPUT_FPS:-60}"
+  SEG_CAPTURE_KBPS="${CLIP_VIDEO_KBPS:-24000}"
+  if [ "$CLIP_MOTION_BLUR" != "0" ] && [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] \
+     && [ "$VKCAP_FELL_BACK" = "0" ]; then
+    SEG_CAPTURE_FPS=$((SEG_CAPTURE_FPS * 2))
+    SEG_CAPTURE_KBPS=$((SEG_CAPTURE_KBPS * 2))
+  fi
+  if ! start_clip_capture "$SEG_FILE" "$SEG_CAPTURE_FPS" "$SEG_CAPTURE_KBPS" 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
@@ -1321,6 +1364,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     'BEGIN{print (d >= 0.5 && b > 1024) ? 1 : 0}')
   if [ "$IS_VALID" = "1" ]; then
     say "  segment $SEG_IDX OK (${SEG_BYTES}B, ${SEG_REAL_DUR}s)"
+    postprocess_segment "$SEG_FILE"
     # Per-segment polish pass — bakes the chip overlay when present.
     # Skipped when no chip applies so the no-chip path keeps GStreamer's
     # capture intact. Also skipped when WILL_FUSE_POLISH_OUTRO=1 — the
