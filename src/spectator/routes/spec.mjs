@@ -120,19 +120,13 @@ export async function hudHandler(_req, res, body) {
   sendJson(res, 200, { ok: true, visible, window: overlayId });
 }
 
-// What the overlay is currently showing, as the pair JTs Hud Manager needs: a
-// hud id (which bundle) and a variant (which layout inside it). Seeded from the
-// pod env and updated on every switch, so hudReloadHandler can rebuild exactly
-// what is on screen.
-//
-// The two used to be one thing. HUD_MODE named a layout of the one bundle that
-// existed (`default`), and the id was hardcoded. It is still honoured as the
-// seed variant so an api that has never heard of HUD_ID behaves as before.
-let activeHudId = process.env.HUD_ID || "default";
-// ?? not ||: an empty HUD_VARIANT is a real answer ("the bundle's own
-// layout"), and || would discard it for the legacy HUD_MODE fallback.
-let activeHudVariant =
-  process.env.HUD_VARIANT ?? process.env.HUD_MODE ?? "horizontal";
+// The boot auto-overlay always opens the builtin; an imported HUD only becomes
+// active once installBundle has put it on disk.
+let activeHudId = "default";
+let activeHudVariant = process.env.HUD_MODE || "horizontal";
+
+const HUD_SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LEGACY_HUD_MODES = new Set(["default", "horizontal", "vertical"]);
 
 async function startOverlay(hudId, variant) {
   const r = await fetch(`http://${HUD_HOST}:${HUD_PORT}/api/overlay/start`, {
@@ -147,18 +141,14 @@ async function startOverlay(hudId, variant) {
   return { ok: true };
 }
 
-// Fetch an imported bundle and hand it to JTs Hud Manager's own installer.
-// Mirrors lib/hud-manager.sh:install_custom_hud, and exists here as well
-// because a hot-swap can name a HUD this pod did not boot with. Returns the id
-// JTHud actually created, which is not necessarily the one we asked for -- it
-// derives the id from the archive when hud.json sits one level deep.
-async function installBundle(bundleUrl) {
-  const archive = await fetch(bundleUrl);
+// JTHud picks the installed id itself (the top-level folder, else the posted
+// filename), so the id is read back from its response rather than assumed.
+async function installBundle(bundleUrl, slug) {
+  const archive = await fetch(bundleUrl, { signal: AbortSignal.timeout(120_000) });
   if (!archive.ok) {
     throw new Error(`bundle fetch failed: ${archive.status}`);
   }
 
-  const slug = /\/huds\/([^/]+)\/bundle\.zip/.exec(bundleUrl)?.[1] ?? "hud";
   const form = new FormData();
   form.append(
     "hud",
@@ -168,7 +158,7 @@ async function installBundle(bundleUrl) {
 
   const installed = await fetch(
     `http://${HUD_HOST}:${HUD_PORT}/api/huds/upload-zip`,
-    { method: "POST", body: form },
+    { method: "POST", body: form, signal: AbortSignal.timeout(60_000) },
   );
   if (!installed.ok) {
     const text = await installed.text().catch(() => "");
@@ -182,24 +172,16 @@ async function installBundle(bundleUrl) {
   return body.id;
 }
 
-// Switch the overlay to another HUD.
-//
-// Two shapes arrive here. `{ hudId, variant, bundleUrl? }` is the current one:
-// a row from the panel's HUD library, where bundleUrl is present only for an
-// imported bundle and the pod installs it on first use. `{ mode }` is what
-// older clients send -- it was only ever a layout of the bundled HUD, so it
-// keeps meaning exactly that.
 export async function hudModeHandler(_req, res, body) {
-  const LAYOUTS = new Set(["default", "horizontal", "vertical"]);
-
   let hudId = typeof body.hudId === "string" && body.hudId ? body.hudId : null;
-  let variant = typeof body.variant === "string" && body.variant ? body.variant : null;
+  let variant = typeof body.variant === "string" ? body.variant : "";
+  const slug = typeof body.slug === "string" ? body.slug : "";
   const bundleUrl =
     typeof body.bundleUrl === "string" && body.bundleUrl ? body.bundleUrl : null;
 
   if (!hudId) {
     const mode = typeof body.mode === "string" ? body.mode : null;
-    if (!mode || !LAYOUTS.has(mode)) {
+    if (!mode || !LEGACY_HUD_MODES.has(mode)) {
       sendJson(res, 400, {
         error: "send a hudId, or a mode of default|horizontal|vertical",
       });
@@ -209,12 +191,16 @@ export async function hudModeHandler(_req, res, body) {
     variant = mode;
   }
 
+  if (bundleUrl && !HUD_SLUG_RE.test(slug)) {
+    sendJson(res, 400, { error: "a bundleUrl needs a valid slug" });
+    return;
+  }
+
   try {
+    // Reinstall on every switch: two imports can share a JTHud id, and
+    // upload-zip overwrites it in place.
     if (bundleUrl) {
-      // Re-installing an already-present HUD is a no-op overwrite in JTHud, so
-      // this does not need to track what is installed -- and must not, since a
-      // pod restart empties ~/jthm-huds.
-      hudId = await installBundle(bundleUrl);
+      hudId = await installBundle(bundleUrl, slug);
     }
 
     const r = await startOverlay(hudId, variant);
@@ -225,8 +211,7 @@ export async function hudModeHandler(_req, res, body) {
 
     activeHudId = hudId;
     activeHudVariant = variant;
-    // `mode` echoed back for older callers that read it.
-    sendJson(res, 200, { ok: true, hudId, variant, mode: variant });
+    sendJson(res, 200, { ok: true, hudId, variant });
   } catch (err) {
     sendJson(res, 502, { error: "hud switch failed", detail: String(err) });
   }
