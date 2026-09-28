@@ -24,6 +24,11 @@
 # "horizontal" because that's what the bundled default HUD's "default"
 # variant renders as (they're identical layouts).
 : "${HUD_MODE:=horizontal}"
+: "${HUD_ID:=default}"
+: "${HUD_VARIANT:=}"
+# HUD_SLUG + HUD_BUNDLE_URL are only set for an imported HUD.
+: "${HUD_SLUG:=}"
+: "${HUD_BUNDLE_URL:=}"
 # Injected into the overlay window by auto-overlay.patch, which reads it from
 # disk at did-finish-load. Unset it to run without the camera overlay.
 : "${HUD_CAMERA_OVERLAY_JS:=/opt/hud-manager/camera-overlay.js}"
@@ -34,7 +39,8 @@
 : "${API_TOKEN:=}"
 
 export HUD_BIN HUD_PORT HUD_GSI_PORT HUD_HOST HUD_USERDATA \
-       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE HUD_CAMERA_OVERLAY_JS SPEC_BASE
+       HUD_OVERLAY_W HUD_OVERLAY_H HUD_MODE HUD_VARIANT HUD_ID HUD_SLUG \
+       HUD_BUNDLE_URL HUD_CAMERA_OVERLAY_JS SPEC_BASE
 
 picom_running() { pgrep -x picom >/dev/null 2>&1; }
 
@@ -124,6 +130,32 @@ wait_for_hud_server() {
 }
 
 stop_hud() { pkill -f "$HUD_BIN" 2>/dev/null || true; }
+
+# The spec-server owns which HUD is on screen, so installs and reloads go
+# through it rather than straight to hud-manager.
+install_custom_hud() {
+  [ -z "$HUD_BUNDLE_URL" ] && return 0
+
+  log "installing custom HUD ${HUD_SLUG:-<no slug>} via spec-server"
+  if ! jq -n \
+       --arg hudId "$HUD_ID" \
+       --arg variant "$HUD_VARIANT" \
+       --arg slug "$HUD_SLUG" \
+       --arg bundleUrl "$HUD_BUNDLE_URL" \
+       '{hudId: $hudId, variant: $variant, slug: $slug, bundleUrl: $bundleUrl}' \
+     | curl -fsS -m 180 -X POST -o /dev/null \
+         -H 'content-type: application/json' \
+         --data @- \
+         "$SPEC_BASE/spec/hud-mode"; then
+    warn "custom HUD install failed — staying on the bundled HUD"
+    return 1
+  fi
+}
+
+reload_hud_overlay() {
+  curl -fsS -m 5 -X POST -o /dev/null "$SPEC_BASE/spec/hud-reload" \
+    || warn "/spec/hud-reload failed"
+}
 
 # windowunmap alone is sometimes ignored by Electron windows; offscreen
 # move is the fallback.
