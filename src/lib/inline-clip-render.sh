@@ -24,9 +24,6 @@ CLIP_UNBILLED_CAP_MS="${CLIP_UNBILLED_CAP_MS:-2200}"
 # Demo time played unrecorded before each segment, so the seek's aftermath (held
 # frames, smokes re-blooming, sound restarting) never reaches the clip. 0 disables.
 CLIP_PREROLL_MS="${CLIP_PREROLL_MS:-2000}"
-# Motion blur: capture at 2x CLIP_OUTPUT_FPS and blend each frame pair down, so motion
-# reads smooth instead of stepping. Off by default: the smear read worse than the judder.
-CLIP_MOTION_BLUR="${CLIP_MOTION_BLUR:-0}"
 # Repeated-frame fill (A/B, off by default): replace frames cs2 rendered too late to
 # capture with interpolated ones. off | blend (fast, can ghost) | mci (motion-compensated, ~15x realtime).
 CLIP_DEDUP_INTERP="${CLIP_DEDUP_INTERP:-off}"
@@ -666,12 +663,8 @@ spec_post /demo/exec '{"cmd": "spec_autodirector 0"}'
 
 # Render at this job's capture rate (30 or 60): above it cs2 wanders (e.g. 90-120fps for a
 # 60fps capture), so captured frames land one or two renders apart and motion steps unevenly.
-# Set per job, after load, so boot and the demoui hide keep the launch cap. Motion blur
-# captures at 2x, so it keeps 2x headroom over that.
-if [ -z "${CLIP_FPS_MAX:-}" ]; then
-  CLIP_FPS_MAX="${CLIP_OUTPUT_FPS:-60}"
-  [ "$CLIP_MOTION_BLUR" != "0" ] && CLIP_FPS_MAX=$((CLIP_FPS_MAX * 4))
-fi
+# Set per job, after load, so boot and the demoui hide keep the launch cap.
+CLIP_FPS_MAX="${CLIP_FPS_MAX:-${CLIP_OUTPUT_FPS:-60}}"
 say "STEP 1c: render cap fps_max ${CLIP_FPS_MAX} (output ${CLIP_OUTPUT_FPS:-60}fps)"
 spec_post /demo/exec "{\"cmd\": \"fps_max ${CLIP_FPS_MAX}\"}"
 
@@ -975,26 +968,18 @@ warm_pipelines_if_cold() {
   say "WARM-UP: done — pipelines warmed for this cs2 process"
 }
 
-# Per-segment video pass, before any polish/concat so everything downstream still sees
-# CLIP_OUTPUT_FPS: blend a 2x-rate capture down (motion blur), then optionally refill
-# repeated frames. Audio is copied. Keeps the raw capture if ffmpeg fails.
+# Per-segment video pass, before any polish/concat: optionally refill repeated frames
+# (CLIP_DEDUP_INTERP). Audio is copied. Keeps the raw capture if ffmpeg fails.
 postprocess_segment() {
-  local f="$1" out="${1}.post.mp4" want="${CLIP_OUTPUT_FPS:-60}" fps vf
+  local f="$1" out="${1}.post.mp4" want="${CLIP_OUTPUT_FPS:-60}" vf
   local filters=()
-  fps=$(ffprobe -v error -select_streams v:0 -show_entries stream=r_frame_rate \
-    -of csv=p=0 "$f" 2>/dev/null | awk -F/ '{printf "%d", ($2 > 0) ? $1 / $2 + 0.5 : $1}')
-  if [ "${fps:-0}" -ge $((want * 2)) ]; then
-    filters+=("tmix=frames=2" "fps=${want}")
-  elif [ "${fps:-0}" -gt "$want" ]; then
-    filters+=("fps=${want}")
-  fi
   case "$CLIP_DEDUP_INTERP" in
     blend) filters+=("mpdecimate" "minterpolate=fps=${want}:mi_mode=blend") ;;
     mci) filters+=("mpdecimate" "minterpolate=fps=${want}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1") ;;
   esac
   [ "${#filters[@]}" -eq 0 ] && return 0
   vf=$(IFS=,; printf '%s' "${filters[*]}")
-  say "  post[$SEG_IDX]: ${fps}fps -> ${want}fps via ${vf}"
+  say "  post[$SEG_IDX]: ${vf}"
   if nice -n 5 ffmpeg -y -hide_banner -loglevel warning -i "$f" -vf "$vf" \
        -map 0:v -map 0:a? "${FFMPEG_VENC_ARGS[@]}" -c:a copy -movflags +faststart "$out"; then
     mv -f "$out" "$f"
@@ -1122,15 +1107,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   say "STEP 6: start capture (paused at $SEG_PRE) -> $SEG_FILE"
   # The gate now also waits out the pre-roll; keep the consumer's record-anyway backstop past it.
   export VKCAP_START_TIMEOUT_MS="${VKCAP_START_TIMEOUT_MS:-20000}"
-  # Motion blur records at 2x (and 2x bitrate, so the intermediate keeps its quality).
-  SEG_CAPTURE_FPS="${CLIP_OUTPUT_FPS:-60}"
-  SEG_CAPTURE_KBPS="${CLIP_VIDEO_KBPS:-24000}"
-  if [ "$CLIP_MOTION_BLUR" != "0" ] && [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] \
-     && [ "$VKCAP_FELL_BACK" = "0" ]; then
-    SEG_CAPTURE_FPS=$((SEG_CAPTURE_FPS * 2))
-    SEG_CAPTURE_KBPS=$((SEG_CAPTURE_KBPS * 2))
-  fi
-  if ! start_clip_capture "$SEG_FILE" "$SEG_CAPTURE_FPS" "$SEG_CAPTURE_KBPS" 1; then
+  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
