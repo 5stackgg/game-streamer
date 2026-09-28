@@ -45,19 +45,11 @@ start_status_reporter
 # (drops, no dups) — headroom keeps the 60fps output dup-free + A/V synced. The GPU
 # clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
 : "${CS2_FPS_MAX:=120}"
-# TrueView prediction for the spectated player's view: reconstructs the observed
-# player's real camera/aim by re-running client-side prediction instead of showing
-# tick-sampled server angles. 2 = always predict (smoothest aim; overrides the
-# demo-build-version check so older 5stack demos still get the predicted POV),
-# 1 = predict only on build match, 0 = off. Applied in the demo autoexec.
-# Highlight clips default to 0: TrueView there caused camera jitter, phantom shots and
-# silent POV gunshots (A/B-confirmed). Demo streaming keeps 2.
-if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
-  : "${CS2_DEMO_PREDICT:=0}"
-else
-  : "${CS2_DEMO_PREDICT:=2}"
-fi
-log "TrueView: cl_demo_predict=${CS2_DEMO_PREDICT} (clip batch=${CLIP_BATCH_MODE:-0})"
+# TrueView (cl_demo_predict): 0 = off, 1 = only on a demo/client build match, 2 = always.
+# Off by default: it made playback jitter, showed predicted shots early and dropped
+# the POV player's own gunshots. Smooth beats pixel-perfect.
+: "${CS2_DEMO_PREDICT:=0}"
+log "TrueView: cl_demo_predict=${CS2_DEMO_PREDICT}"
 # Debug overlay: bake cl_showfps + the TrueView status line into the captured clip
 # (cs2's real render fps, and whether TrueView is active, readable straight off
 # the mp4). 0 = off (production, clean clips); 1 = on to diagnose a capture/perf issue.
