@@ -50,9 +50,6 @@ if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ "${CLIP_MOTION_BLUR:-0}" != "0" ]; the
   : "${CS2_FPS_MAX:=240}"
 fi
 : "${CS2_FPS_MAX:=120}"
-# Texture-streaming LOD bias (opt-in): >1 requests smaller textures so streaming keeps up the first
-# time the camera sees an area (the "same spot" hitch). 1 = stock, and skips sv_cheats.
-: "${CS2_TEXTURE_LOD:=1}"
 # TrueView (cl_demo_predict): 0 = off, 1 = only on a demo/client build match, 2 = always.
 # Off by default: it made playback jitter, showed predicted shots early and dropped
 # the POV player's own gunshots. Smooth beats pixel-perfect.
@@ -156,13 +153,6 @@ CS2_CFG_DIR="$CS2_DIR/game/csgo/cfg"
 mkdir -p "$CS2_CFG_DIR"
 write_cs2_video_cfg demo
 
-# Texture LOD cvars (see CS2_TEXTURE_LOD); cheat-flagged, hence sv_cheats. Empty at stock.
-texture_lod_cmds() {
-  [ "$CS2_TEXTURE_LOD" = "1" ] && return 0
-  printf 'sv_cheats 1\nr_texture_lod_scale %s\nr_fallback_texture_lod_scale %s\n' \
-    "$CS2_TEXTURE_LOD" "$((CS2_TEXTURE_LOD + 1))"
-}
-
 read -r -d '' HIDE_UI_CMDS <<'EOF' || true
 snd_mute_losefocus 0
 engine_no_focus_sleep 0
@@ -203,7 +193,6 @@ $SPEC_BINDS_BLOCK
 $DEMO_BINDS_BLOCK
 // TrueView prediction for the spectated view (see CS2_DEMO_PREDICT above).
 cl_demo_predict ${CS2_DEMO_PREDICT}
-$(texture_lod_cmds)
 // X-ray (player outlines through walls): default ON for live demo spectating,
 // OFF for batch-highlights (clips are POV — x-ray would look wrong).
 spec_show_xray $([ "${CLIP_BATCH_MODE:-0}" = "1" ] && echo 0 || echo 1)
@@ -395,28 +384,6 @@ fi
   done
   log "TrueView: no demo-version line in console.log (cl_demo_predict=${CS2_DEMO_PREDICT})"
 ) &
-
-# Re-apply the texture LOD once the demo is up (cheat cvars set at engine init may not
-# survive the demo load) and log the value cs2 actually reports.
-if [ "$CS2_TEXTURE_LOD" != "1" ]; then
-(
-  spec="${SPEC_SERVER_URL:-http://127.0.0.1:${SPEC_SERVER_PORT:-1350}}"
-  for _ in $(seq 1 "$CS2_WINDOW_TIMEOUT"); do
-    s=$(curl -fsS --max-time 3 "$spec/demo/state" 2>/dev/null) || s=""
-    [ -n "$s" ] && [ "$(printf '%s' "$s" | node "$LIB_DIR/clip-helpers.mjs" demoui-hidden 2>/dev/null)" = "1" ] && break
-    sleep 1
-  done
-  offset=$(wc -c < "$CS2_CONSOLE_LOG" 2>/dev/null || echo 0)
-  offset="${offset//[!0-9]/}"
-  lod_cmd="$(texture_lod_cmds | tr '\n' ';')r_texture_lod_scale"
-  curl -fsS --max-time 5 -H 'content-type: application/json' \
-    -d "{\"cmd\": \"$lod_cmd\"}" "$spec/demo/exec" >/dev/null 2>&1
-  sleep 3
-  echo_line=$(tail -c "+$((offset + 1))" "$CS2_CONSOLE_LOG" 2>/dev/null \
-    | grep -a -m1 "r_texture_lod_scale")
-  log "texture LOD: requested ${CS2_TEXTURE_LOD}; cs2 reports: ${echo_line:-<no echo in console.log yet>}"
-) &
-fi
 
 # Surface a silent cs2 crash so the pod doesn't sit in "status=live but
 # no frames".
