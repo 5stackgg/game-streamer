@@ -50,9 +50,9 @@ if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ "${CLIP_MOTION_BLUR:-0}" != "0" ]; the
   : "${CS2_FPS_MAX:=240}"
 fi
 : "${CS2_FPS_MAX:=120}"
-# Texture-streaming LOD bias: >1 requests smaller textures so streaming keeps up the first
+# Texture-streaming LOD bias (opt-in): >1 requests smaller textures so streaming keeps up the first
 # time the camera sees an area (the "same spot" hitch). 1 = stock, and skips sv_cheats.
-: "${CS2_TEXTURE_LOD:=3}"
+: "${CS2_TEXTURE_LOD:=1}"
 # TrueView (cl_demo_predict): 0 = off, 1 = only on a demo/client build match, 2 = always.
 # Off by default: it made playback jitter, showed predicted shots early and dropped
 # the POV player's own gunshots. Smooth beats pixel-perfect.
