@@ -25,8 +25,8 @@ CLIP_UNBILLED_CAP_MS="${CLIP_UNBILLED_CAP_MS:-2200}"
 # frames, smokes re-blooming, sound restarting) never reaches the clip. 0 disables.
 CLIP_PREROLL_MS="${CLIP_PREROLL_MS:-2000}"
 # Motion blur: capture at 2x CLIP_OUTPUT_FPS and blend each frame pair down, so motion
-# reads smooth instead of stepping. 0 = capture at the output rate (no blur).
-CLIP_MOTION_BLUR="${CLIP_MOTION_BLUR:-1}"
+# reads smooth instead of stepping. Off by default: the smear read worse than the judder.
+CLIP_MOTION_BLUR="${CLIP_MOTION_BLUR:-0}"
 # Repeated-frame fill (A/B, off by default): replace frames cs2 rendered too late to
 # capture with interpolated ones. off | blend (fast, can ghost) | mci (motion-compensated, ~15x realtime).
 CLIP_DEDUP_INTERP="${CLIP_DEDUP_INTERP:-off}"

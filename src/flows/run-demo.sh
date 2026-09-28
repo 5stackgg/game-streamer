@@ -46,7 +46,7 @@ start_status_reporter
 # clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
 # Motion blur captures clips at 2x the output rate (see inline-clip-render.sh), so keep
 # the same 2x render headroom over that.
-if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ "${CLIP_MOTION_BLUR:-1}" != "0" ]; then
+if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ "${CLIP_MOTION_BLUR:-0}" != "0" ]; then
   : "${CS2_FPS_MAX:=240}"
 fi
 : "${CS2_FPS_MAX:=120}"
