@@ -50,7 +50,14 @@ start_status_reporter
 # tick-sampled server angles. 2 = always predict (smoothest aim; overrides the
 # demo-build-version check so older 5stack demos still get the predicted POV),
 # 1 = predict only on build match, 0 = off. Applied in the demo autoexec.
-: "${CS2_DEMO_PREDICT:=2}"
+# Highlight clips default to 0: TrueView there caused camera jitter, phantom shots and
+# silent POV gunshots (A/B-confirmed). Demo streaming keeps 2.
+if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
+  : "${CS2_DEMO_PREDICT:=0}"
+else
+  : "${CS2_DEMO_PREDICT:=2}"
+fi
+log "TrueView: cl_demo_predict=${CS2_DEMO_PREDICT} (clip batch=${CLIP_BATCH_MODE:-0})"
 # Debug overlay: bake cl_showfps + the TrueView status line into the captured clip
 # (cs2's real render fps, and whether TrueView is active, readable straight off
 # the mp4). 0 = off (production, clean clips); 1 = on to diagnose a capture/perf issue.
