@@ -44,11 +44,7 @@ start_status_reporter
 # capture samples each present and do-timestamp+videorate decimate 120->60 cleanly
 # (drops, no dups) — headroom keeps the 60fps output dup-free + A/V synced. The GPU
 # clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
-# Motion blur captures clips at 2x the output rate (see inline-clip-render.sh), so keep
-# the same 2x render headroom over that.
-if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ "${CLIP_MOTION_BLUR:-0}" != "0" ]; then
-  : "${CS2_FPS_MAX:=240}"
-fi
+# Clip batches re-cap cs2 to the capture rate once the demo is loaded (batch-highlights.sh).
 : "${CS2_FPS_MAX:=120}"
 # TrueView (cl_demo_predict): 0 = off, 1 = only on a demo/client build match, 2 = always.
 # Off by default: it made playback jitter, showed predicted shots early and dropped
