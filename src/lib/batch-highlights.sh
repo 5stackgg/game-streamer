@@ -194,20 +194,6 @@ process_batch_jobs() {
   done
   say "demo ready after ${waited}s"
 
-  # Render at the capture rate: at 120 cs2 wanders 90-120fps, so captured frames step
-  # unevenly (1 or 2 renders apart). Set only now so the launch cap still covers boot and
-  # the demoui hide. Motion blur captures at 2x, so it keeps 2x headroom over that.
-  local clip_fps_max="${CLIP_FPS_MAX:-}"
-  if [ -z "$clip_fps_max" ]; then
-    clip_fps_max="${CLIP_OUTPUT_FPS:-60}"
-    [ "${CLIP_MOTION_BLUR:-0}" != "0" ] && clip_fps_max=$((clip_fps_max * 4))
-  fi
-  curl --fail --silent --max-time 5 -H 'content-type: application/json' \
-    -d "{\"cmd\": \"fps_max ${clip_fps_max}\"}" \
-    "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" >/dev/null \
-    && say "clip render cap: fps_max ${clip_fps_max}" \
-    || say "WARN could not set fps_max ${clip_fps_max} — clips keep the launch cap"
-
   # Backgrounded upload tails (job N uploads while job N+1 captures).
   # Bounded so a slow API can't stack every clip on local disk at once.
   local -a TAIL_PIDS=() TAIL_JOBS=() TAIL_MARKERS=()
