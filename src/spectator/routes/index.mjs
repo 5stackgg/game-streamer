@@ -9,6 +9,7 @@ import {
   povStateHandler,
   seekStateHandler,
 } from "./capture-fields.mjs";
+import { demouiScoreHandler } from "./demoui.mjs";
 import { gsiHandler } from "./gsi.mjs";
 import {
   autodirectorHandler,
@@ -52,6 +53,7 @@ const ROUTES = new Map([
   ["GET /demo/capture-fields", captureFieldsHandler],
   ["GET /demo/pov-state", povStateHandler],
   ["GET /demo/seek-state", seekStateHandler],
+  ["GET /demo/demoui-score", demouiScoreHandler],
   ["POST /gsi", gsiHandler],
 
   ["POST /spec/click",        clickHandler],
@@ -138,7 +140,7 @@ export async function dispatch(req, res) {
 // per-request lines just drown the log.
 const QUIET_URLS = new Set([
   "/gsi", "/demo/state", "/demo/capture-fields", "/demo/pov-state",
-  "/demo/seek-state",
+  "/demo/seek-state", "/demo/demoui-score",
   // Polled by the HUD overlay to follow the spectated player.
   "/camera/state",
 ]);
