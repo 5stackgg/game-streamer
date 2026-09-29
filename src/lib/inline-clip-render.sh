@@ -422,14 +422,20 @@ demoui_probe() {
 }
 
 # Last check before recording: the bar can open after the start-of-demo hide (e.g. on a
-# slow box), so close it here if it's showing.
+# slow box), so close it here if it's showing. Once seen closed it stays closed for this
+# cs2 process, so later segments and jobs skip the grab (marker reset by batch-highlights).
+DEMOUI_MARKER="${CLIP_DEMOUI_MARKER:-/tmp/game-streamer/.demoui-verified}"
 hide_demoui_before_recording() {
-  local tries=0
-  while [ "$(demoui_probe "seg${SEG_IDX} pre-gate")" = "1" ] && [ "$tries" -lt 3 ]; do
+  [ -f "$DEMOUI_MARKER" ] && return 0
+  local tries=0 shown
+  while :; do
+    shown=$(demoui_probe "seg${SEG_IDX} pre-gate")
+    { [ "$shown" = "1" ] && [ "$tries" -lt 3 ]; } || break
     spec_post /demo/exec '{"cmd": "demoui"}'
     tries=$((tries + 1))
     sleep 0.8
   done
+  if [ "$shown" = "0" ]; then : > "$DEMOUI_MARKER"; fi
 }
 
 log_state() {
