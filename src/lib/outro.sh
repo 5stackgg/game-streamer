@@ -81,6 +81,21 @@ resolve_outro_file() {
   else
     fname="outro_${dims}_${fps}.mp4"
   fi
+  # The api keys a branded outro as outro_<version>_<dims>_<fps>.mp4. Use it only
+  # when that key was made for this clip's own dims and fps, which come from its
+  # spec (and cs2 is capped at that rate per job). A batch pod gets one outro env;
+  # the api keys it on the output all its jobs share and sends none when they
+  # differ. This check is a backstop for a key made for other dims/fps anyway
+  # (for example by an older api that keyed the pod outro on the global clip
+  # settings). Without it, a prior clip's in-pod file of other dims could be
+  # appended (a re-encoding concat fails, and the stream-copy path can ship the
+  # clip with an outro of other dims), or this clip's render would be uploaded
+  # under the other key and poison the shared cache. The dims/fps fallback name
+  # above always passes.
+  if [[ "$fname" != *"_${dims}_${fps}.mp4" ]]; then
+    say "OUTRO: branded outro ${fname} is not for ${dims}@${fps}; using baked stock"
+    printf '%s' "$baked"; return 0
+  fi
   local cached="$cache_dir/$fname"
 
   [ -f "$cached" ] && { printf '%s' "$cached"; return 0; }   # in-pod cache (prior clip, same version)
