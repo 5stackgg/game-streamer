@@ -5,12 +5,14 @@ import { PORT, SRC_DIR } from "../env.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
 import { bumpActivity, demoState } from "../state/demo.mjs";
 import { sendJson } from "../util/http.mjs";
+import { filterOutroEnv } from "./outro-env.mjs";
 
 export async function renderClipHandler(_req, res, body) {
   const jobId   = String(body.job_id ?? "");
   const token   = String(body.token  ?? "");
   const apiBase = String(body.api_base ?? "");
-  const outputDims = String(body.output_dims ?? "1920x1080");
+  const rawDims = String(body.output_dims ?? "1920x1080");
+  const outputDims = /^\d{2,4}x\d{2,4}$/.test(rawDims) ? rawDims : "1920x1080";
   const outputFps  = Number.parseInt(body.output_fps, 10) || 60;
 
   // Multi-segment editor sends `segments`; older callers send a single
@@ -46,6 +48,46 @@ export async function renderClipHandler(_req, res, body) {
     return;
   }
 
+  // Outro/branding env from the api. This endpoint is unauthenticated and the
+  // pod is host-networked, so the POST body is UNTRUSTED. filterOutroEnv keeps
+  // only CLIP_OUTRO_*/CLIP_BRAND_* keys, and all of them or none:
+  //  - the URL-bearing keys must have the S3/MinIO origin the pod gets as
+  //    S3_PUBLIC_ORIGIN (the origin the api's presigned URLs carry; DEMO_URL's
+  //    origin for pods created before it existed), and be the URL as Node
+  //    serializes it: curl, which fetches and uploads the cached outro, reads
+  //    a backslash in the authority as userinfo and would connect to another
+  //    host (see outro-env.mjs). Without this, an attacker could point the
+  //    logo <Img src> (headless Chromium) or the curl GET/PUT at an arbitrary
+  //    internal URL (SSRF) / host (arbitrary write).
+  //  - CLIP_BRAND_ACCENT must be an HSL triple: the Outro puts it in its CSS
+  //    as is, so anything else could make Chromium fetch a url() of the
+  //    caller's choice.
+  //  - the keys must form a complete hit (CLIP_OUTRO_URL) or render
+  //    (CLIP_OUTRO_RENDER=1 with its PUT and logo URLs).
+  // One rejected key drops the whole env, so the render falls back to the
+  // baked stock outro rather than a half-branded one (the stock logo next to
+  // the community's name and accent, and no cache fill).
+  // Prefer the api-provided S3 presign origin (trusted pod env, independent of
+  // the demo's source so faceit/external demos still brand); fall back to
+  // DEMO_URL's origin for pods created before S3_PUBLIC_ORIGIN existed.
+  let allowedOrigin = null;
+  try {
+    allowedOrigin = new URL(
+      process.env.S3_PUBLIC_ORIGIN || process.env.DEMO_URL,
+    ).origin;
+  } catch {
+    allowedOrigin = null;
+  }
+  const { env: outroEnv, dropped } = filterOutroEnv(
+    body.outro_env,
+    allowedOrigin,
+  );
+  if (dropped) {
+    process.stderr.write(
+      `[spec-server] render-clip: dropped outro env (${dropped}); outro falls back to baked\n`,
+    );
+  }
+
   const child = spawn("bash", [`${SRC_DIR}/lib/inline-clip-render.sh`], {
     detached: true,
     stdio: ["ignore", "inherit", "inherit"],
@@ -59,6 +101,7 @@ export async function renderClipHandler(_req, res, body) {
       CLIP_OUTPUT_FPS:    String(outputFps),
       CLIP_TICK_RATE:     String(demoState.tickRate || 64),
       SPEC_SERVER_URL:    `http://127.0.0.1:${PORT}`,
+      ...outroEnv,
     },
   });
   child.unref();
