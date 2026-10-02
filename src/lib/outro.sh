@@ -58,7 +58,7 @@ outro_baked_exists() {
   [ -f "$(_outro_baked_path "$1" "$2")" ]
 }
 
-# Prints the local outro mp4 path to append. Heavy — call once at concat time.
+# Prints the local outro mp4 path to append. Heavy: call once at concat time.
 resolve_outro_file() {
   local dims="$1" fps="$2"
   local baked; baked="$(_outro_baked_path "$dims" "$fps")"
@@ -105,7 +105,7 @@ resolve_outro_file() {
     if _outro_download "$CLIP_OUTRO_URL" "$cached" && _outro_dims_ok "$cached" "$dims"; then
       printf '%s' "$cached"; return 0
     fi
-    say "OUTRO: branded cache download failed/mismatch — using baked stock"
+    say "OUTRO: branded cache download failed/mismatch; using baked stock"
     rm -f "$cached"; printf '%s' "$baked"; return 0
   fi
 
@@ -119,6 +119,6 @@ resolve_outro_file() {
     fi
     printf '%s' "$cached"; return 0
   fi
-  say "OUTRO: branded render failed — using baked stock"
+  say "OUTRO: branded render failed; using baked stock"
   rm -f "$cached"; printf '%s' "$baked"; return 0
 }

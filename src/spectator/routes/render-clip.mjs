@@ -49,8 +49,8 @@ export async function renderClipHandler(_req, res, body) {
 
   // Outro/branding env from the api. This endpoint is unauthenticated and the
   // pod is host-networked, so the POST body is UNTRUSTED. Two gates:
-  //  1. key allowlist — only CLIP_OUTRO_*/CLIP_BRAND_* may reach the render env.
-  //  2. URL-value allowlist — the URL-bearing keys must share the S3/MinIO origin
+  //  1. key allowlist: only CLIP_OUTRO_*/CLIP_BRAND_* may reach the render env.
+  //  2. URL-value allowlist: the URL-bearing keys must share the S3/MinIO origin
   //     the api presigns against (S3_PUBLIC_ORIGIN, falling back to DEMO_URL's
   //     origin). Without this, an attacker could point the logo <Img src>
   //     (headless Chromium) or the curl PUT at an arbitrary internal URL (SSRF) /
@@ -89,7 +89,7 @@ export async function renderClipHandler(_req, res, body) {
       }
       if (!sameOrigin) {
         process.stderr.write(
-          `[spec-server] render-clip: rejected ${k} (not the S3 origin) — outro falls back to baked\n`,
+          `[spec-server] render-clip: rejected ${k} (not the S3 origin); outro falls back to baked\n`,
         );
         continue;
       }

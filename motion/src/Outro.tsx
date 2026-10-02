@@ -522,7 +522,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, acc
                   }}>{display}</span>
                 );
               })
-            : (/* existing 5STACK chars + .gg span — UNCHANGED stock path */
+            : (/* existing 5STACK chars + .gg span: UNCHANGED stock path */
               <>
                 {STACK_CHARS.map((char, i) => {
                   const start = WORDMARK_START + i * LETTER_STAGGER - DECRYPT_PRE_T;
@@ -530,7 +530,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, acc
                   const cycling = t >= start && t < resolve;
                   const resolved = t >= resolve;
                   // Inline-block so each char can carry its own
-                  // opacity/textShadow. Natural width — letter-spacing on
+                  // opacity/textShadow. Natural width: letter-spacing on
                   // the parent gives consistent visual gaps between
                   // chars regardless of glyph width.
                   const cellStyle: React.CSSProperties = {
@@ -582,7 +582,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, acc
                   );
                 })}
 
-                {/* .gg — bullets in scaled, then each char decrypts in
+                {/* .gg: bullets in scaled, then each char decrypts in
                     sequence. The last 'g' is the LOCK moment. */}
                 <span
                   style={{
@@ -597,7 +597,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, acc
                     const cycling = t >= GG_TRIGGER_T && t < resolve;
                     const resolved = t >= resolve;
                     // Default to the natural char so the layout box is
-                    // always reserved — prevents "5STACK" from snapping
+                    // always reserved: prevents "5STACK" from snapping
                     // leftward when .gg first appears. The parent span's
                     // opacity/scale handle the visual entry.
                     let display: string = char;
@@ -674,7 +674,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, acc
 
       {!WORD && (
         <>
-          {/* Subtitle — fades in during the decrypt to set context */}
+          {/* Subtitle: fades in during the decrypt to set context */}
           <div
             style={{
               position: "absolute",
@@ -700,7 +700,7 @@ export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, acc
             The System Behind the Game
           </div>
 
-          {/* YOURS. — Oxanium 900, all caps, matching the wordmark's
+          {/* "YOURS.": Oxanium 900, all caps, matching the wordmark's
               voice. Appears after .gg locks. The period pulses
               synchronously with .gg locking as the brand's signature
               punctuation moment. */}

@@ -849,7 +849,7 @@ rm -f "$CLIP_OUT_FILE" "$CLIP_THUMB_FILE"
 OUTRO_CACHE_DIR="${OUTRO_CACHE_DIR:-$CLIP_OUT_DIR/.outro-cache}"
 
 # Will an outro be appended at concat time? Cheap predicate only (no
-# download/render) — the actual file (cache download / branded render /
+# download/render). The actual file (cache download / branded render /
 # baked stock) is resolved at concat time via resolve_outro_file. The
 # polish-skip gate below reads OUTRO_WILL_APPEND; the fused encode reads it
 # at concat time.
@@ -872,7 +872,7 @@ WILL_FUSE_POLISH_OUTRO=0
 # these dims/fps exists: that guarantees resolve_outro_file yields an existing
 # file at concat (OUTRO_APPENDED=1) even if a branded download/render fails, so
 # the deferred chip is always baked in the fused branch. For dims/fps with no
-# baked fallback (e.g. 30fps), skip fusing — the chip is baked per-segment,
+# baked fallback (e.g. 30fps), skip fusing: the chip is baked per-segment,
 # which stays correct whether or not the branded outro ends up appended.
 if [ "$OUTRO_WILL_APPEND" = "1" ] \
    && outro_baked_exists "${CLIP_OUTPUT_DIMS:-1920x1080}" "${CLIP_OUTPUT_FPS:-60}" \
@@ -886,7 +886,7 @@ elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ] \
 elif [ "$OUTRO_WILL_APPEND" = "1" ] && [ -n "$CHIP_NAME" ]; then
   # no baked fallback for these dims/fps (e.g. 30fps): can't guarantee the fused
   # branch runs, so bake the chip per-segment; branded outro still appended if it renders
-  say "concat: no baked outro for ${CLIP_OUTPUT_DIMS:-1920x1080}@${CLIP_OUTPUT_FPS:-60} — not fusing; chip baked per-segment"
+  say "concat: no baked outro for ${CLIP_OUTPUT_DIMS:-1920x1080}@${CLIP_OUTPUT_FPS:-60}, not fusing; chip baked per-segment"
 fi
 
 # Non-fused path bakes the chip per-segment INSIDE the capture loop, so it has to
@@ -1510,7 +1510,7 @@ if [ "$BRANDING_ENABLED" = "1" ] && [ "${CLIP_DISABLE_OUTRO:-0}" != "1" ]; then
     SEG_COUNT=$((SEG_COUNT + 1))
     OUTRO_APPENDED=1
   else
-    say "OUTRO: no outro available ($OUTRO_FILE) — shipping without outro"
+    say "OUTRO: no outro available ($OUTRO_FILE); shipping without outro"
   fi
 fi
 
