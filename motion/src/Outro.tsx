@@ -29,6 +29,14 @@ const PARTICLE_COUNT = 42;
 const GLYPH_POOL =
   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ▣◈◆◇▤▥⊠⊞⊟⊡※‡†◢◣◤◥▰▱";
 
+// The accent is an HSL triple ("33 94% 58%", "224.3 76.3% 48%"), the pattern
+// the api and render-clip.mjs check CLIP_BRAND_ACCENT against. It goes into
+// the CSS below as is, so anything else (say "0 0% 0%) url(http://...)")
+// could make Chromium fetch a URL. `remotion render` does not run this schema
+// (only the Studio does), so the component checks the accent itself and
+// renders the stock amber for anything else.
+const ACCENT_RE = /^\d{1,3}(\.\d+)? \d{1,3}(\.\d+)?% \d{1,3}(\.\d+)?%$/;
+
 export const outroSchema = z.object({
   width: z.number().int().positive().default(1920),
   height: z.number().int().positive().default(1080),
@@ -36,7 +44,7 @@ export const outroSchema = z.object({
   durationS: z.number().positive().default(3),
   logoUrl: z.string().optional(),
   brandName: z.string().optional(),
-  accent: z.string().optional(),
+  accent: z.string().regex(ACCENT_RE).optional(),
 });
 
 export type OutroProps = z.infer<typeof outroSchema>;
@@ -53,7 +61,7 @@ const easeOutCubic = (x: number) => 1 - Math.pow(1 - x, 3);
 export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, accent }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
-  const ACCENT = accent ?? "33 94% 58%";
+  const ACCENT = accent && ACCENT_RE.test(accent) ? accent : "33 94% 58%";
   const acc = (a: number) => `hsl(${ACCENT} / ${a})`;
   const accSolid = `hsl(${ACCENT})`;
   const t = frame / fps;
