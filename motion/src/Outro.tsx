@@ -332,7 +332,9 @@ export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, acc
     to: 1,
   });
 
-  const WORD = (brandName ?? "").trim().toUpperCase().slice(0, 14) || null;
+  // One space per gap and none at the ends, also after the cut (a trailing
+  // space cell would push the name off center).
+  const WORD = (brandName ?? "").replace(/\s+/g, " ").trim().toUpperCase().slice(0, 14).trim() || null;
   // Auto-fit: shrink titleSize for long names so they never overflow.
   const wordTitleSize = WORD
     ? Math.min(titleSize, Math.round((width * 0.82) / Math.max(WORD.length, 1) / 0.62))
@@ -505,6 +507,12 @@ export const Outro: React.FC<OutroProps> = ({ durationS, logoUrl, brandName, acc
         >
           {WORD
             ? WORD.split("").map((char, i) => {
+                // An inline-block cell holding only a space collapses to
+                // nothing ("ESPORT ADRIA" would read "ESPORTADRIA"), so a
+                // space keeps its width and never cycles a glyph.
+                if (char === " ") {
+                  return <span key={i} style={{ display: "inline-block", whiteSpace: "pre" }}>{" "}</span>;
+                }
                 const start = WORDMARK_START + i * LETTER_STAGGER - DECRYPT_PRE_T;
                 const resolve = WORDMARK_START + i * LETTER_STAGGER + LETTER_DURATION;
                 const cycling = t >= start && t < resolve;
