@@ -230,7 +230,7 @@ frame to CUDA itself; the consumer dies on spawn => the shell retries without ze
 The layer copies each frame into ONE shared image that the consumer reads on the CPU.
 Poking the consumer right after the copy was *submitted* let it read before the copy
 *landed* — the previous frame, or a torn one, depending on GPU timing. With
-`CLIP_FRAME_HANDOFF=1` (**off by default** until it's proven on a node; host-map path only):
+`CLIP_FRAME_HANDOFF` (on by default; `0` turns it off):
 
 1. The layer hands the copy's fence to a helper thread; the present thread doesn't wait.
 2. The helper waits for the fence, pokes, then waits (≤20ms) for the consumer to report
@@ -238,8 +238,9 @@ Poking the consumer right after the copy was *submitted* let it read before the 
 3. The next present drains that before submitting its copy, so the image never changes
    under a read.
 
-The consumer logs `frame handoff ENGAGED`, or a WARN when the layer predates it. Zero-copy
-isn't covered: there `cudaupload` reads the dmabuf later, asynchronously.
+The consumer logs `frame handoff ENGAGED`, or a WARN when the layer predates it. It covers
+zero-copy too: the CUDA copy out of the shared image is synchronous, so the ack still
+follows the read.
 
 ---
 
