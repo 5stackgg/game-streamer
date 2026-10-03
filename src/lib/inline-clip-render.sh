@@ -1050,9 +1050,9 @@ CS2_LOG_OFFSET="${CS2_LOG_OFFSET//[!0-9]/}"; CS2_LOG_OFFSET="${CS2_LOG_OFFSET:-0
 # once compiled they stay warm for the whole process. Steam's Fossilize precache
 # (10GiB on disk) does NOT cover these demo-POV pipelines, so the only cure is to
 # draw the footage once. We replay this segment's range ONCE — fast and uncaptured —
-# then seek back to SEG_START. Runs BEFORE STEP 2 deliberately: the warm's seek-back
-# is a backward seek, and cs2 stalls ~2s after a backward seek ([[seek stall]]); the
-# full STEP 2/3/4 lead-in that runs afterward absorbs that stall before capture.
+# and leave the playhead there. Runs BEFORE STEP 2 deliberately: STEP 3's seek back
+# to the pre-roll is then a backward seek, and cs2 stalls ~2s after a backward seek
+# ([[seek stall]]); the full STEP 2/3/4 lead-in absorbs that stall before capture.
 # (Running it after the POV lock instead put the backward seek immediately before
 # capture and wrecked the whole segment — do not move it.) Gated once per cs2 by a
 # marker (one cs2 serves the whole batch → every later job/segment is then warm).
