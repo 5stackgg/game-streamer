@@ -113,11 +113,28 @@ start_capture() {
   # stale copy so a non-composite path doesn't look composite.
   local hud_ctl="${LOG_DIR:-/tmp/game-streamer}/hud-visible"
   rm -f "$hud_ctl"
-  if vkcapture_available \
-     && pgrep -f '/linuxsteamrt64/cs2' >/dev/null 2>&1 \
-     && command -v find_hud_overlay_window >/dev/null 2>&1; then
-    hud_xid=$(find_hud_overlay_window 2>/dev/null || true)
+  # The HUD window can be briefly missing at stream start (run-demo reloads the
+  # overlay right before this), and one miss silently left a whole replay stream on
+  # the ximagesrc grab — no pacing, no present-hook. Wait for it (HUD_COMPOSITE_WAIT_S,
+  # 10s) and say why when the composite isn't used.
+  local why=""
+  if ! vkcapture_available; then
+    why="vkcapture unavailable"
+  elif ! pgrep -f '/linuxsteamrt64/cs2' >/dev/null 2>&1; then
+    why="cs2 not running"
+  elif ! command -v find_hud_overlay_window >/dev/null 2>&1; then
+    why="no HUD support loaded"
+  else
+    local waited=0
+    while :; do
+      hud_xid=$(find_hud_overlay_window 2>/dev/null || true)
+      [ -n "$hud_xid" ] && break
+      [ "$waited" -ge "${HUD_COMPOSITE_WAIT_S:-10}" ] && { why="HUD overlay window not found after ${waited}s"; break; }
+      sleep 1; waited=$((waited + 1))
+    done
+    [ -n "$hud_xid" ] && [ "$waited" -gt 0 ] && log "  composite: HUD overlay window appeared after ${waited}s"
   fi
+  [ -n "$why" ] && log "  composite unavailable ($why) — ximagesrc grab, no pacing"
   if [ -n "$hud_xid" ]; then
     log "  composite: cs2 present-hook + HUD overlay (xid=$hud_xid, hud=${hud_fps}fps)"
     # sink_0 = cs2 (base), sink_1 = HUD on top. The HUD ximagesrc MUST carry alpha
