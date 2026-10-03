@@ -492,8 +492,10 @@ wait_preroll() {
         played=$(( played + d ))
       fi
       last_pe="$pe"; last_t=$now
-      if [ "$played" -ge "$want" ]; then
-        say "PREROLL: ${want}ms of demo time played in $(( now - t0 ))ms"
+      # The reading is $age ms old and the demo kept playing since (at 1x): count it,
+      # or the gate opens up to that much late (readings up to 750ms old are taken).
+      if [ $(( played + age )) -ge "$want" ]; then
+        say "PREROLL: ${want}ms of demo time played in $(( now - t0 ))ms (last reading ${age}ms old)"
         return 0
       fi
     fi
@@ -773,13 +775,15 @@ say "STEP 1b: disable cs2 auto-director (spec_autodirector 0)"
 # through this job's seeks and lead-ins (it's only set while a segment records).
 spec_post /demo/exec '{"cmd": "spec_autodirector 0; host_framerate 0"}'
 
-# Fixed timestep (default): the capture layer paces cs2 to exactly the output rate
+# Fixed timestep / grid pacing (CLIP_FIXED_TIMESTEP / CLIP_PACE): the capture layer paces cs2 to exactly the output rate
 # while recording, so fps_max only needs headroom above it (run-demo.sh sets 2x).
 # Without it cs2 should render at the capture rate: above it captured frames land one
 # or two renders apart and motion steps unevenly. The cap is set at launch
 # (run-demo.sh) because cs2 ignores a runtime fps_max.
 if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ]; then
   say "STEP 1c: fixed timestep — host_framerate ${CLIP_OUTPUT_FPS:-60} + layer pacing while recording (fps_max ${CS2_FPS_MAX:-?})"
+elif [ "${CLIP_PACE:-0}" = "1" ]; then
+  say "STEP 1c: grid pacing — layer paces to ${CLIP_OUTPUT_FPS:-60}fps while recording, game clock untouched (fps_max ${CS2_FPS_MAX:-?})"
 elif [ "${CS2_FPS_MAX:-}" = "${CLIP_OUTPUT_FPS:-60}" ]; then
   say "STEP 1c: render cap fps_max ${CS2_FPS_MAX} matches output"
 else
@@ -1030,6 +1034,8 @@ ELAPSED_TICKS_TOTAL=0
 # the SAME index once after falling back to ximagesrc (see validation below).
 SEG_IDX=0
 VKCAP_FELL_BACK=0
+VKCAP_RETRY_SEG=""        # segment being redone on ximagesrc after a one-off failure
+VKCAP_ONE_OFF_FAILS=0     # those one-off failures so far (capped, then the job stays on ximagesrc)
 # Parse the segment table once (one node spawn) instead of 3x per
 # segment iteration. POV accountid = steamid64 - 76561197960265728;
 # the lock is applied AFTER seeking + lead-in so the freshly-seeked
@@ -1122,7 +1128,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   SEG_FILE="${SEG_DIR}/seg-$(printf '%03d' "$SEG_IDX").mp4"
   say "------- SEGMENT $((SEG_IDX + 1))/${SEG_COUNT}: ticks=${SEG_START}..${SEG_END} (${SEG_DURATION_MS}ms)"
 
-  # Expected pre-kill lead, so the "KILL seg$N ... at +Nms played" line below can
+  # Expected pre-kill lead, so the "KILL seg$N ... ms of demo time into the clip" line below can
   # be compared against what the API actually asked for instead of eyeballed.
   SEG_KILL_TICK="${SEG_KILLS[$SEG_IDX]:-}"
   SEG_LEAD_MS=""
@@ -1258,11 +1264,16 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     log_spec_slots "after-play"
     wait_preroll "$SEG_PREROLL_MS" "${PLAY_SIG_BEFORE%%|*}" "$PLAY_T0" || true
     clip_capture_go
+    now_ms GATE_MS
   else
     clip_capture_go
+    now_ms GATE_MS
     repress_pov_after_play
     log_spec_slots "after-play"
   fi
+  # The game clock (phase countdown) at the gate, so the KILL line can report the real
+  # demo time into the clip, not wall time rescaled into ticks.
+  IFS='|' read -r _ GATE_PE _ GATE_AGE _ <<<"$(capture_fields_line "${SEG_POV_STEAMID:-}")"
 
   # STEP 7: record SEG_DURATION of playback, billed by WALL-CLOCK. rate is
   # forced to 1, so wall-time == demo-time once playing (we opened the capture
@@ -1296,8 +1307,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   GSI_SIG_FIRST=""     # frozen-capture guard: did GSI ever change?
   GSI_SIG_CHANGED=0
   GSI_SIG_POLLS=0
-  now_ms WALLCLOCK_START_MS
-  PREV_MS=$WALLCLOCK_START_MS
+  # Billing starts at the gate: recording began there, and the checks above (a cs2
+  # fatal probe can take seconds) were recorded but went unbilled, so the clip ran
+  # long and every "+Nt" below was measured from the wrong moment.
+  WALLCLOCK_START_MS=$GATE_MS
+  PREV_MS=$GATE_MS
   while : ; do
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
@@ -1346,7 +1360,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     # verify the kill lands ~lead into the clip. (Detection only — no behavior.)
     if [ -n "$POV_KILLS" ]; then
       if [ -n "$LAST_POV_KILLS" ] && [ "$POV_KILLS" -gt "$LAST_POV_KILLS" ]; then
-        say "KILL seg$SEG_IDX: POV round_kills ${LAST_POV_KILLS}->${POV_KILLS} at +${CUR_DONE_TICKS}t (${PLAYED_MS}ms played, expected ${SEG_LEAD_MS:-?}ms, clock=${PHASE_ENDS:-?})"
+        # Demo time since the gate, off the phase countdown (0.1s resolution; "?" if it
+        # reset in between, e.g. freezetime end or a bomb plant).
+        KILL_LEAD=$(awk -v g="${GATE_PE:-}" -v k="${PHASE_ENDS:-}" -v ga="${GATE_AGE:-0}" \
+          'BEGIN{ if (g == "" || k == "" || k > g) { print "?"; exit } printf "%d", (g - k) * 1000 - ga }')
+        say "KILL seg$SEG_IDX: POV round_kills ${LAST_POV_KILLS}->${POV_KILLS} at ${KILL_LEAD}ms of demo time into the clip (expected ${SEG_LEAD_MS:-?}ms; ${PLAYED_MS}ms wall, clock=${PHASE_ENDS:-?})"
       fi
       LAST_POV_KILLS="$POV_KILLS"
     fi
@@ -1555,11 +1573,19 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     fi
     CONCAT_ENTRY[$SEG_IDX]="$SEG_FILE"
   elif [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] && [ "$VKCAP_FELL_BACK" = "0" ]; then
-    # Empty under vkcapture = the present-hook delivered no frames (e.g. the GTX
-    # 980 can't host-map the layer's dmabuf: "mmap(fd0) failed: Invalid argument").
-    # ximagesrc needs no dmabuf, so switch the whole render to it and redo this
-    # segment. One-shot (VKCAP_FELL_BACK): the failure is per-pod, never thrashes.
-    say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) — falling back to ximagesrc and retrying"
+    # Empty under vkcapture. Never armed = the present-hook delivered no frames (e.g.
+    # the GTX 980 can't host-map the layer's dmabuf: "mmap(fd0) failed: Invalid
+    # argument") — a per-pod failure, so the rest of the render switches to ximagesrc.
+    # Armed = frames were flowing and this capture failed on its own (a wedged
+    # pipeline, a killed consumer): redo just this segment on ximagesrc and go back
+    # to vkcapture for the next one — at most twice, then stay on ximagesrc.
+    if [ "${CLIP_CAPTURE_ARMED:-0}" = "1" ] && [ "$VKCAP_ONE_OFF_FAILS" -lt 2 ]; then
+      VKCAP_ONE_OFF_FAILS=$((VKCAP_ONE_OFF_FAILS + 1))
+      VKCAP_RETRY_SEG=$SEG_IDX
+      say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) after arming — redoing it on ximagesrc, vkcapture again from the next segment"
+    else
+      say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) — falling back to ximagesrc for the rest of the render"
+    fi
     CLIP_CAPTURE_METHOD=ximagesrc; export CLIP_CAPTURE_METHOD
     VKCAP_FELL_BACK=1
     rm -f "$SEG_FILE"
@@ -1567,6 +1593,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   else
     say "WARN segment $SEG_IDX is empty/short (${SEG_BYTES}B, ${SEG_REAL_DUR}s) — dropping from concat"
     rm -f "$SEG_FILE"
+  fi
+  if [ "$VKCAP_RETRY_SEG" = "$SEG_IDX" ]; then
+    CLIP_CAPTURE_METHOD=vkcapture; export CLIP_CAPTURE_METHOD
+    VKCAP_FELL_BACK=0
+    VKCAP_RETRY_SEG=""
   fi
   ELAPSED_TICKS_TOTAL=$((ELAPSED_TICKS_TOTAL + SEG_TICKS))
   SEG_IDX=$((SEG_IDX + 1))

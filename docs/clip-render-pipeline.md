@@ -200,6 +200,31 @@ more than 250ms, which had backed the muxer's audio queue up into an EOS deadloc
 `fps_max` for clip batches is 2x the clip rate: headroom for the catch-up, the layer does
 the exact pacing. An image without the patched layer degrades to the wall-clock capture.
 
+### Grid pacing
+
+`CLIP_PACE=1` (off by default) keeps the exact pacing and frame-count PTS but leaves the
+game clock alone (no `host_framerate`). A frame that misses its 1/fps slot presents in
+the slot it lands in and the missed slots are skipped, keeping the grid's phase, instead
+of the next frames catching up; the layer's poke carries how many slots the frame
+advanced, so the consumer's frame count always equals wall time. That fixes the
+`fps_max` overshoot drops, a render spike shows as an honest repeated frame, and the
+stamps can't drift behind the audio. The consumer's `DEBUG` line reports slots/s, frames,
+skipped slots and how long each frame took to read.
+
+### Zero-copy
+
+`CLIP_ZEROCOPY=1` (off by default). `cudaupload` has never taken DMABuf input on any
+GStreamer, so the consumer imports the image itself: the layer exports the shared image
+as an `OPAQUE_FD` (it reports the allocation size and whether the export worked in the
+texture message), the consumer imports it with CUDA's external-memory API (resolved from
+libcuda at runtime; gst-cuda's headers build against GStreamer's stub `cuda.h`), and each
+frame is one `CuMemcpy2DAsync` + sync into a pooled CUDA buffer pushed as
+`memory:CUDAMemory` on our CUDA context, which `cudaupload` passes through. The copy is
+synchronous, so the frame handoff still acks after the read. Fallbacks: no CUDA => the
+consumer drops the CUDA feature from the `vkcaps` filter (host-map path as before); the
+export or import fails => it asks the layer for the host-mapped image and uploads each
+frame to CUDA itself; the consumer dies on spawn => the shell retries without zero-copy.
+
 ### The frame handoff
 
 The layer copies each frame into ONE shared image that the consumer reads on the CPU.

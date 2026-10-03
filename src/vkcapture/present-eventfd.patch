@@ -1,5 +1,5 @@
 diff --git a/src/capture.c b/src/capture.c
-index 247c04b..a296b26 100644
+index 247c04b..573d140 100644
 --- a/src/capture.c
 +++ b/src/capture.c
 @@ -28,6 +28,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
@@ -13,21 +13,26 @@ index 247c04b..a296b26 100644
  
  static struct {
      int connfd;
-@@ -38,6 +42,13 @@ static struct {
+@@ -38,6 +42,18 @@ static struct {
      bool map_host;
      bool need_reinit;
      uint8_t device_uuid[16];
 +    int present_eventfd;
 +    int pace_fps;
++    bool pace_skip;          // late frames skip the missed grid slots instead of catching up
 +    int64_t pace_next;
++    uint64_t pace_slots;     // grid slots the frame being captured advances (its poke value)
 +    int ack_fd;              // consumer's "read done" socket (frame handoff), or -1
 +    bool ack_dead;           // consumer closed it: stop waiting on acks
 +    uint64_t pokes_sent;     // presents signalled since the fds were installed
 +    uint64_t pokes_acked;    // highest read-done total the consumer reported
++    bool opaque_fd;          // consumer asked for an OPAQUE_FD export (CUDA import)
++    bool export_opaque;      // the current export actually is OPAQUE_FD
++    uint64_t export_size;    // its allocation size (CUDA's import needs it)
  } data;
  
  static bool get_wine_exe(char *buf, size_t bufsize)
-@@ -118,13 +129,21 @@ void capture_init()
+@@ -118,13 +134,21 @@ void capture_init()
  {
      memset(&data, 0, sizeof(data));
      data.connfd = -1;
@@ -50,7 +55,7 @@ index 247c04b..a296b26 100644
          return;
      }
      last_check = now;
-@@ -134,7 +153,17 @@ void capture_update_socket()
+@@ -134,21 +158,80 @@ void capture_update_socket()
      }
  
      struct capture_control_data control;
@@ -69,13 +74,26 @@ index 247c04b..a296b26 100644
      if (n == sizeof(control)) {
          const bool old_no_modifiers = data.no_modifiers;
          const bool old_linear = data.linear;
-@@ -149,6 +178,50 @@ void capture_update_socket()
-             || old_map_host != data.map_host)) {
+         const bool old_map_host = data.map_host;
++        const bool old_opaque_fd = data.opaque_fd;
+         data.accepted = control.capturing == 1;
+         data.no_modifiers = control.no_modifiers == 1;
+         data.linear = control.linear == 1;
+         data.map_host = control.map_host == 1;
++        data.opaque_fd = control.want_opaque_fd == 1;
+         memcpy(data.device_uuid, control.device_uuid, 16);
+         if (data.capturing && (old_no_modifiers != data.no_modifiers
+             || old_linear != data.linear
+-            || old_map_host != data.map_host)) {
++            || old_map_host != data.map_host
++            || old_opaque_fd != data.opaque_fd)) {
              data.need_reinit = true;
          }
-+        // The consumer may ask us to pace presents to an exact fps (0 = off).
-+        if (data.pace_fps != control.pace_fps) {
++        // The consumer may ask us to pace presents to an exact fps (0 = off), and
++        // whether a late frame skips the slots it missed or the grid catches up.
++        if (data.pace_fps != control.pace_fps || data.pace_skip != (control.pace_skip == 1)) {
 +            data.pace_fps = control.pace_fps;
++            data.pace_skip = control.pace_skip == 1;
 +            data.pace_next = 0;
 +        }
 +        // The consumer may hand us (SCM_RIGHTS) an eventfd to poke on every
@@ -120,7 +138,7 @@ index 247c04b..a296b26 100644
      }
      if (n == -1) {
          if (errno == EAGAIN || errno == EWOULDBLOCK) {
-@@ -162,7 +235,203 @@ void capture_update_socket()
+@@ -162,7 +245,221 @@ void capture_update_socket()
          close(data.connfd);
          data.connfd = -1;
          data.accepted = false;
@@ -137,28 +155,36 @@ index 247c04b..a296b26 100644
 +    }
 +}
 +
-+// Poke the consumer's eventfd once per present. Runs on cs2's present/render
-+// thread, so it MUST never block: the fd is EFD_NONBLOCK and the counter
++// Poke the consumer's eventfd for a present, adding the grid slots it advances (1
++// unless skip-pacing skipped slots). Runs on cs2's present/render thread (or the
++// handoff thread), so it MUST never block: the fd is EFD_NONBLOCK and the counter
 +// coalesces, so a slow consumer can never back-pressure the render. Errors are
 +// swallowed (the next present re-pokes).
-+void capture_signal_present()
++static void signal_present_slots(uint64_t slots)
 +{
 +    if (data.present_eventfd < 0) {
 +        return;
+     }
++    ssize_t r = write(data.present_eventfd, &slots, sizeof(slots));
++    if (r == sizeof(slots)) {
++        data.pokes_sent += slots;
 +    }
-+    const uint64_t one = 1;
-+    ssize_t r = write(data.present_eventfd, &one, sizeof(one));
-+    if (r == sizeof(one)) {
-+        data.pokes_sent++;
-+    }
++}
++
++void capture_signal_present()
++{
++    signal_present_slots(data.pace_slots ? data.pace_slots : 1);
 +}
 +
 +// Frame pacing for the consumer that asked for it (pace_fps > 0): hold each present
 +// until the next slot of an absolute 1/pace_fps grid, so the game presents at exactly
 +// pace_fps instead of its own limiter's ~5% overshoot. A late frame (render spike)
-+// goes out immediately and the following frames run unthrottled until the grid is
-+// caught up again; only when it falls more than PACE_MAX_BEHIND_NS behind does the
-+// grid restart from now. Runs on the present thread, before the real present.
++// goes out immediately. Then either the grid catches up (following frames run
++// unthrottled; it restarts from now past PACE_MAX_BEHIND_NS) — for a fixed timestep,
++// where every frame is one game step — or, with pace_skip, the frame takes the slot
++// it landed in and the missed slots are skipped, keeping the grid's phase; its poke
++// carries the slots it advanced so the consumer's frame count stays on the wall
++// clock. Runs on the present thread before the frame is captured and presented.
 +#define PACE_MAX_BEHIND_NS 250000000LL
 +static int64_t pace_now_ns(void)
 +{
@@ -170,12 +196,19 @@ index 247c04b..a296b26 100644
 +
 +void capture_pace_present()
 +{
++    data.pace_slots = 1;
 +    if (data.pace_fps <= 0 || !data.capturing) {
 +        data.pace_next = 0;
 +        return;
 +    }
 +    const int64_t interval = 1000000000LL / data.pace_fps;
 +    const int64_t now = pace_now_ns();
++    if (data.pace_skip && data.pace_next != 0 && now >= data.pace_next) {
++        const int64_t missed = (now - data.pace_next) / interval;
++        data.pace_slots = 1 + (uint64_t)missed;
++        data.pace_next += (missed + 1) * interval;
++        return;
++    }
 +    if (data.pace_next == 0 || now - data.pace_next > PACE_MAX_BEHIND_NS) {
 +        data.pace_next = now + interval;
 +        return;
@@ -247,7 +280,8 @@ index 247c04b..a296b26 100644
 +    void (*wait_copy)(void *opaque, uint64_t token);
 +    void *opaque;
 +    uint64_t token;
-+} handoff = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, NULL, NULL, 0 };
++    uint64_t slots;
++} handoff = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false, false, NULL, NULL, 0, 1 };
 +
 +static void *handoff_main(void *arg)
 +{
@@ -260,10 +294,11 @@ index 247c04b..a296b26 100644
 +        void (*wait_copy)(void *, uint64_t) = handoff.wait_copy;
 +        void *opaque = handoff.opaque;
 +        const uint64_t token = handoff.token;
++        const uint64_t slots = handoff.slots;
 +        pthread_mutex_unlock(&handoff.mutex);
 +
 +        wait_copy(opaque, token);                       // the copy is in the image
-+        capture_signal_present();                       // so the consumer may read it
++        signal_present_slots(slots);                    // so the consumer may read it
 +        capture_wait_frame_ack(HANDOFF_ACK_TIMEOUT_MS); // and the next copy waits for it
 +
 +        pthread_mutex_lock(&handoff.mutex);
@@ -306,6 +341,7 @@ index 247c04b..a296b26 100644
 +    handoff.wait_copy = wait_copy;
 +    handoff.opaque = opaque;
 +    handoff.token = token;
++    handoff.slots = data.pace_slots ? data.pace_slots : 1;   // this frame's, before the next pace
 +    handoff.pending = true;
 +    pthread_cond_signal(&handoff.cond);
 +    pthread_mutex_unlock(&handoff.mutex);
@@ -319,38 +355,64 @@ index 247c04b..a296b26 100644
 +    pthread_mutex_lock(&handoff.mutex);
 +    while (handoff.pending) {
 +        pthread_cond_wait(&handoff.cond, &handoff.mutex);
-     }
++    }
 +    pthread_mutex_unlock(&handoff.mutex);
  }
  
  void capture_init_shtex(
-@@ -182,6 +451,10 @@ void capture_init_shtex(
+@@ -182,6 +479,13 @@ void capture_init_shtex(
      td.winid = winid;
      td.flip = flip;
      td.color_space = color_space;
 +    // Echo the pacing we're applying so the consumer only relies on exact pacing
 +    // (fixed-timestep capture) when this layer actually does it.
 +    td.pace_fps = (uint8_t)data.pace_fps;
++    td.pace_skip = data.pace_skip ? 1 : 0;
++    td.opaque_fd = data.export_opaque ? 1 : 0;
++    td.mem_size = data.export_size;
 +    td.frame_ack = capture_frame_ack_enabled() ? 1 : 0;
  
      struct msghdr msg = {0};
  
+@@ -245,6 +549,19 @@ bool capture_allocate_map_host()
+     return data.map_host;
+ }
+ 
++bool capture_allocate_opaque_fd()
++{
++    return data.opaque_fd;
++}
++
++// What the next capture_init_shtex reports: whether the fd is an OPAQUE_FD export
++// (else DMA_BUF) and the allocation size, which a CUDA import of it needs.
++void capture_set_export_info(bool opaque_fd, uint64_t mem_size)
++{
++    data.export_opaque = opaque_fd;
++    data.export_size = mem_size;
++}
++
+ bool capture_compare_device_uuid(uint8_t uuid[16])
+ {
+     return memcmp(data.device_uuid, uuid, 16) == 0;
 diff --git a/src/capture.h b/src/capture.h
-index d8e4b4d..72719c6 100644
+index d8e4b4d..6cde994 100644
 --- a/src/capture.h
 +++ b/src/capture.h
-@@ -69,7 +69,9 @@ struct capture_texture_data {
+@@ -69,7 +69,12 @@ struct capture_texture_data {
      uint32_t winid;
      uint8_t flip;
      uint32_t color_space;
 -    uint8_t padding[65];
 +    uint8_t pace_fps;
 +    uint8_t frame_ack;
-+    uint8_t padding[63];
++    uint8_t pace_skip;
++    uint8_t opaque_fd;
++    uint64_t mem_size;
++    uint8_t padding[53];
  } __attribute__((packed));
  
  #define CAPTURE_TEXTURE_DATA_TYPE 11
-@@ -82,7 +84,10 @@ struct capture_control_data {
+@@ -82,7 +87,12 @@ struct capture_control_data {
      uint8_t linear;
      uint8_t map_host;
      uint8_t device_uuid[16];
@@ -358,17 +420,21 @@ index d8e4b4d..72719c6 100644
 +    uint8_t want_present_signal;
 +    uint8_t pace_fps;
 +    uint8_t want_frame_ack;
-+    uint8_t padding[9];
++    uint8_t pace_skip;
++    uint8_t want_opaque_fd;
++    uint8_t padding[7];
  } __attribute__((packed));
  
  #define CAPTURE_CONTROL_DATA_TYPE 10
-@@ -96,6 +101,12 @@ void capture_init_shtex(
+@@ -96,6 +106,14 @@ void capture_init_shtex(
          int offsets[4], uint64_t modifier, uint32_t winid,
          bool flip, uint32_t color_space, int nfd, int fds[4]);
  void capture_stop();
 +void capture_signal_present();
 +void capture_pace_present();
 +bool capture_frame_ack_enabled();
++bool capture_allocate_opaque_fd();
++void capture_set_export_info(bool opaque_fd, uint64_t mem_size);
 +void capture_handoff_frame(void (*wait_copy)(void *opaque, uint64_t token),
 +        void *opaque, uint64_t token);
 +void capture_handoff_drain();
@@ -376,10 +442,18 @@ index d8e4b4d..72719c6 100644
  bool capture_should_stop();
  bool capture_should_init();
 diff --git a/src/vklayer.c b/src/vklayer.c
-index d8b6f6a..4731058 100644
+index d8b6f6a..ca4b74a 100644
 --- a/src/vklayer.c
 +++ b/src/vklayer.c
-@@ -422,6 +422,7 @@ static void vk_shtex_wait_until_idle(struct vk_data *data)
+@@ -68,6 +68,7 @@ struct vk_swap_data {
+     VkImage export_image;
+     VkFormat export_format;
+     VkDeviceMemory export_mem;
++    VkDeviceSize export_size;
+     VkImage *swap_images;
+     uint32_t image_count;
+ 
+@@ -422,6 +423,7 @@ static void vk_shtex_wait_until_idle(struct vk_data *data)
  
  static void vk_shtex_free(struct vk_data *data)
  {
@@ -387,7 +461,85 @@ index d8b6f6a..4731058 100644
      vk_shtex_wait_until_idle(data);
  
      struct vk_swap_data *swap = swap_walk_begin(data);
-@@ -1001,7 +1002,8 @@ static void vk_shtex_destroy_frame_objects(struct vk_data *data,
+@@ -588,9 +590,14 @@ static int32_t vk_format_to_drm(VkFormat vk)
+     return -1;
+ }
+ 
++// opaque: export the shared image as an OPAQUE_FD (for a CUDA import by the
++// consumer) instead of a DMA_BUF.
+ static inline bool vk_shtex_init_vulkan_tex(struct vk_data *data,
+-        struct vk_swap_data *swap)
++        struct vk_swap_data *swap, bool opaque)
+ {
++    const VkExternalMemoryHandleTypeFlagBits handle_type = opaque
++        ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT
++        : VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+     struct vk_device_funcs *funcs = &data->funcs;
+     struct vk_inst_funcs *ifuncs =
+         get_inst_funcs_by_physical_device(data->phy_device);
+@@ -615,7 +622,7 @@ static inline bool vk_shtex_init_vulkan_tex(struct vk_data *data,
+ 
+     VkExternalMemoryImageCreateInfo ext_mem_image_info = {};
+     ext_mem_image_info.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+-    ext_mem_image_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    ext_mem_image_info.handleTypes = handle_type;
+ 
+     VkImageCreateInfo img_info = {};
+     img_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+@@ -751,7 +758,7 @@ static inline bool vk_shtex_init_vulkan_tex(struct vk_data *data,
+ 
+     VkExportMemoryAllocateInfo memory_export_info = {};
+     memory_export_info.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+-    memory_export_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    memory_export_info.handleTypes = handle_type;
+ 
+     VkMemoryDedicatedAllocateInfo memory_dedicated_info = {};
+     memory_dedicated_info.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+@@ -762,6 +769,7 @@ static inline bool vk_shtex_init_vulkan_tex(struct vk_data *data,
+     memi.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+     memi.pNext = &memory_dedicated_info;
+     memi.allocationSize = memr.memoryRequirements.size;
++    swap->export_size = memi.allocationSize;
+ 
+     bool allocated = false;
+     uint32_t mem_req_bits = same_device ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+@@ -820,7 +828,7 @@ static inline bool vk_shtex_init_vulkan_tex(struct vk_data *data,
+     VkMemoryGetFdInfoKHR gfdi = {};
+     gfdi.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+     gfdi.memory = swap->export_mem;
+-    gfdi.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
++    gfdi.handleType = handle_type;
+     res = funcs->GetMemoryFdKHR(device, &gfdi, &fd);
+     if (VK_SUCCESS != res) {
+         hlog("GetMemoryFdKHR failed %s", result_to_str(res));
+@@ -880,9 +888,24 @@ static inline bool vk_shtex_init_vulkan_tex(struct vk_data *data,
+ 
+ static bool vk_shtex_init(struct vk_data *data, struct vk_swap_data *swap)
+ {
+-    if (!vk_shtex_init_vulkan_tex(data, swap)) {
+-        return false;
++    bool opaque = capture_allocate_opaque_fd();
++    if (!vk_shtex_init_vulkan_tex(data, swap, opaque)) {
++        if (!opaque) {
++            return false;
++        }
++        // The consumer reads the texture message's opaque_fd=0 and switches to
++        // the host-mapped path, so a driver that can't export this is no dead end.
++        hlog("OPAQUE_FD export failed, falling back to DMA_BUF");
++        if (swap->export_mem) {
++            data->funcs.FreeMemory(data->device, swap->export_mem, NULL);   // allocated with NULL too
++            swap->export_mem = VK_NULL_HANDLE;
++        }
++        opaque = false;
++        if (!vk_shtex_init_vulkan_tex(data, swap, false)) {
++            return false;
++        }
+     }
++    capture_set_export_info(opaque, swap->export_size);
+ 
+     data->cur_swap = swap;
+ 
+@@ -1001,7 +1024,8 @@ static void vk_shtex_destroy_frame_objects(struct vk_data *data,
      queue_data->frame_count = 0;
  }
  
@@ -397,7 +549,7 @@ index d8b6f6a..4731058 100644
          struct vk_device_funcs *funcs,
          struct vk_swap_data *swap, uint32_t idx,
          VkQueue queue, VkPresentInfoKHR *info)
-@@ -1206,8 +1208,20 @@ static void vk_shtex_capture(struct vk_data *data,
+@@ -1206,8 +1230,20 @@ static void vk_shtex_capture(struct vk_data *data,
      hlog("QueueSubmit %s", result_to_str(res));
  #endif
  
@@ -420,7 +572,7 @@ index d8b6f6a..4731058 100644
  }
  
  static inline bool valid_rect(struct vk_swap_data *swap)
-@@ -1222,6 +1236,9 @@ static void vk_capture(struct vk_data *data, VkQueue queue,
+@@ -1222,6 +1258,9 @@ static void vk_capture(struct vk_data *data, VkQueue queue,
      // Use first swapchain ??
      struct vk_swap_data *swap = get_swap_data(data, info->pSwapchains[0]);
  
@@ -430,7 +582,7 @@ index d8b6f6a..4731058 100644
      capture_update_socket();
  
      if (capture_should_stop()) {
-@@ -1242,7 +1259,11 @@ static void vk_capture(struct vk_data *data, VkQueue queue,
+@@ -1242,7 +1281,11 @@ static void vk_capture(struct vk_data *data, VkQueue queue,
              return;
          }
  
@@ -443,15 +595,17 @@ index d8b6f6a..4731058 100644
      }
  }
  
-@@ -1258,6 +1279,7 @@ static VkResult VKAPI_CALL OBS_QueuePresentKHR(VkQueue queue,
+@@ -1254,6 +1297,9 @@ static VkResult VKAPI_CALL OBS_QueuePresentKHR(VkQueue queue,
+     struct vk_data *const data = get_device_data_by_queue(queue);
+     struct vk_device_funcs *const funcs = &data->funcs;
+ 
++    // Pace first: the frame is then captured and presented at its grid slot, and
++    // the slot count its poke carries is known before the capture.
++    capture_pace_present();
+     if (data->valid) {
          vk_capture(data, data->graphics_queue ? data->graphics_queue : queue, &api);
      }
- 
-+    capture_pace_present();
-     return funcs->QueuePresentKHR(queue, &api);
- }
- 
-@@ -1703,6 +1725,7 @@ static void VKAPI_CALL OBS_DestroyDevice(VkDevice device,
+@@ -1703,6 +1749,7 @@ static void VKAPI_CALL OBS_DestroyDevice(VkDevice device,
  
      struct vk_data *data = remove_device_data(device);
  

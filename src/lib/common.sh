@@ -113,6 +113,11 @@ cs2_mark_fatal() {
   printf '%s\n' "${1:-cs2 GetClassBaseline fatal}" > "$CS2_FATAL_SENTINEL" 2>/dev/null || true
 }
 
+# mawk (Ubuntu's awk) block-buffers its input from a pipe, so a daemon's lines only
+# surfaced in bursts (often all at exit, every line carrying the same timestamp).
+# -W interactive makes it read line by line; gawk doesn't need or know it.
+if awk -W version 2>&1 | grep -q mawk; then GS_AWK_LINES=(-W interactive); else GS_AWK_LINES=(); fi
+
 # Stdout+stderr of the daemon stream to this process's stderr with a
 # "[<tag>] " prefix per line — k8s container logs become self-describing.
 # nohup detaches so HUP doesn't kill it when launcher scripts exit;
@@ -120,7 +125,7 @@ cs2_mark_fatal() {
 spawn_logged() {
   local tag="$1"; shift
   nohup "$@" \
-    > >(awk -v t="$tag" '{print "["t"] " $0; fflush()}' >&2) \
+    > >(awk "${GS_AWK_LINES[@]}" -v t="$tag" '{print "["t"] " $0; fflush()}' >&2) \
     2>&1 &
   SPAWNED_PID=$!
 }
@@ -419,24 +424,6 @@ _cuda_scale_available() {
     _probe_cache_store GS_CUDASCALE_OK
   fi
   [ "$GS_CUDASCALE_OK" = 1 ]
-}
-
-# True when this pod's `cudaupload` advertises DMABuf import on its sink — the
-# prerequisite for the zero-copy clip path (consumer pushes memory:DMABuf buffers;
-# without import support negotiation fails and the consumer dies mid-render). Older
-# gst-plugins-bad builds lack it. Gates VKCAP_ZEROCOPY so a miss degrades to the
-# host-map copy path up front instead of crashing. Cached per pod.
-_cudaupload_dmabuf_ok() {
-  if ! _probe_cache_load GS_CUDAUPLOAD_DMABUF; then
-    if gst-inspect-1.0 cudaupload 2>/dev/null | grep -q 'memory:DMABuf'; then
-      GS_CUDAUPLOAD_DMABUF=1
-    else
-      GS_CUDAUPLOAD_DMABUF=0
-    fi
-    export GS_CUDAUPLOAD_DMABUF
-    _probe_cache_store GS_CUDAUPLOAD_DMABUF
-  fi
-  [ "$GS_CUDAUPLOAD_DMABUF" = 1 ]
 }
 
 # Emit the scale + colorspace-convert fragment that feeds the encoder.
