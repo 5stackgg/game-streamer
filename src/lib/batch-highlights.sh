@@ -228,4 +228,5 @@ process_batch_jobs() {
   done
 
   say "batch-highlights: drained ${count} job(s) — exiting"
+  declare -F steam_graceful_shutdown >/dev/null 2>&1 && steam_graceful_shutdown
 }
