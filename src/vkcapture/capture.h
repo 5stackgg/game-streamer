@@ -84,7 +84,9 @@ struct capture_texture_data {
     uint8_t pace_fps;              // layer->consumer: the pacing it applies (patched layer; 0 = none)
     uint8_t frame_ack;             // layer->consumer: it hands frames off and waits for our read acks
     uint8_t pace_skip;             // layer->consumer: late frames skip missed slots (pokes carry slots)
-    uint8_t padding[62];
+    uint8_t opaque_fd;             // layer->consumer: fd is an OPAQUE_FD export (CUDA-importable)
+    uint64_t mem_size;             // layer->consumer: its allocation size (the import needs it)
+    uint8_t padding[53];
 } __attribute__((packed));
 
 #define CAPTURE_TEXTURE_DATA_TYPE 11
@@ -101,7 +103,8 @@ struct capture_control_data {
     uint8_t pace_fps;              // consumer->layer: hold presents to this exact fps (0 = off)
     uint8_t want_frame_ack;        // consumer->layer: 2nd SCM_RIGHTS fd is our read-done socket
     uint8_t pace_skip;             // consumer->layer: skip missed grid slots instead of catching up
-    uint8_t padding[8];
+    uint8_t want_opaque_fd;        // consumer->layer: export the image as an OPAQUE_FD (zero-copy)
+    uint8_t padding[7];
 } __attribute__((packed));
 
 #define CAPTURE_CONTROL_DATA_TYPE 10

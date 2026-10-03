@@ -426,24 +426,6 @@ _cuda_scale_available() {
   [ "$GS_CUDASCALE_OK" = 1 ]
 }
 
-# True when this pod's `cudaupload` advertises DMABuf import on its sink — the
-# prerequisite for the zero-copy clip path (consumer pushes memory:DMABuf buffers;
-# without import support negotiation fails and the consumer dies mid-render). Older
-# gst-plugins-bad builds lack it. Gates VKCAP_ZEROCOPY so a miss degrades to the
-# host-map copy path up front instead of crashing. Cached per pod.
-_cudaupload_dmabuf_ok() {
-  if ! _probe_cache_load GS_CUDAUPLOAD_DMABUF; then
-    if gst-inspect-1.0 cudaupload 2>/dev/null | grep -q 'memory:DMABuf'; then
-      GS_CUDAUPLOAD_DMABUF=1
-    else
-      GS_CUDAUPLOAD_DMABUF=0
-    fi
-    export GS_CUDAUPLOAD_DMABUF
-    _probe_cache_store GS_CUDAUPLOAD_DMABUF
-  fi
-  [ "$GS_CUDAUPLOAD_DMABUF" = 1 ]
-}
-
 # Emit the scale + colorspace-convert fragment that feeds the encoder.
 # When the active encoder is a CUDA NVENC element and cudaconvertscale is
 # present, the scale (e.g. 1440p->1080p) and RGBx->NV12 convert run on the

@@ -109,23 +109,17 @@ _start_clip_capture_vkcapture() {
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
   _assert_cuda_chain "$convert" "$enc"
 
-  # Zero-copy dmabuf import (VKCAP_ZEROCOPY, default ON): the consumer hands appsrc
-  # a DEVICE-LOCAL dmabuf and cudaupload imports it on the GPU — the CPU never
-  # copies a frame (vs. the host-map wc_copy + PCIe round-trip). Preflight gates it
-  # to where it can work: the encode chain must be CUDA (a CPU videoconvert can't
-  # consume memory:DMABuf) and this gst's cudaupload must advertise DMABuf import.
-  # Either miss => host-map copy path (correct, just costs the CPU copy).
-  local zc="${VKCAP_ZEROCOPY:-1}"
-  if [ "$zc" != "0" ]; then
-    if [[ "$convert" != *cudaupload* ]]; then
-      warn "zero-copy wanted but encode chain isn't CUDA (no cudaupload) — using host-map copy"
-      zc=0
-    elif ! _cudaupload_dmabuf_ok; then
-      warn "zero-copy wanted but this gst cudaupload lacks memory:DMABuf import — using host-map copy"
-      zc=0
-    else
-      zc=1
-    fi
+  # Zero-copy (CLIP_ZEROCOPY=1, off by default): the layer exports the shared image as
+  # an OPAQUE_FD that the consumer imports into CUDA, and each frame is one GPU-to-GPU
+  # copy pushed as memory:CUDAMemory, which cudaupload passes straight through — no
+  # PCIe readback, no CPU copy. Needs the CUDA encode chain. The consumer falls back by
+  # itself: no CUDA => it drops the CUDA feature from the vkcaps filter (host-map path,
+  # cudaupload uploads as before); no import => it asks the layer for the host-mapped
+  # image and uploads each frame to CUDA itself.
+  local zc="${CLIP_ZEROCOPY:-0}"
+  if [ "$zc" = "1" ] && [[ "$convert" != *cudaupload* ]]; then
+    warn "zero-copy wanted but the encode chain isn't CUDA (no cudaupload) — using host-map copy"
+    zc=0
   fi
 
   log "  clip capture: $out_file (vkcapture/present-hook -> ${out_w}x${out_h}@${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
@@ -155,15 +149,14 @@ _start_clip_capture_vkcapture() {
   local attempt
   for attempt in 1 2; do
     export VKCAP_ZEROCOPY="$zc"
-    # $vfeat tags the appsrc caps with memory:DMABuf so the feature survives the
-    # framerate filter into cudaupload. appsrc (name=vksrc) is filled by the
-    # consumer from cs2's swapchain; everything downstream matches the ximagesrc
-    # path. qtmux faststart=true keeps moov first. videorate + framerate caps ->
-    # exact CFR (appsrc frames are do-timestamp stamped on the live clock, so timing
-    # can wobble; videorate dups/drops to lock $fps).
+    # $vfeat tags the source caps (the vkcaps filter, which the consumer can rewrite)
+    # with memory:CUDAMemory so zero-copy frames reach cudaupload as CUDA memory.
+    # appsrc (name=vksrc) is filled by the consumer from cs2's swapchain; everything
+    # downstream matches the ximagesrc path. qtmux faststart=true keeps moov first.
+    # videorate + framerate caps -> exact CFR (videorate dups/drops to lock $fps).
     local vfeat=""
-    [ "$zc" = "1" ] && { vfeat="(memory:DMABuf)"; log "  clip capture: zero-copy dmabuf import ON (no CPU frame copy)"; }
-    local vsrc="appsrc name=vksrc ! queue ! videorate ! video/x-raw${vfeat},framerate=$fps/1"
+    [ "$zc" = "1" ] && { vfeat="(memory:CUDAMemory)"; log "  clip capture: zero-copy requested (CUDA import, no CPU frame copy)"; }
+    local vsrc="appsrc name=vksrc ! queue ! videorate ! capsfilter name=vkcaps caps=\"video/x-raw${vfeat},framerate=$fps/1\""
     local pipeline
     if [ "$audio" = "1" ]; then
       # Deep pulsesrc buffer (2s) + a non-leaky 2s audio queue: file output has no
