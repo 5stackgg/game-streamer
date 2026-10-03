@@ -228,6 +228,4 @@ process_batch_jobs() {
   done
 
   say "batch-highlights: drained ${count} job(s) — exiting"
-  # The batch owns its own exit, so give Steam all the time its shader merge needs.
-  declare -F steam_graceful_shutdown >/dev/null 2>&1 && steam_graceful_shutdown "${STEAM_SHUTDOWN_TIMEOUT_BATCH:-90}"
 }

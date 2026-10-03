@@ -1405,33 +1405,6 @@ kill_steam() {
   rm -rf /tmp/dumps* /tmp/source_engine_*.lock /tmp/steam_pipe_* 2>/dev/null || true
 }
 
-# Ask the running Steam client to exit cleanly, then SIGKILL whatever is left after
-# <timeout>s (default 20). When cs2 exits, Steam first merges the NVIDIA shader cache
-# (~30s here) and only then exits, so short timeouts kill it mid-merge — the first
-# try (15s) did exactly that and the next boot reprocessed again. Steam only saves its runtime state on a clean exit, and
-# every pod used to end with kill_steam (SIGKILL). Its shader log shows the cost:
-# each boot "Committed bucket ... (AppID 730) from 0 to <manifest>" — it forgot the
-# precompiled shader bucket it had already processed — then spends ~40s replaying
-# 903 pipelines and re-merging the NVIDIA cache before cs2 starts.
-steam_graceful_shutdown() {
-  local timeout="${1:-20}" i
-  if ! pgrep -f 'ubuntu12_32/steam' >/dev/null 2>&1; then
-    kill_steam; return 0
-  fi
-  log "steam: clean shutdown so it saves its shader-cache state (up to ${timeout}s)"
-  pkill -TERM -f '/linuxsteamrt64/cs2' 2>/dev/null || true
-  "$STEAM_HOME/ubuntu12_32/steam" -shutdown >/dev/null 2>&1 &
-  for i in $(seq 1 "$timeout"); do
-    sleep 1
-    if ! pgrep -f 'ubuntu12_32/steam' >/dev/null 2>&1; then
-      log "steam: exited cleanly after ${i}s"
-      kill_steam; return 0
-    fi
-  done
-  log "steam: still running after ${timeout}s — killing"
-  kill_steam
-}
-
 # Summed RSS (kB) of every steamwebhelper process, 0 when none are up.
 steam_webhelper_rss_kb() {
   local total=0 pid rss
