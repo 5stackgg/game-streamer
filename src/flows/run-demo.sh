@@ -70,10 +70,11 @@ log "TrueView: cl_demo_predict=${CS2_DEMO_PREDICT}"
 # Per-node hardware tuning: GPU scale-offload (GS_GPU_SCALE) + GPU clock lock from
 # the detected GPU class (explicit env still wins; cs2 threads left to the engine).
 cs2_autotune
-# VIDEO_KBPS scales with the pixel count of CS2_DISPLAY_RES (1440p is
-# 1.78x 1080p) so encoder quality stays roughly constant across modes.
+# VIDEO_KBPS follows the size that is actually encoded, LIVE_OUTPUT_DIMS
+# (1080p unless set), not CS2_DISPLAY_RES: a 1440p render is scaled down to
+# the output size before encoding, so it needs no more bitrate than 1080p.
 # An explicit override (env or pod spec) still wins via `:=` semantics.
-case "$CS2_DISPLAY_RES" in
+case "${LIVE_OUTPUT_DIMS:-1920x1080}" in
   2560x1440) : "${VIDEO_KBPS:=20000}" ;;
   *)         : "${VIDEO_KBPS:=12000}" ;;
 esac

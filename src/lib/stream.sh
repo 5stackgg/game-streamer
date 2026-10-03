@@ -21,7 +21,15 @@ start_capture() {
   local kbps="${3:-4000}"
   local pointer="${4:-true}"
   local audio="${5:-${CAPTURE_AUDIO:-1}}"
-  local gop=$(( fps * 2 ))
+  # One keyframe a second. A viewer can only start decoding at a keyframe, and
+  # MediaMTX can't ask an SRT publisher for one, so joining the stream and
+  # recovering from packet loss both wait for the next one.
+  local gop="$fps"
+  # SRT holds every packet for this long so lost ones can be resent in time.
+  # MediaMTX's SRT listener never goes below 120ms (it takes the larger of its
+  # own 120 and ours), so that is the floor. Raise it for a streamer node far
+  # from the MediaMTX node: retransmits need a few round trips of headroom.
+  local srt_latency="${SRT_LATENCY_MS:-120}"
   local url="${MEDIAMTX_SRT_BASE}?streamid=publish:${stream_id}"
   local pulse_sink="${PULSE_SINK_NAME:-cs2}"
   local gst_tag="gst-${stream_id:0:8}"
@@ -139,9 +147,9 @@ start_capture() {
 $cs2_src \
 $hud_src \
 pulsesrc device=$pulse_source buffer-time=400000 provide-clock=false ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
-mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=200 auto-reconnect=false"
+mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=$srt_latency auto-reconnect=false"
     else
-      pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=200 auto-reconnect=false \
+      pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=$srt_latency auto-reconnect=false \
 $cs2_src \
 $hud_src"
     fi
@@ -219,7 +227,7 @@ $hud_src"
           ! opusparse \
           ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
         mpegtsmux name=mux alignment=7 \
-          ! srtsink uri="$url" latency=200 auto-reconnect=false
+          ! srtsink uri="$url" latency="$srt_latency" auto-reconnect=false
     else
       spawn_logged "$gst_tag" gst-launch-1.0 -e \
         ximagesrc display-name="$DISPLAY" use-damage=0 show-pointer="$pointer" \
@@ -229,7 +237,7 @@ $hud_src"
           ! $enc \
           ! $parse \
           ! mpegtsmux alignment=7 \
-          ! srtsink uri="$url" latency=200 auto-reconnect=false
+          ! srtsink uri="$url" latency="$srt_latency" auto-reconnect=false
     fi
   fi
 
