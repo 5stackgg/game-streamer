@@ -952,8 +952,9 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
                 log_msg("%s ENGAGED (layer paces at %dfps; frame-count PTS)",
                         st.pace_skip ? "grid pacing" : "fixed timestep", st.pace_fps);
             else
-                log_msg("WARN: layer didn't confirm %dfps pacing (got %d) — wall-clock PTS, no fixed timestep",
-                        st.pace_fps, td->pace_fps);
+                log_msg("WARN: layer didn't confirm %dfps%s pacing (got %dfps%s) — wall-clock PTS",
+                        st.pace_fps, st.pace_skip ? " grid" : "", td->pace_fps,
+                        st.pace_skip && !td->pace_skip ? ", no grid support" : "");
         }
         if (st.zerocopy && st.cuda_import) {
             if (!cuda_import_texture(td)) {
