@@ -1055,13 +1055,17 @@ CS2_LOG_OFFSET="${CS2_LOG_OFFSET//[!0-9]/}"; CS2_LOG_OFFSET="${CS2_LOG_OFFSET:-0
 # stalling the render thread so presents/s collapses (GPU+CPU idle during the dip);
 # once compiled they stay warm for the whole process. Steam's Fossilize precache
 # (10GiB on disk) does NOT cover these demo-POV pipelines, so the only cure is to
-# draw the footage once. We replay this segment's range ONCE — fast and uncaptured —
+# draw the footage once. We replay each segment's range ONCE — fast and uncaptured —
 # and leave the playhead there. Runs BEFORE STEP 2 deliberately: STEP 3's seek back
 # to the pre-roll is then a backward seek, and cs2 stalls ~2s after a backward seek
 # ([[seek stall]]); the full STEP 2/3/4 lead-in absorbs that stall before capture.
 # (Running it after the POV lock instead put the backward seek immediately before
-# capture and wrecked the whole segment — do not move it.) Gated once per cs2 by a
-# marker (one cs2 serves the whole batch → every later job/segment is then warm).
+# capture and wrecked the whole segment — do not move it.) Every segment gets its
+# own pass: warming only the first left later segments compiling live — the same
+# kill in segment 2 held ~0.5s of frames (cs2 ~1000% CPU, GPU ~30%) on every run.
+# The marker lists the tick ranges already warmed for this cs2 (one cs2 serves the
+# whole batch); a range inside one of them is skipped. CLIP_WARMUP_ONCE=1 warms
+# only the first segment, as before.
 # On by default (CLIP_WARMUP=0 disables): with the warm-up off, the first segment of
 # a pod rendered at ~25fps for ~7s while cs2 compiled pipelines on every core (CPU
 # ~1000%, GPU idle) — the 2s pre-roll can't absorb that. After the replay it also
@@ -1091,9 +1095,14 @@ warmup_wait_compile() {
   say "WARM-UP: cs2 still busy (${pct}% CPU) after ${cap}ms — continuing"
 }
 warm_pipelines_if_cold() {
-  local start="$1" dur_ms="$2"
+  local start="$1" dur_ms="$2" end
   [ "${CLIP_WARMUP:-1}" = "1" ] || return 0
-  [ -f "$WARM_MARKER" ] && return 0
+  [ "${CLIP_WARMUP_ONCE:-0}" = "1" ] && [ -s "$WARM_MARKER" ] && return 0
+  end=$(( start + dur_ms * ${CLIP_TICK_RATE:-64} / 1000 ))
+  if [ -f "$WARM_MARKER" ] && awk -v s="$start" -v e="$end" \
+       '$1 <= s && $2 >= e { found=1 } END { exit !found }' "$WARM_MARKER"; then
+    return 0
+  fi
   local rate="${CLIP_WARMUP_RATE:-4}"
   [ "$rate" -lt 1 ] 2>/dev/null && rate=1
   local wait_ms=$(( dur_ms / rate + 2000 ))   # cover the range at $rate + compile-spike margin
@@ -1103,7 +1112,7 @@ warm_pipelines_if_cold() {
   # capture window (start_chip_render) removed the seg0 stutter, so the viewmodel
   # was never the bottleneck — and locking here races the round-transition roster
   # (verify_spec_lock then burns ~8s retrying a stale slot for no gain).
-  say "WARM-UP: pre-compiling pipelines — replaying ${dur_ms}ms at ${rate}x (~${wait_ms}ms, uncaptured) [once per cs2]"
+  say "WARM-UP: pre-compiling pipelines — replaying ticks ${start}-${end} (${dur_ms}ms) at ${rate}x (~${wait_ms}ms, uncaptured)"
   spec_post /demo/pause  '{"force": true}'
   spec_post /demo/seek   "{\"tick\": ${start}}"
   # /demo/seek only queues the gototick, and from a pause it lands paused: a toggle
@@ -1118,8 +1127,8 @@ warm_pipelines_if_cold() {
   # No seek back: STEP 3 seeks to the segment's pre-roll next anyway, and a seek to
   # the tick cs2 is already parked on never shows a GSI change, so it can't settle.
   mkdir -p "$(dirname "$WARM_MARKER")" 2>/dev/null || true
-  : > "$WARM_MARKER"
-  say "WARM-UP: done — pipelines warmed for this cs2 process"
+  echo "$start $end" >> "$WARM_MARKER"
+  say "WARM-UP: done — ticks ${start}-${end} warmed"
 }
 
 # Re-press POV after play: the re-seek reset it and the pre-play re-press no-ops
@@ -1162,7 +1171,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     say "  expected pre-kill lead: ${SEG_LEAD_MS}ms (kill_tick=${SEG_KILL_TICK})"
   fi
 
-  # Warm the Vulkan pipelines once, BEFORE the seek/lead-in, so the warm's
+  # Warm this segment's Vulkan pipelines, BEFORE the seek/lead-in, so the warm's
   # backward seek is absorbed by STEP 2/3/4 before capture (see the function note).
   warm_pipelines_if_cold "$SEG_START" "$SEG_DURATION_MS"
 
