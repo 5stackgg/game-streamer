@@ -26,6 +26,9 @@ start_clip_capture() {
   # samples the wall clock, where a fixed timestep would change the playback speed.
   CLIP_CAPTURE_FIXED_TIMESTEP=0
   CLIP_CAPTURE_TIMING_FILE=""
+  # Set to 1 by wait_clip_capture_ready once the consumer is armed (frames flowing):
+  # tells a one-off failure apart from a pod that can't do vkcapture at all.
+  CLIP_CAPTURE_ARMED=0
   if [ "$method" = "vkcapture" ]; then
     if ! command -v vkcapture-consumer >/dev/null 2>&1; then
       warn "CLIP_CAPTURE_METHOD=vkcapture but vkcapture-consumer not installed — using ximagesrc"
@@ -308,6 +311,7 @@ wait_clip_capture_ready() {
   while [ "$waited" -lt "$timeout_ms" ]; do
     if [ -f "$marker" ]; then
       log "  clip capture armed after ${waited}ms"
+      CLIP_CAPTURE_ARMED=1
       if grep -q '^paced=1' "$marker" 2>/dev/null; then
         CLIP_CAPTURE_FIXED_TIMESTEP=1
       elif [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ]; then

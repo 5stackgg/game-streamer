@@ -1030,6 +1030,8 @@ ELAPSED_TICKS_TOTAL=0
 # the SAME index once after falling back to ximagesrc (see validation below).
 SEG_IDX=0
 VKCAP_FELL_BACK=0
+VKCAP_RETRY_SEG=""        # segment being redone on ximagesrc after a one-off failure
+VKCAP_ONE_OFF_FAILS=0     # those one-off failures so far (capped, then the job stays on ximagesrc)
 # Parse the segment table once (one node spawn) instead of 3x per
 # segment iteration. POV accountid = steamid64 - 76561197960265728;
 # the lock is applied AFTER seeking + lead-in so the freshly-seeked
@@ -1555,11 +1557,19 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     fi
     CONCAT_ENTRY[$SEG_IDX]="$SEG_FILE"
   elif [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] && [ "$VKCAP_FELL_BACK" = "0" ]; then
-    # Empty under vkcapture = the present-hook delivered no frames (e.g. the GTX
-    # 980 can't host-map the layer's dmabuf: "mmap(fd0) failed: Invalid argument").
-    # ximagesrc needs no dmabuf, so switch the whole render to it and redo this
-    # segment. One-shot (VKCAP_FELL_BACK): the failure is per-pod, never thrashes.
-    say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) — falling back to ximagesrc and retrying"
+    # Empty under vkcapture. Never armed = the present-hook delivered no frames (e.g.
+    # the GTX 980 can't host-map the layer's dmabuf: "mmap(fd0) failed: Invalid
+    # argument") — a per-pod failure, so the rest of the render switches to ximagesrc.
+    # Armed = frames were flowing and this capture failed on its own (a wedged
+    # pipeline, a killed consumer): redo just this segment on ximagesrc and go back
+    # to vkcapture for the next one — at most twice, then stay on ximagesrc.
+    if [ "${CLIP_CAPTURE_ARMED:-0}" = "1" ] && [ "$VKCAP_ONE_OFF_FAILS" -lt 2 ]; then
+      VKCAP_ONE_OFF_FAILS=$((VKCAP_ONE_OFF_FAILS + 1))
+      VKCAP_RETRY_SEG=$SEG_IDX
+      say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) after arming — redoing it on ximagesrc, vkcapture again from the next segment"
+    else
+      say "WARN segment $SEG_IDX empty under vkcapture (${SEG_BYTES}B) — falling back to ximagesrc for the rest of the render"
+    fi
     CLIP_CAPTURE_METHOD=ximagesrc; export CLIP_CAPTURE_METHOD
     VKCAP_FELL_BACK=1
     rm -f "$SEG_FILE"
@@ -1567,6 +1577,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   else
     say "WARN segment $SEG_IDX is empty/short (${SEG_BYTES}B, ${SEG_REAL_DUR}s) — dropping from concat"
     rm -f "$SEG_FILE"
+  fi
+  if [ "$VKCAP_RETRY_SEG" = "$SEG_IDX" ]; then
+    CLIP_CAPTURE_METHOD=vkcapture; export CLIP_CAPTURE_METHOD
+    VKCAP_FELL_BACK=0
+    VKCAP_RETRY_SEG=""
   fi
   ELAPSED_TICKS_TOTAL=$((ELAPSED_TICKS_TOTAL + SEG_TICKS))
   SEG_IDX=$((SEG_IDX + 1))
