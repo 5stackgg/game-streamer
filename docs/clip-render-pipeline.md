@@ -202,7 +202,7 @@ the exact pacing. An image without the patched layer degrades to the wall-clock 
 
 ### Grid pacing
 
-`CLIP_PACE=1` (off by default) keeps the exact pacing and frame-count PTS but leaves the
+`CLIP_PACE` (on by default; `CLIP_PACE=0` turns it off) keeps the exact pacing and frame-count PTS but leaves the
 game clock alone (no `host_framerate`). A frame that misses its 1/fps slot presents in
 the slot it lands in and the missed slots are skipped, keeping the grid's phase, instead
 of the next frames catching up; the layer's poke carries how many slots the frame
