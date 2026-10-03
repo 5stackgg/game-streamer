@@ -202,6 +202,7 @@ SAVED_PAUSED=""
 # spike can't make the world jump or the capture repeat a frame. Only with a capture
 # that stamps frames by count (CLIP_CAPTURE_FIXED_TIMESTEP, see clip-capture.sh).
 FIXED_TIMESTEP_ON=0
+HOST_FR_CHECK_OFFSET=""   # console.log offset of the first enable; cleared once reported
 set_fixed_timestep() {
   local fps="$1"
   if [ "$fps" = "0" ]; then
@@ -209,32 +210,65 @@ set_fixed_timestep() {
     spec_post /demo/exec '{"cmd": "host_framerate 0"}'
     FIXED_TIMESTEP_ON=0
   else
-    spec_post /demo/exec "{\"cmd\": \"sv_cheats 1; host_framerate ${fps}\"}"
+    # First enable of the job also queries the cvar (bare name), so the console echo
+    # proves cs2 accepted it — see report_host_framerate.
+    local query=""
+    if [ -z "$HOST_FR_CHECK_OFFSET" ]; then
+      HOST_FR_CHECK_OFFSET=$(wc -c < "${CS2_DIR}/game/csgo/console.log" 2>/dev/null || echo 0)
+      HOST_FR_CHECK_OFFSET="${HOST_FR_CHECK_OFFSET//[!0-9]/}"; HOST_FR_CHECK_OFFSET="${HOST_FR_CHECK_OFFSET:-0}"
+      query="; host_framerate"
+    fi
+    spec_post /demo/exec "{\"cmd\": \"sv_cheats 1; host_framerate ${fps}${query}\"}"
     FIXED_TIMESTEP_ON=1
   fi
 }
 
+# Once per job: echo cs2's console lines about host_framerate since the first enable
+# (the value it reports, or an unknown-command / cheat-protected rejection). Without
+# it taking effect the pacing alone still holds 60, but spikes move the world again.
+report_host_framerate() {
+  [ -n "$HOST_FR_CHECK_OFFSET" ] && [ "$HOST_FR_CHECK_OFFSET" != "done" ] || return 0
+  local lines
+  lines=$(tail -c "+$((HOST_FR_CHECK_OFFSET + 1))" "${CS2_DIR}/game/csgo/console.log" 2>/dev/null \
+    | grep -a 'host_framerate' | tail -4) || true
+  if [ -n "$lines" ]; then
+    while IFS= read -r l; do say "  host_framerate console: ${l}"; done <<<"$lines"
+  else
+    say "  host_framerate console: no echo yet (console.log may be buffered)"
+  fi
+  HOST_FR_CHECK_OFFSET="done"
+}
+
 # With a fixed timestep the video runs on game time and the pulsesrc audio on wall
-# time. The layer's pacing keeps them within a few frames, but a render stall or an
-# unpatched layer leaves them apart, so stretch the audio to the video's length
-# (atempo, pitch-preserving) whenever they differ by more than ~2 frames.
+# time. The layer's pacing keeps them together, but a render stall it can't catch up
+# leaves the video short of the wall clock, so stretch the audio by wall/video
+# (atempo, pitch-preserving) when they differ by more than ~2 frames. The spans come
+# from the consumer (timing file), not the container durations, whose start/stop
+# tails differ by a few tens of ms even when nothing drifted.
 retime_segment_audio() {
-  local f="$1" v a tempo tmp="${1}.retime.mp4"
-  v=$(ffprobe -v error -select_streams v:0 -show_entries stream=duration \
-    -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null)
-  a=$(ffprobe -v error -select_streams a:0 -show_entries stream=duration \
-    -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null)
-  case "$v$a" in ''|*N/A*) return 0 ;; esac
-  tempo=$(awk -v v="$v" -v a="$a" 'BEGIN{
-    d = v - a; if (d < 0) d = -d
-    r = a / v
-    if (d <= 0.035 || r < 0.8 || r > 1.25) { print ""; exit }
-    printf "%.6f", r }')
-  if [ -z "$tempo" ]; then
-    say "  audio retime: video=${v}s audio=${a}s — in sync"
+  local f="$1" timing="$2" video_ns wall_ns tempo tmp="${1}.retime.mp4"
+  if [ -z "$timing" ] || [ ! -s "$timing" ]; then
+    say "  audio retime: no timing from the capture — skipped"
     return 0
   fi
-  say "  audio retime: video=${v}s audio=${a}s -> atempo=${tempo}"
+  video_ns=$(sed -n 's/.*video_ns=\([0-9]*\).*/\1/p' "$timing")
+  wall_ns=$(sed -n 's/.*wall_ns=\([0-9]*\).*/\1/p' "$timing")
+  if [ -z "$video_ns" ] || [ -z "$wall_ns" ] || [ "$video_ns" = "0" ]; then
+    say "  audio retime: unreadable timing ($(cat "$timing" 2>/dev/null)) — skipped"
+    return 0
+  fi
+  tempo=$(awk -v v="$video_ns" -v w="$wall_ns" 'BEGIN{
+    d = v - w; if (d < 0) d = -d
+    r = w / v
+    if (d <= 35e6) { print "sync"; exit }
+    if (r < 0.5 || r > 2.0) { print "range"; exit }
+    printf "%.6f", r }')
+  local spans="video=$((video_ns / 1000000))ms wall=$((wall_ns / 1000000))ms"
+  case "$tempo" in
+    sync)  say "  audio retime: ${spans} — in sync"; return 0 ;;
+    range) say "  WARN audio retime: ${spans} — ratio outside atempo range, left as captured"; return 0 ;;
+  esac
+  say "  audio retime: ${spans} -> atempo=${tempo}"
   if ffmpeg -y -hide_banner -loglevel warning -i "$f" \
        -map 0:v -c:v copy -map 0:a -af "atempo=${tempo}" -c:a aac -b:a 192k \
        -movflags +faststart "$tmp"; then
@@ -731,7 +765,9 @@ api_status "status=rendering" "progress=0.05"
 # what binds F5 -> spec_autodirector 0. The cvar persists across seeks,
 # so once before the segment loop is enough.
 say "STEP 1b: disable cs2 auto-director (spec_autodirector 0)"
-spec_post /demo/exec '{"cmd": "spec_autodirector 0"}'
+# host_framerate 0: a job killed mid-segment can't leave cs2 on a fixed timestep
+# through this job's seeks and lead-ins (it's only set while a segment records).
+spec_post /demo/exec '{"cmd": "spec_autodirector 0; host_framerate 0"}'
 
 # Fixed timestep (default): the capture layer paces cs2 to exactly the output rate
 # while recording, so fps_max only needs headroom above it (run-demo.sh sets 2x).
@@ -1400,8 +1436,10 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   stop_clip_capture
   if [ "$FIXED_TIMESTEP_ON" = "1" ]; then
     set_fixed_timestep 0
-    has_audio_stream "$SEG_FILE" && retime_segment_audio "$SEG_FILE"
+    report_host_framerate
+    has_audio_stream "$SEG_FILE" && retime_segment_audio "$SEG_FILE" "${CLIP_CAPTURE_TIMING_FILE:-}"
   fi
+  [ -n "${CLIP_CAPTURE_TIMING_FILE:-}" ] && rm -f "$CLIP_CAPTURE_TIMING_FILE"
 
   # Sanity check the RAW capture before any polish: capture sometimes
   # produces an mp4 with no decodable frames (cs2 mid-load, audio attach

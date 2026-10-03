@@ -181,6 +181,23 @@ unpause — so the consumer separates *armed* from *recording*:
 Without `VKCAP_START_FILE` the consumer arms and records immediately — that's the path the
 live stream uses, and it's unchanged.
 
+### The fixed timestep
+
+cs2's own `fps_max` limiter overshoots (~63-64 presents/s at `fps_max 60`), so a
+wall-clock capture squeezed 64 renders into 60 slots — `videorate` dropped 3-4 frames a
+second — and any render spike froze frames. While a segment records (`CLIP_FIXED_TIMESTEP`,
+default on):
+
+| Piece | Where | What it does |
+| --- | --- | --- |
+| Exact pacing | `present-eventfd.patch` | The layer holds each present to an absolute 1/fps grid, catching up after a stall of up to 250ms. Only when the consumer asks (`pace_fps`), and it echoes the rate back in the texture message. |
+| Frame-count PTS | `vkcapture-consumer.c` | Present N is stamped `base + N/fps` instead of its arrival time. Engaged only when the layer confirmed pacing; reported as `paced=1` in the ready file. |
+| Fixed game step | `inline-clip-render.sh` | `host_framerate <fps>` from STEP 5 to STEP 8, only on a `paced=1` capture, so each frame is exactly one game step. The first segment logs cs2's console echo (`host_framerate console:`). |
+| Audio retime | `inline-clip-render.sh` | The consumer writes the video (game) and wall spans to `<seg>.timing`; a drift over 35ms stretches the audio by wall/video (`atempo`). |
+
+`fps_max` for clip batches is 2x the clip rate: headroom for the catch-up, the layer does
+the exact pacing. An image without the patched layer degrades to the wall-clock capture.
+
 ---
 
 ## 4. Every wait, and what happens when it expires

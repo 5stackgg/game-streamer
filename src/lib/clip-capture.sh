@@ -20,10 +20,12 @@ start_clip_capture() {
   local method="${CLIP_CAPTURE_METHOD:-vkcapture}"
   CLIP_CAPTURE_READY_FILE=""
   CLIP_CAPTURE_START_FILE=""
-  # 1 once a vkcapture consumer is up with frame-count PTS + layer pacing — only then
-  # may the caller put cs2 on a fixed timestep (host_framerate). ximagesrc samples
-  # the wall clock, so a fixed timestep there would change the playback speed.
+  # Set to 1 by wait_clip_capture_ready once the consumer reports the layer is pacing
+  # and it stamps frames by count — only then may the caller put cs2 on a fixed
+  # timestep (host_framerate). Anything else (ximagesrc, an old layer or consumer)
+  # samples the wall clock, where a fixed timestep would change the playback speed.
   CLIP_CAPTURE_FIXED_TIMESTEP=0
+  CLIP_CAPTURE_TIMING_FILE=""
   if [ "$method" = "vkcapture" ]; then
     if ! command -v vkcapture-consumer >/dev/null 2>&1; then
       warn "CLIP_CAPTURE_METHOD=vkcapture but vkcapture-consumer not installed — using ximagesrc"
@@ -173,18 +175,21 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
     fi
     # Fixed timestep (CLIP_FIXED_TIMESTEP, default on): cs2 steps exactly 1/fps of
     # game time per frame (host_framerate, set by the renderer), the layer holds its
-    # presents to exactly $fps, and the consumer stamps frame N at N/fps — so every
-    # output frame is one game step, with no wall-clock dup/drop from videorate.
-    # Scoped to this spawn so the live stream's consumer never inherits it.
-    local fixed=0
-    [ "${CLIP_FIXED_TIMESTEP:-1}" = "1" ] && fixed=1
-    VKCAP_FRAME_PTS=$fixed VKCAP_PACE_FPS=$([ "$fixed" = 1 ] && echo "$fps" || echo 0) \
+    # presents to exactly $fps, and the consumer stamps present N at N/fps — so every
+    # output frame is one game step, with no wall-clock dup/drop from videorate. The
+    # consumer engages it only when the layer confirms the pacing, and reports that
+    # in the ready file; it writes the video-vs-wall span to the timing file at exit
+    # for the audio retime. Scoped to this spawn so the live consumer never inherits it.
+    local fixed=0 pace=0
+    [ "${CLIP_FIXED_TIMESTEP:-1}" = "1" ] && { fixed=1; pace=$fps; }
+    CLIP_CAPTURE_TIMING_FILE="${out_file}.timing"
+    rm -f "$CLIP_CAPTURE_TIMING_FILE"
+    VKCAP_FRAME_PTS=$fixed VKCAP_PACE_FPS=$pace VKCAP_TIMING_FILE="$CLIP_CAPTURE_TIMING_FILE" \
       spawn_logged vkcap-clip "${capture_pin[@]}" vkcapture-consumer "$pipeline"
     local pid=$SPAWNED_PID
     sleep 0.5
     if kill -0 "$pid" 2>/dev/null; then
       CLIP_CAPTURE_PID=$pid
-      CLIP_CAPTURE_FIXED_TIMESTEP=$fixed
       return 0
     fi
     if [ "$zc" = "1" ]; then
@@ -299,6 +304,11 @@ wait_clip_capture_ready() {
   while [ "$waited" -lt "$timeout_ms" ]; do
     if [ -f "$marker" ]; then
       log "  clip capture armed after ${waited}ms"
+      if grep -q '^paced=1' "$marker" 2>/dev/null; then
+        CLIP_CAPTURE_FIXED_TIMESTEP=1
+      elif [ "${CLIP_FIXED_TIMESTEP:-1}" = "1" ]; then
+        warn "  fixed timestep unavailable: layer didn't confirm pacing (image predates it?) — recording on the wall clock"
+      fi
       return 0
     fi
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then

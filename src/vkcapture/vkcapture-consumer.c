@@ -114,14 +114,19 @@ struct state {
     guint64     present_signals;  // VKCAP_DEBUG: total presents seen
     // Fixed-timestep capture (VKCAP_FRAME_PTS=1, clips only): cs2 runs with
     // host_framerate = fps, so every present is exactly 1/fps of game time. Stamp
-    // frame N at base + N/fps instead of its wall-clock arrival, so a render spike
+    // present N at base + N/fps instead of its wall-clock arrival, so a render spike
     // or catch-up burst never turns into a videorate dup/drop. VKCAP_PACE_FPS asks
     // the (patched) layer to hold presents to that exact rate so game time tracks
-    // wall-clock (and the live pulsesrc audio) as closely as possible.
+    // wall-clock (and the live pulsesrc audio) as closely as possible. Frame-count
+    // PTS only engages (fixed_ts) once the layer echoes that pacing back — without
+    // it presents run at cs2's own rate and counting them would change the speed.
     bool        frame_pts;
     int         pace_fps;
+    bool        fixed_ts;         // engaged: layer confirmed pacing, frame-count PTS
     GstClockTime pts_base;        // running time of the first stamped frame
-    guint64     pts_frames;       // frames stamped so far
+    GstClockTime pts_last_rt;     // running time of the latest stamped frame
+    guint64     pts_frames;       // presents stamped so far (game steps)
+    const char *timing_path;      // VKCAP_TIMING_FILE: video vs wall span, written at exit
     guint64     dbg_last;         // VKCAP_DEBUG: present_signals at last debug tick
     bool        debug;
 
@@ -362,12 +367,19 @@ static void signal_armed(void)
     st.ready_signalled = true;
     st.armed_us = g_get_monotonic_time();
     if (st.ready_path) {
-        FILE *f = fopen(st.ready_path, "w");
+        // Content tells the renderer whether cs2 may go on a fixed timestep. Written
+        // to a temp name and renamed so the waiter never sees an empty file.
+        char *tmp = g_strdup_printf("%s.tmp", st.ready_path);
+        FILE *f = fopen(tmp, "w");
         if (f) {
+            fprintf(f, "paced=%d\n", st.fixed_ts ? 1 : 0);
             fclose(f);
+            if (rename(tmp, st.ready_path) != 0)
+                log_msg("WARN: could not write ready file %s: %s", st.ready_path, strerror(errno));
         } else {
             log_msg("WARN: could not write ready file %s: %s", st.ready_path, strerror(errno));
         }
+        g_free(tmp);
     }
     log_msg("armed%s", st.start_path ? " — holding for start gate" : "");
 }
@@ -391,11 +403,26 @@ static bool start_gate_open(void)
     return st.started;
 }
 
+// Pipeline running time now (clock - base_time): the timeline pulsesrc stamps on.
+static GstClockTime running_time_now(void)
+{
+    GstClockTime rt = 0;
+    GstClock *clk = gst_element_get_clock(st.pipeline);
+    if (clk) {
+        GstClockTime now = gst_clock_get_time(clk);
+        GstClockTime base = gst_element_get_base_time(st.pipeline);
+        if (now > base) rt = now - base;
+        gst_object_unref(clk);
+    }
+    return rt;
+}
+
 // Build a buffer from the current shared frame (or repeat the last good frame
 // while the layer is transiently gone) and push it into the pipeline. Shared by
-// the fps timer (on_tick) and the per-present signal (on_present_signal).
+// the fps timer (on_tick) and the per-present signal (on_present_signal). `steps`
+// is how many presents this push stands for (>1 when eventfd pokes coalesced).
 // Returns false to stop the main loop.
-static bool push_one_frame(void)
+static bool push_one_frame(guint64 steps)
 {
     if (!st.appsrc) return true;
     // Hold in READY until we have a frame AND the gate is open, then go PLAYING so
@@ -478,24 +505,20 @@ static bool push_one_frame(void)
         return true;  // nothing captured yet
     }
 
-    if (st.frame_pts) {
-        // Frame N = base + N/fps. The base is the pipeline running time at the first
+    if (st.fixed_ts) {
+        // Present N = base + N/fps. The base is the pipeline running time at the first
         // frame, the same timeline pulsesrc stamps audio on, so A/V start together.
-        if (st.pts_frames == 0) {
-            GstClock *clk = gst_element_get_clock(st.pipeline);
-            st.pts_base = 0;
-            if (clk) {
-                GstClockTime now = gst_clock_get_time(clk);
-                GstClockTime base = gst_element_get_base_time(st.pipeline);
-                if (now > base) st.pts_base = now - base;
-                gst_object_unref(clk);
-            }
-        }
+        // Coalesced pokes advance N by every present they stand for, so the timeline
+        // stays one step per present (videorate fills the gap with a repeat).
+        GstClockTime rt = running_time_now();
+        if (st.pts_frames == 0) st.pts_base = rt;
+        if (steps < 1) steps = 1;
+        st.pts_frames += steps;
+        st.pts_last_rt = rt;
         out = gst_buffer_make_writable(out);   // a held last_buf is shared
-        GST_BUFFER_PTS(out) = st.pts_base + gst_util_uint64_scale(st.pts_frames, GST_SECOND, st.fps);
+        GST_BUFFER_PTS(out) = st.pts_base + gst_util_uint64_scale(st.pts_frames - 1, GST_SECOND, st.fps);
         GST_BUFFER_DTS(out) = GST_CLOCK_TIME_NONE;
         GST_BUFFER_DURATION(out) = gst_util_uint64_scale(1, GST_SECOND, st.fps);
-        st.pts_frames++;
     }
 
     // Default: PTS is stamped by appsrc (do-timestamp=TRUE); downstream videorate locks CFR.
@@ -517,7 +540,7 @@ static gboolean on_tick(gpointer user)
 {
     (void)user;
     if (st.present_locked) return G_SOURCE_REMOVE;  // presents drive the push now
-    return push_one_frame() ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
+    return push_one_frame(1) ? G_SOURCE_CONTINUE : G_SOURCE_REMOVE;
 }
 
 // First present poke from a patched layer: switch from the wall-clock timer to
@@ -544,7 +567,7 @@ static gboolean on_present_signal(gint fd, GIOCondition cond, gpointer user)
     if (n != (ssize_t)sizeof(cnt)) return G_SOURCE_CONTINUE;  // spurious / EAGAIN
     if (!st.present_locked) engage_present_lock();
     st.present_signals += cnt;
-    if (!push_one_frame()) { st.present_src = 0; return G_SOURCE_REMOVE; }
+    if (!push_one_frame(cnt)) { st.present_src = 0; return G_SOURCE_REMOVE; }
     return G_SOURCE_CONTINUE;
 }
 
@@ -558,20 +581,15 @@ static gboolean on_debug_tick(gpointer user)
     log_msg("DEBUG %s: presents/s=%llu (total=%llu)",
             st.present_locked ? "present-locked" : "timer-fallback",
             (unsigned long long)d, (unsigned long long)st.present_signals);
-    if (st.frame_pts && st.pts_frames > 0) {
-        // Game time (frames/fps) vs wall-clock since the first frame. Positive =
-        // cs2 ran fast (pacing off/unpatched layer), negative = render fell behind.
-        // The clip renderer retimes the audio to the video afterwards either way.
-        GstClock *clk = gst_element_get_clock(st.pipeline);
-        if (clk) {
-            GstClockTime now = gst_clock_get_time(clk) - gst_element_get_base_time(st.pipeline);
-            gst_object_unref(clk);
-            gint64 video_ms = (gint64)(st.pts_frames * 1000 / (guint64)st.fps);
-            gint64 wall_ms  = (gint64)((now - st.pts_base) / GST_MSECOND);
-            log_msg("DEBUG frame-pts: frames=%llu video=%" G_GINT64_FORMAT "ms wall=%" G_GINT64_FORMAT
-                    "ms drift=%+" G_GINT64_FORMAT "ms",
-                    (unsigned long long)st.pts_frames, video_ms, wall_ms, video_ms - wall_ms);
-        }
+    if (st.fixed_ts && st.pts_frames > 0) {
+        // Game time (presents/fps) vs wall-clock over the same frames. Negative =
+        // render fell behind the pacing grid (a stall the layer couldn't catch up).
+        // The clip renderer retimes the audio by the final figures (timing file).
+        gint64 video_ms = (gint64)(st.pts_frames * 1000 / (guint64)st.fps);
+        gint64 wall_ms  = (gint64)((st.pts_last_rt - st.pts_base) / GST_MSECOND) + 1000 / st.fps;
+        log_msg("DEBUG frame-pts: frames=%llu video=%" G_GINT64_FORMAT "ms wall=%" G_GINT64_FORMAT
+                "ms drift=%+" G_GINT64_FORMAT "ms",
+                (unsigned long long)st.pts_frames, video_ms, wall_ms, video_ms - wall_ms);
     }
     return G_SOURCE_CONTINUE;
 }
@@ -680,6 +698,21 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
             break;
         }
         if (st.nfd < 1 || st.fds[0] < 0) break;
+        // Frame-count PTS needs the layer's exact pacing: engage it only when the
+        // layer echoes the rate we asked for (older layers send 0). Decided before
+        // recording starts, then held for the whole capture.
+        if (st.frame_pts && !st.playing) {
+            const bool paced = st.pace_fps > 0 && td->pace_fps == st.pace_fps;
+            if (paced != st.fixed_ts) {
+                st.fixed_ts = paced;
+                g_object_set(st.appsrc, "do-timestamp", paced ? FALSE : TRUE, NULL);
+            }
+            if (paced)
+                log_msg("fixed timestep ENGAGED (layer paces at %dfps; frame-count PTS)", st.pace_fps);
+            else
+                log_msg("WARN: layer didn't confirm %dfps pacing (got %d) — wall-clock PTS, no fixed timestep",
+                        st.pace_fps, td->pace_fps);
+        }
         if (st.zerocopy) {
             // Zero-copy can't cheaply GPU-flip a dmabuf. If the layer reports a
             // flipped (bottom-up) image, drop back to the host-map copy path (which
@@ -842,6 +875,7 @@ int main(int argc, char **argv)
     { const char *t = getenv("VKCAP_START_TIMEOUT_MS"); st.start_timeout_ms = t ? atoi(t) : 10000; }
     st.frame_pts = getenv("VKCAP_FRAME_PTS") && atoi(getenv("VKCAP_FRAME_PTS")) != 0;
     st.pace_fps  = getenv("VKCAP_PACE_FPS") ? atoi(getenv("VKCAP_PACE_FPS")) : 0;
+    { const char *p = getenv("VKCAP_TIMING_FILE"); st.timing_path = (p && *p) ? p : NULL; }
     for (int i = 0; i < 4; i++) st.fds[i] = -1;
 
     if (!st.test_mode) {
@@ -869,10 +903,10 @@ int main(int argc, char **argv)
         if (!src) { log_msg("pipeline has no element named 'vksrc'"); return 2; }
         st.appsrc = GST_APP_SRC(src);
         gst_app_src_set_stream_type(st.appsrc, GST_APP_STREAM_TYPE_STREAM);
-        g_object_set(src, "is-live", TRUE, "format", GST_FORMAT_TIME,
-                     "do-timestamp", st.frame_pts ? FALSE : TRUE, NULL);
+        // do-timestamp stays on until the layer confirms pacing (see the texture handler).
+        g_object_set(src, "is-live", TRUE, "format", GST_FORMAT_TIME, "do-timestamp", TRUE, NULL);
         if (st.frame_pts || st.pace_fps > 0)
-            log_msg("fixed timestep: frame-pts=%d pace=%dfps", st.frame_pts, st.pace_fps);
+            log_msg("fixed timestep requested: frame-pts=%d pace=%dfps", st.frame_pts, st.pace_fps);
         GstBus *bus = gst_element_get_bus(st.pipeline);
         gst_bus_add_watch(bus, on_bus, NULL);
         gst_object_unref(bus);
@@ -936,6 +970,19 @@ int main(int argc, char **argv)
     g_main_loop_run(st.loop);
 
     // teardown
+    if (st.timing_path && st.fixed_ts && st.pts_frames > 0) {
+        // Video (game) span vs the wall-clock span the same frames took: the clip
+        // renderer stretches the pulsesrc audio by wall/video so the two line up.
+        FILE *f = fopen(st.timing_path, "w");
+        if (f) {
+            fprintf(f, "frames=%llu fps=%d video_ns=%llu wall_ns=%llu\n",
+                    (unsigned long long)st.pts_frames, st.fps,
+                    (unsigned long long)gst_util_uint64_scale(st.pts_frames, GST_SECOND, st.fps),
+                    (unsigned long long)(st.pts_last_rt - st.pts_base
+                                         + gst_util_uint64_scale(1, GST_SECOND, st.fps)));
+            fclose(f);
+        }
+    }
     if (st.last_buf) gst_buffer_unref(st.last_buf);
     if (st.dmabuf_alloc) gst_object_unref(st.dmabuf_alloc);
     if (st.hud_pad) gst_object_unref(st.hud_pad);

@@ -81,7 +81,8 @@ struct capture_texture_data {
     uint32_t winid;
     uint8_t flip;
     uint32_t color_space;
-    uint8_t padding[65];
+    uint8_t pace_fps;              // layer->consumer: the pacing it applies (patched layer; 0 = none)
+    uint8_t padding[64];
 } __attribute__((packed));
 
 #define CAPTURE_TEXTURE_DATA_TYPE 11

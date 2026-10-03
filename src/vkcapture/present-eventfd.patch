@@ -1,5 +1,5 @@
 diff --git a/src/capture.c b/src/capture.c
-index 247c04b..e0b1100 100644
+index 247c04b..d12ffff 100644
 --- a/src/capture.c
 +++ b/src/capture.c
 @@ -28,6 +28,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
@@ -141,11 +141,31 @@ index 247c04b..e0b1100 100644
  }
  
  void capture_init_shtex(
+@@ -182,6 +276,9 @@ void capture_init_shtex(
+     td.winid = winid;
+     td.flip = flip;
+     td.color_space = color_space;
++    // Echo the pacing we're applying so the consumer only relies on exact pacing
++    // (fixed-timestep capture) when this layer actually does it.
++    td.pace_fps = (uint8_t)data.pace_fps;
+ 
+     struct msghdr msg = {0};
+ 
 diff --git a/src/capture.h b/src/capture.h
-index d8e4b4d..70afae6 100644
+index d8e4b4d..fb0303f 100644
 --- a/src/capture.h
 +++ b/src/capture.h
-@@ -82,7 +82,9 @@ struct capture_control_data {
+@@ -69,7 +69,8 @@ struct capture_texture_data {
+     uint32_t winid;
+     uint8_t flip;
+     uint32_t color_space;
+-    uint8_t padding[65];
++    uint8_t pace_fps;
++    uint8_t padding[64];
+ } __attribute__((packed));
+ 
+ #define CAPTURE_TEXTURE_DATA_TYPE 11
+@@ -82,7 +83,9 @@ struct capture_control_data {
      uint8_t linear;
      uint8_t map_host;
      uint8_t device_uuid[16];
@@ -156,7 +176,7 @@ index d8e4b4d..70afae6 100644
  } __attribute__((packed));
  
  #define CAPTURE_CONTROL_DATA_TYPE 10
-@@ -96,6 +98,8 @@ void capture_init_shtex(
+@@ -96,6 +99,8 @@ void capture_init_shtex(
          int offsets[4], uint64_t modifier, uint32_t winid,
          bool flip, uint32_t color_space, int nfd, int fds[4]);
  void capture_stop();
