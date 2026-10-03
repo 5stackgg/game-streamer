@@ -1056,11 +1056,14 @@ CS2_LOG_OFFSET="${CS2_LOG_OFFSET//[!0-9]/}"; CS2_LOG_OFFSET="${CS2_LOG_OFFSET:-0
 # (Running it after the POV lock instead put the backward seek immediately before
 # capture and wrecked the whole segment — do not move it.) Gated once per cs2 by a
 # marker (one cs2 serves the whole batch → every later job/segment is then warm).
-# CLIP_WARMUP=0 disables; CLIP_WARMUP_RATE sets the speed (lower = more thorough).
+# Off by default (CLIP_WARMUP=1 enables): every segment's uncaptured lead-in + 2s
+# pre-roll already draws the same spot before recording, and with the fixed
+# timestep a compile stall no longer shows as a frozen frame. CLIP_WARMUP_RATE sets
+# the speed (lower = more thorough).
 WARM_MARKER="${CLIP_WARMUP_MARKER:-/tmp/game-streamer/.pipelines-warmed}"
 warm_pipelines_if_cold() {
   local start="$1" dur_ms="$2"
-  [ "${CLIP_WARMUP:-1}" = "1" ] || return 0
+  [ "${CLIP_WARMUP:-0}" = "1" ] || return 0
   [ -f "$WARM_MARKER" ] && return 0
   local rate="${CLIP_WARMUP_RATE:-4}"
   [ "$rate" -lt 1 ] 2>/dev/null && rate=1

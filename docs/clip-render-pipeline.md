@@ -34,7 +34,7 @@ gantt
 
     section CS2 (exclusive)
     wait demo-ready (GSI + demoui hidden)   :crit, 0, 7
-    warm-up 4x (uncaptured)                 :done, 7, 9
+    warm-up 4x (optional, off by default)   :done, 7, 9
     job 1 capture (round 14, 3 kills)       :active, 9, 14
     job 2 capture (round 19, 2 kills)       :active, 14, 18
     job 3 capture (round 22, 4 kills)       :active, 18, 23
@@ -59,7 +59,7 @@ upload — which is what lets job N+1 start seeking while job N is still uploadi
 | --- | --- | --- |
 | Wait for the demo to be render-ready before job 1 | `DEMO_READY_TIMEOUT` (300s) | Seeking an unloaded demo lands on tick 0 and captures black. Requires GSI to have fired **and** the demo UI panel to be hidden. |
 | At most 2 upload tails in flight | `CLIP_BATCH_MAX_TAILS` (2) | A slow API would otherwise stack every finished clip on local disk at once. The oldest is reaped before the next job starts. |
-| Warm the Vulkan pipelines once per CS2 process | `CLIP_WARMUP_RATE` (4x) | Replays the first segment's range at 4x with nothing recording, so pipeline compilation doesn't land inside a real capture. Guarded by a marker file, dropped when a fresh CS2 starts. |
+| Warm the Vulkan pipelines once per CS2 process (off by default) | `CLIP_WARMUP=1`, `CLIP_WARMUP_RATE` (4x) | Replays the first segment's range at 4x with nothing recording, so pipeline compilation doesn't land inside a real capture. Off by default: each segment's uncaptured lead-in and pre-roll already draw the same spot, and the fixed timestep keeps a compile stall out of the video. Guarded by a marker file, dropped when a fresh CS2 starts. |
 | An engine fatal kills the rest of the batch | `CS2_FATAL_SENTINEL` | Once CS2 dies, remaining jobs are failed fast with a reason instead of capturing frozen frames. |
 
 ---
@@ -74,7 +74,7 @@ These are the `STEP` labels as they print in the render log, in order.
 | `STEP 1b` | `spec_autodirector 0` — otherwise CS2's director fights the POV lock and the camera flickers at segment starts. |
 | `STEP 1a` | Stop the live capture (live pods only — the GPU encoder can't serve stream and clip at once). |
 | prep | Decide branding; **defer** the Remotion player-chip render. Running it during a capture caused a visible stutter, so it's kept outside the capture window. |
-| warm-up | Replay the first range at 4x, uncaptured. Once per CS2 process. |
+| warm-up | Off by default (`CLIP_WARMUP=1`): replay the first range at 4x, uncaptured. Once per CS2 process. |
 | `STEP 2`–`STEP 8` | **Segment loop**, once per kill. Each pass writes one `seg-NNN.mp4`. See below. |
 | polish | Burn the chip overlay into each segment, backgrounded so it overlaps the next segment's capture. Reaped before assembly. |
 | `STEP 9` | Concat segments + append the outro. Tries a stream copy first and verifies the output duration; falls back to a filter-graph re-encode if the copy is refused or the duration drifts >2s. Direct cuts, no fades — crossfades compounded with CS2's seek-load frames into ~1s of dead air per join. |
