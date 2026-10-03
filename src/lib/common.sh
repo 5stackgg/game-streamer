@@ -31,8 +31,8 @@ fi
 # reads this, so it's safe to export globally.
 : "${FOSSILIZE_DISABLE_RATE_LIMITER:=1}"
 : "${MEDIAMTX_SRT_BASE:=srt://mediamtx.5stack.svc.cluster.local:8890}"
-# mediamtx HTTP control API — start_capture polls to verify a publish
-# actually landed (gst-launch loops happily on a failing srt sink).
+# mediamtx HTTP control API — start_capture times connects to it to size the
+# SRT latency (see srt_latency_for_rtt in stream.sh).
 : "${MEDIAMTX_API_BASE:=http://mediamtx.5stack.svc.cluster.local:9997}"
 : "${GAME_STREAM_DOMAIN:=hls.5stack.gg}"
 # LOG_DIR (defaulted above) is a misnomer — k8s captures stdout/stderr;

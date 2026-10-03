@@ -13,6 +13,36 @@ stream_running() {
   [ -n "$(stream_pid "$1")" ]
 }
 
+# Round trip to MediaMTX in ms: the fastest of a few TCP connects to its API,
+# which runs on the same node as its SRT listener. Prints nothing if MediaMTX
+# can't be reached.
+mediamtx_rtt_ms() {
+  local i timing samples=""
+  for i in 1 2 3; do
+    timing=$(curl -o /dev/null -s --max-time 2 \
+      -w '%{time_namelookup} %{time_connect}' \
+      "$MEDIAMTX_API_BASE/v3/paths/list") || break
+    samples+="$timing"$'\n'
+  done
+  # time_connect includes the DNS lookup; the round trip is the handshake.
+  printf '%s' "$samples" | awk '
+    NF == 2 { ms = ($2 - $1) * 1000; if (best == "" || ms < best) best = ms }
+    END { if (best != "") printf "%.1f\n", best }'
+}
+
+# SRT latency in ms for a round trip to MediaMTX. SRT holds every packet for
+# this long so lost ones can be resent in time, which takes a few round trips:
+# 4x the round trip, never under 120ms, the floor MediaMTX's SRT listener
+# enforces anyway (it takes the larger of its own 120 and ours). 200ms when the
+# round trip is unknown, which held up everywhere before it was measured.
+srt_latency_for_rtt() {
+  if [ -z "$1" ]; then
+    echo 200
+    return
+  fi
+  awk -v rtt="$1" 'BEGIN { ms = int(rtt * 4 + 0.999); print (ms < 120 ? 120 : ms) }'
+}
+
 # start_capture <stream-id> [fps] [video-kbps] [show-pointer] [audio]
 #   audio: 1 to include PulseAudio leg (default), 0 video-only
 start_capture() {
@@ -25,11 +55,6 @@ start_capture() {
   # MediaMTX can't ask an SRT publisher for one, so joining the stream and
   # recovering from packet loss both wait for the next one.
   local gop="$fps"
-  # SRT holds every packet for this long so lost ones can be resent in time.
-  # MediaMTX's SRT listener never goes below 120ms (it takes the larger of its
-  # own 120 and ours), so that is the floor. Raise it for a streamer node far
-  # from the MediaMTX node: retransmits need a few round trips of headroom.
-  local srt_latency="${SRT_LATENCY_MS:-120}"
   local url="${MEDIAMTX_SRT_BASE}?streamid=publish:${stream_id}"
   local pulse_sink="${PULSE_SINK_NAME:-cs2}"
   local gst_tag="gst-${stream_id:0:8}"
@@ -50,6 +75,18 @@ start_capture() {
   fi
 
   log "starting capture '${stream_id}' (${out_w}x${out_h}@${fps}fps kbps=$kbps audio=$audio) -> $url"
+
+  # Sized from this node's round trip to MediaMTX, so a far node gets the
+  # headroom it needs and a near one adds no delay. SRT_LATENCY_MS overrides it.
+  local srt_latency="${SRT_LATENCY_MS:-}"
+  if [ -n "$srt_latency" ]; then
+    log "  SRT latency ${srt_latency}ms (SRT_LATENCY_MS)"
+  else
+    local rtt
+    rtt=$(mediamtx_rtt_ms)
+    srt_latency=$(srt_latency_for_rtt "$rtt")
+    log "  SRT latency ${srt_latency}ms (round trip to MediaMTX: ${rtt:-unreachable}${rtt:+ms})"
+  fi
 
   # LIVE_VIDEO_CODEC=h265|h264. Default h264 — falls back to h264 if no NVENC HEVC.
   # Note: HEVC-over-WebRTC is Safari 17+ only; non-HEVC browsers fall back to HLS.
