@@ -109,16 +109,16 @@ _start_clip_capture_vkcapture() {
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
   _assert_cuda_chain "$convert" "$enc"
 
-  # Zero-copy (CLIP_ZEROCOPY=1, off by default): the layer exports the shared image as
+  # Zero-copy (CLIP_ZEROCOPY, on by default; 0 = off): the layer exports the shared image as
   # an OPAQUE_FD that the consumer imports into CUDA, and each frame is one GPU-to-GPU
   # copy pushed as memory:CUDAMemory, which cudaupload passes straight through — no
   # PCIe readback, no CPU copy. Needs the CUDA encode chain. The consumer falls back by
   # itself: no CUDA => it drops the CUDA feature from the vkcaps filter (host-map path,
   # cudaupload uploads as before); no import => it asks the layer for the host-mapped
   # image and uploads each frame to CUDA itself.
-  local zc="${CLIP_ZEROCOPY:-0}"
+  local zc="${CLIP_ZEROCOPY:-1}"
   if [ "$zc" = "1" ] && [[ "$convert" != *cudaupload* ]]; then
-    warn "zero-copy wanted but the encode chain isn't CUDA (no cudaupload) — using host-map copy"
+    log "  clip capture: encode chain isn't CUDA (no cudaupload) — host-map copy, no zero-copy"
     zc=0
   fi
 

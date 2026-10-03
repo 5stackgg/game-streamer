@@ -213,7 +213,7 @@ skipped slots and how long each frame took to read.
 
 ### Zero-copy
 
-`CLIP_ZEROCOPY=1` (off by default). `cudaupload` has never taken DMABuf input on any
+`CLIP_ZEROCOPY` (on by default; `0` turns it off). `cudaupload` has never taken DMABuf input on any
 GStreamer, so the consumer imports the image itself: the layer exports the shared image
 as an `OPAQUE_FD` (it reports the allocation size and whether the export worked in the
 texture message), the consumer imports it with CUDA's external-memory API (resolved from
