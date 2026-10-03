@@ -401,7 +401,7 @@ seek_in_progress() {
 # has not started, so no frames are produced while we wait.
 wait_seek_settled() {
   local label="${1:-seek}"
-  local timeout_ms="${CLIP_SEEK_SETTLE_TIMEOUT_MS:-8000}"
+  local timeout_ms="${2:-${CLIP_SEEK_SETTLE_TIMEOUT_MS:-8000}}"
   local t0 now waited=0
   now_ms t0
   # Real elapsed time: each poll also spends ~30ms in curl, so counting 100ms per
@@ -1192,8 +1192,6 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   say "STEP 3: seek to $SEG_PRE (segment starts $SEG_START, pre-roll ${SEG_PREROLL_MS}ms)"
   spec_post /demo/seek "{\"tick\": ${SEG_PRE}}"
   wait_seek_settled "STEP 3" || true
-  # Where the playhead sits before the lead-in, so STEP 4d can tell if it moved.
-  LEADIN_SIG0=$(playback_sig "" any || true)
 
   # Lead-in: unpause so cs2 processes the seek + the spec lock (spec
   # commands no-op while paused). toggle reliably flips state; demo_resume
@@ -1218,24 +1216,16 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # Re-pause + re-seek for a deterministic SEG_PRE (lead-in drifted
   # forward). The re-seek resets cs2's POV, so we re-press the slot below.
   spec_post /demo/pause '{"force": true}'
-  # Skip the re-seek when the lead-in never moved the playhead: after a backward
-  # STEP 3 seek (every segment once the warm-up has run past it) cs2 stalls ~2s, so
-  # the lead-in plays nothing. A seek to the tick cs2 is already on shows no GSI
-  # change and can't settle — it burned the full 8s timeout on segment 2.
-  LEADIN_SIG1=$(playback_sig "" any || true)
-  if [ -n "$LEADIN_SIG0" ] && [ "${LEADIN_SIG0//|/}" != "" ] && [ "$LEADIN_SIG0" = "$LEADIN_SIG1" ]; then
-    say "STEP 4d: lead-in didn't move the playhead (still at ${SEG_PRE}) — no re-seek"
-    spec_post /demo/speed '{"rate": 1}'
-  else
-    spec_post /demo/seek "{\"tick\": ${SEG_PRE}}"
-    # Never record at an inherited timescale — stale 2x/4x = double-speed clips.
-    spec_post /demo/speed '{"rate": 1}'
-    # The lead-in above played for 0.6s + the POV lock's polling, so this is a
-    # LARGE backward seek — the slowest kind. Everything below (capture spawn,
-    # play, wall-clock billing) assumes the playhead is at SEG_START, so wait for
-    # it rather than the old fixed 0.2s.
-    wait_seek_settled "STEP 4d re-seek" || true
-  fi
+  spec_post /demo/seek "{\"tick\": ${SEG_PRE}}"
+  # Never record at an inherited timescale — stale 2x/4x = double-speed clips.
+  spec_post /demo/speed '{"rate": 1}'
+  # The lead-in above played for 0.6s + the POV lock's polling, so this is a
+  # backward seek. Everything below (capture spawn, play, wall-clock billing)
+  # assumes the playhead is at SEG_PRE, so wait for it — but only briefly: it lands
+  # in 0.9-1.9s, and when the lead-in barely moved (cs2 stalls ~2s after STEP 3's
+  # backward seek, the case for every segment once the warm-up has run past it)
+  # GSI shows no change and it never reports settled, which burned the full 8s.
+  wait_seek_settled "STEP 4d re-seek" "${CLIP_RESEEK_SETTLE_TIMEOUT_MS:-3000}" || true
   sleep 0.2
 
   # Re-press slot before capture (re-seek reset POV); queued for play.
