@@ -1037,7 +1037,14 @@ set_cs2_launch_options() {
   case "${CLIP_CAPTURE_METHOD:-vkcapture}" in
     vkcapture) cap_env="OBS_VKCAPTURE=1 " ;;
   esac
-  local launch_opts="${CS2_LAUNCH_OPTIONS:-__GL_SHADER_DISK_CACHE=1 ${cap_env}%command%}"
+  # The shader-cache path/size/no-cleanup must ride here too: export_cs2_shader_cache_env
+  # sets them in run-demo's shell, but -applaunch only forwards to the running Steam,
+  # which starts cs2 with ITS env + these options. Without them the driver cached into
+  # /root/.cache (gone with the pod), so every pod recompiled every pipeline: ~7s of cs2
+  # at ~1000% CPU and ~25fps on the first segment, while the node's nvcache stayed empty.
+  local cache_env="__GL_SHADER_DISK_CACHE=1 __GL_SHADER_DISK_CACHE_PATH=${GL_SHADER_CACHE_DIR:-${STEAM_LIBRARY:-/mnt/game-streamer}/nvcache}"
+  cache_env+=" __GL_SHADER_DISK_CACHE_SIZE=10737418240 __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1"
+  local launch_opts="${CS2_LAUNCH_OPTIONS:-${cache_env} ${cap_env}%command%}"
   local roots=("$STEAM_HOME/userdata" "$HOME/.steam/steam/userdata")
   local seen=() root user_dir steamid edited=0
   for root in "${roots[@]}"; do

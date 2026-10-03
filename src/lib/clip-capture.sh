@@ -176,14 +176,14 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
     # consumer engages it only when the layer confirms the pacing, and reports that
     # in the ready file; it writes the video-vs-wall span to the timing file at exit
     # for the audio retime. Scoped to this spawn so the live consumer never inherits it.
-    # Grid pacing (CLIP_PACE=1, off by default) is the same pacing without touching the
+    # Grid pacing (CLIP_PACE, on by default; 0 = off) is the same pacing without touching the
     # game clock: a late frame skips the grid slots it missed (the poke says how many)
     # instead of catching up, so the frame count always matches wall time — it fixes
     # cs2's fps_max overshoot, and a render spike shows as an honest repeat.
     local fixed=0 pace=0 skip=0
     if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ]; then
       fixed=1; pace=$fps
-    elif [ "${CLIP_PACE:-0}" = "1" ]; then
+    elif [ "${CLIP_PACE:-1}" = "1" ]; then
       fixed=1; pace=$fps; skip=1
     fi
     CLIP_CAPTURE_TIMING_FILE="${out_file}.timing"
@@ -316,7 +316,7 @@ wait_clip_capture_ready() {
       # host_framerate only for the fixed timestep; grid pacing leaves the game clock alone.
       if grep -q '^paced=1' "$marker" 2>/dev/null; then
         [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] && CLIP_CAPTURE_FIXED_TIMESTEP=1
-      elif [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] || [ "${CLIP_PACE:-0}" = "1" ]; then
+      elif [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] || [ "${CLIP_PACE:-1}" = "1" ]; then
         warn "  pacing unavailable: layer didn't confirm it (image predates it?) — recording on the wall clock"
       fi
       return 0

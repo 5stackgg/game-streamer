@@ -48,10 +48,10 @@ start_status_reporter
 # (CLIP_FIXED_TIMESTEP=1, off by default) the capture layer paces cs2 to exactly the clip rate
 # while recording, so the cap is only headroom: 2x the clip rate. cs2's own limiter
 # overshoots (~63-64 presents/s at fps_max 60), so it can't be the 60Hz clock itself.
-# Same for grid pacing (CLIP_PACE=1). Without either, launch at the clip rate.
+# Same for grid pacing (CLIP_PACE, on by default). Without either, launch at the clip rate.
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -z "${CS2_FPS_MAX:-}" ]; then
   CS2_FPS_MAX=$(printf '%s' "${CLIP_BATCH_JOBS:-}" | node "$LIB_DIR/clip-helpers.mjs" jobs-fps)
-  if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] || [ "${CLIP_PACE:-0}" = "1" ]; then
+  if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] || [ "${CLIP_PACE:-1}" = "1" ]; then
     CS2_FPS_MAX=$(( CS2_FPS_MAX * 2 ))   # the layer paces; the cap is only headroom
   fi
 fi
