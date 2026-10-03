@@ -492,8 +492,10 @@ wait_preroll() {
         played=$(( played + d ))
       fi
       last_pe="$pe"; last_t=$now
-      if [ "$played" -ge "$want" ]; then
-        say "PREROLL: ${want}ms of demo time played in $(( now - t0 ))ms"
+      # The reading is $age ms old and the demo kept playing since (at 1x): count it,
+      # or the gate opens up to that much late (readings up to 750ms old are taken).
+      if [ $(( played + age )) -ge "$want" ]; then
+        say "PREROLL: ${want}ms of demo time played in $(( now - t0 ))ms (last reading ${age}ms old)"
         return 0
       fi
     fi
@@ -1126,7 +1128,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   SEG_FILE="${SEG_DIR}/seg-$(printf '%03d' "$SEG_IDX").mp4"
   say "------- SEGMENT $((SEG_IDX + 1))/${SEG_COUNT}: ticks=${SEG_START}..${SEG_END} (${SEG_DURATION_MS}ms)"
 
-  # Expected pre-kill lead, so the "KILL seg$N ... at +Nms played" line below can
+  # Expected pre-kill lead, so the "KILL seg$N ... ms of demo time into the clip" line below can
   # be compared against what the API actually asked for instead of eyeballed.
   SEG_KILL_TICK="${SEG_KILLS[$SEG_IDX]:-}"
   SEG_LEAD_MS=""
@@ -1262,11 +1264,16 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     log_spec_slots "after-play"
     wait_preroll "$SEG_PREROLL_MS" "${PLAY_SIG_BEFORE%%|*}" "$PLAY_T0" || true
     clip_capture_go
+    now_ms GATE_MS
   else
     clip_capture_go
+    now_ms GATE_MS
     repress_pov_after_play
     log_spec_slots "after-play"
   fi
+  # The game clock (phase countdown) at the gate, so the KILL line can report the real
+  # demo time into the clip, not wall time rescaled into ticks.
+  IFS='|' read -r _ GATE_PE _ GATE_AGE _ <<<"$(capture_fields_line "${SEG_POV_STEAMID:-}")"
 
   # STEP 7: record SEG_DURATION of playback, billed by WALL-CLOCK. rate is
   # forced to 1, so wall-time == demo-time once playing (we opened the capture
@@ -1300,8 +1307,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   GSI_SIG_FIRST=""     # frozen-capture guard: did GSI ever change?
   GSI_SIG_CHANGED=0
   GSI_SIG_POLLS=0
-  now_ms WALLCLOCK_START_MS
-  PREV_MS=$WALLCLOCK_START_MS
+  # Billing starts at the gate: recording began there, and the checks above (a cs2
+  # fatal probe can take seconds) were recorded but went unbilled, so the clip ran
+  # long and every "+Nt" below was measured from the wrong moment.
+  WALLCLOCK_START_MS=$GATE_MS
+  PREV_MS=$GATE_MS
   while : ; do
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
@@ -1350,7 +1360,11 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     # verify the kill lands ~lead into the clip. (Detection only — no behavior.)
     if [ -n "$POV_KILLS" ]; then
       if [ -n "$LAST_POV_KILLS" ] && [ "$POV_KILLS" -gt "$LAST_POV_KILLS" ]; then
-        say "KILL seg$SEG_IDX: POV round_kills ${LAST_POV_KILLS}->${POV_KILLS} at +${CUR_DONE_TICKS}t (${PLAYED_MS}ms played, expected ${SEG_LEAD_MS:-?}ms, clock=${PHASE_ENDS:-?})"
+        # Demo time since the gate, off the phase countdown (0.1s resolution; "?" if it
+        # reset in between, e.g. freezetime end or a bomb plant).
+        KILL_LEAD=$(awk -v g="${GATE_PE:-}" -v k="${PHASE_ENDS:-}" -v ga="${GATE_AGE:-0}" \
+          'BEGIN{ if (g == "" || k == "" || k > g) { print "?"; exit } printf "%d", (g - k) * 1000 - ga }')
+        say "KILL seg$SEG_IDX: POV round_kills ${LAST_POV_KILLS}->${POV_KILLS} at ${KILL_LEAD}ms of demo time into the clip (expected ${SEG_LEAD_MS:-?}ms; ${PLAYED_MS}ms wall, clock=${PHASE_ENDS:-?})"
       fi
       LAST_POV_KILLS="$POV_KILLS"
     fi
