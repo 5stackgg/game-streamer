@@ -402,14 +402,18 @@ seek_in_progress() {
 wait_seek_settled() {
   local label="${1:-seek}"
   local timeout_ms="${CLIP_SEEK_SETTLE_TIMEOUT_MS:-8000}"
-  local waited=0
+  local t0 now waited=0
+  now_ms t0
+  # Real elapsed time: each poll also spends ~30ms in curl, so counting 100ms per
+  # sleep let an "8s" ceiling run ~10s.
   while [ "$waited" -lt "$timeout_ms" ]; do
     if [ "$(seek_in_progress)" != "1" ]; then
       [ "$waited" -gt 0 ] && say "  ${label}: seek settled after ${waited}ms"
       return 0
     fi
     sleep 0.1
-    waited=$((waited + 100))
+    now_ms now
+    waited=$((now - t0))
   done
   say "WARN ${label}: seek still settling after ${timeout_ms}ms — proceeding anyway"
   return 1
@@ -1070,13 +1074,16 @@ warm_pipelines_if_cold() {
   say "WARM-UP: pre-compiling pipelines — replaying ${dur_ms}ms at ${rate}x (~${wait_ms}ms, uncaptured) [once per cs2]"
   spec_post /demo/pause  '{"force": true}'
   spec_post /demo/seek   "{\"tick\": ${start}}"
+  # /demo/seek only queues the gototick, and from a pause it lands paused: a toggle
+  # sent before it lands gets undone, so the range never played (nothing warmed).
+  wait_seek_settled "WARM-UP seek" || true
   spec_post /demo/speed  "{\"rate\": ${rate}}"
   spec_post /demo/toggle '{}'                  # play through the range fast
   sleep "$(awk -v ms="$wait_ms" 'BEGIN{printf "%.2f", ms/1000}')"
   spec_post /demo/pause  '{"force": true}'
   spec_post /demo/speed  '{"rate": 1}'
-  spec_post /demo/seek   "{\"tick\": ${start}}"
-  wait_seek_settled "WARM-UP seek-back" || true
+  # No seek back: STEP 3 seeks to the segment's pre-roll next anyway, and a seek to
+  # the tick cs2 is already parked on never shows a GSI change, so it can't settle.
   mkdir -p "$(dirname "$WARM_MARKER")" 2>/dev/null || true
   : > "$WARM_MARKER"
   say "WARM-UP: done — pipelines warmed for this cs2 process"

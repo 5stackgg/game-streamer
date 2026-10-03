@@ -223,7 +223,7 @@ Nothing blocks forever. The standing rule is that a late clip beats no clip.
 | Gate | Signal | Ceiling | On expiry |
 | --- | --- | --- | --- |
 | Demo ready | GSI fired **and** `demoui_hidden` | `DEMO_READY_TIMEOUT` 300s | Fails the whole batch with a reason so the node frees instead of hanging. |
-| Seek settled | `/demo/seek-state` reports the gototick finished (needs a post-landing GSI frame — the 1s GSI heartbeat provides one while paused) | `CLIP_SEEK_SETTLE_TIMEOUT_MS` 8s | Proceeds anyway. Motion is **not** usable here — the backward replay sweep moves the world and ticks the round clock, so a motion check reads "playing" mid-sweep. |
+| Seek settled | `/demo/seek-state` reports the gototick finished (needs a post-landing GSI frame that shows a change — the 1s GSI heartbeat provides one while paused; a seek to the tick cs2 is already on never settles) | `CLIP_SEEK_SETTLE_TIMEOUT_MS` 8s | Proceeds anyway. Motion is **not** usable here — the backward replay sweep moves the world and ticks the round clock, so a motion check reads "playing" mid-sweep. |
 | POV locked | GSI `spectated_steam_id` matches the target | 2 tries | Re-presses the slot once, then proceeds on whatever POV CS2 has. |
 | Capture armed | Consumer's ready file appears | `CLIP_CAPTURE_READY_TIMEOUT_MS` 8s | Starts playback anyway — the opening frames won't be in the file. |
 | Playback moving | Fresh GSI whose `phase_ends_in`/`world_motion` differ from the pre-unpause values (GSI stops while paused, so fresh GSI itself means rolling) | `CLIP_PLAY_CONFIRM_TIMEOUT_MS` 2.5s | Continues to the pre-roll regardless. |
