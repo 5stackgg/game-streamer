@@ -112,6 +112,16 @@ struct state {
     guint       present_src;
     bool        present_locked;   // engaged: presents drive the push, timer off
     guint64     present_signals;  // VKCAP_DEBUG: total presents seen
+    // Fixed-timestep capture (VKCAP_FRAME_PTS=1, clips only): cs2 runs with
+    // host_framerate = fps, so every present is exactly 1/fps of game time. Stamp
+    // frame N at base + N/fps instead of its wall-clock arrival, so a render spike
+    // or catch-up burst never turns into a videorate dup/drop. VKCAP_PACE_FPS asks
+    // the (patched) layer to hold presents to that exact rate so game time tracks
+    // wall-clock (and the live pulsesrc audio) as closely as possible.
+    bool        frame_pts;
+    int         pace_fps;
+    GstClockTime pts_base;        // running time of the first stamped frame
+    guint64     pts_frames;       // frames stamped so far
     guint64     dbg_last;         // VKCAP_DEBUG: present_signals at last debug tick
     bool        debug;
 
@@ -239,6 +249,9 @@ static void send_control(int fd, bool capturing)
     // both as padding and ignores them — we stay on the fps timer (graceful).
     if (capturing && st.present_efd >= 0)
         c.want_present_signal = 1;
+    // Unpatched/older layers treat this as padding too: no pacing, cs2's own fps_max.
+    if (capturing && st.pace_fps > 0 && st.pace_fps <= 255)
+        c.pace_fps = (uint8_t)st.pace_fps;
 
     struct iovec io = { .iov_base = &c, .iov_len = sizeof(c) };
     struct msghdr msg = {0};
@@ -465,7 +478,27 @@ static bool push_one_frame(void)
         return true;  // nothing captured yet
     }
 
-    // PTS is stamped by appsrc (do-timestamp=TRUE); downstream videorate locks CFR.
+    if (st.frame_pts) {
+        // Frame N = base + N/fps. The base is the pipeline running time at the first
+        // frame, the same timeline pulsesrc stamps audio on, so A/V start together.
+        if (st.pts_frames == 0) {
+            GstClock *clk = gst_element_get_clock(st.pipeline);
+            st.pts_base = 0;
+            if (clk) {
+                GstClockTime now = gst_clock_get_time(clk);
+                GstClockTime base = gst_element_get_base_time(st.pipeline);
+                if (now > base) st.pts_base = now - base;
+                gst_object_unref(clk);
+            }
+        }
+        out = gst_buffer_make_writable(out);   // a held last_buf is shared
+        GST_BUFFER_PTS(out) = st.pts_base + gst_util_uint64_scale(st.pts_frames, GST_SECOND, st.fps);
+        GST_BUFFER_DTS(out) = GST_CLOCK_TIME_NONE;
+        GST_BUFFER_DURATION(out) = gst_util_uint64_scale(1, GST_SECOND, st.fps);
+        st.pts_frames++;
+    }
+
+    // Default: PTS is stamped by appsrc (do-timestamp=TRUE); downstream videorate locks CFR.
     // Present-driven pushing feeds videorate distinct, render-aligned frames, so it
     // corrects only on a real cs2 frame dip (not timer phase-drift dups). Video
     // rides the same live clock as the pulsesrc audio, so A/V stays synced and the
@@ -525,6 +558,21 @@ static gboolean on_debug_tick(gpointer user)
     log_msg("DEBUG %s: presents/s=%llu (total=%llu)",
             st.present_locked ? "present-locked" : "timer-fallback",
             (unsigned long long)d, (unsigned long long)st.present_signals);
+    if (st.frame_pts && st.pts_frames > 0) {
+        // Game time (frames/fps) vs wall-clock since the first frame. Positive =
+        // cs2 ran fast (pacing off/unpatched layer), negative = render fell behind.
+        // The clip renderer retimes the audio to the video afterwards either way.
+        GstClock *clk = gst_element_get_clock(st.pipeline);
+        if (clk) {
+            GstClockTime now = gst_clock_get_time(clk) - gst_element_get_base_time(st.pipeline);
+            gst_object_unref(clk);
+            gint64 video_ms = (gint64)(st.pts_frames * 1000 / (guint64)st.fps);
+            gint64 wall_ms  = (gint64)((now - st.pts_base) / GST_MSECOND);
+            log_msg("DEBUG frame-pts: frames=%llu video=%" G_GINT64_FORMAT "ms wall=%" G_GINT64_FORMAT
+                    "ms drift=%+" G_GINT64_FORMAT "ms",
+                    (unsigned long long)st.pts_frames, video_ms, wall_ms, video_ms - wall_ms);
+        }
+    }
     return G_SOURCE_CONTINUE;
 }
 
@@ -792,6 +840,8 @@ int main(int argc, char **argv)
     { const char *p = getenv("VKCAP_READY_FILE"); st.ready_path = (p && *p) ? (char *)p : NULL; }
     { const char *p = getenv("VKCAP_START_FILE"); st.start_path = (p && *p) ? (char *)p : NULL; }
     { const char *t = getenv("VKCAP_START_TIMEOUT_MS"); st.start_timeout_ms = t ? atoi(t) : 10000; }
+    st.frame_pts = getenv("VKCAP_FRAME_PTS") && atoi(getenv("VKCAP_FRAME_PTS")) != 0;
+    st.pace_fps  = getenv("VKCAP_PACE_FPS") ? atoi(getenv("VKCAP_PACE_FPS")) : 0;
     for (int i = 0; i < 4; i++) st.fds[i] = -1;
 
     if (!st.test_mode) {
@@ -819,7 +869,10 @@ int main(int argc, char **argv)
         if (!src) { log_msg("pipeline has no element named 'vksrc'"); return 2; }
         st.appsrc = GST_APP_SRC(src);
         gst_app_src_set_stream_type(st.appsrc, GST_APP_STREAM_TYPE_STREAM);
-        g_object_set(src, "is-live", TRUE, "format", GST_FORMAT_TIME, "do-timestamp", TRUE, NULL);
+        g_object_set(src, "is-live", TRUE, "format", GST_FORMAT_TIME,
+                     "do-timestamp", st.frame_pts ? FALSE : TRUE, NULL);
+        if (st.frame_pts || st.pace_fps > 0)
+            log_msg("fixed timestep: frame-pts=%d pace=%dfps", st.frame_pts, st.pace_fps);
         GstBus *bus = gst_element_get_bus(st.pipeline);
         gst_bus_add_watch(bus, on_bus, NULL);
         gst_object_unref(bus);

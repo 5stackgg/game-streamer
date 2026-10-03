@@ -1,16 +1,26 @@
 diff --git a/src/capture.c b/src/capture.c
-index 247c04b..0b23ff3 100644
+index 247c04b..e0b1100 100644
 --- a/src/capture.c
 +++ b/src/capture.c
-@@ -38,6 +38,7 @@ static struct {
+@@ -28,6 +28,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
+ #include <libgen.h>
+ #include <sys/un.h>
+ #include <sys/socket.h>
++#include <time.h>
+ 
+ static struct {
+     int connfd;
+@@ -38,6 +39,9 @@ static struct {
      bool map_host;
      bool need_reinit;
      uint8_t device_uuid[16];
 +    int present_eventfd;
++    int pace_fps;
++    int64_t pace_next;
  } data;
  
  static bool get_wine_exe(char *buf, size_t bufsize)
-@@ -118,6 +119,7 @@ void capture_init()
+@@ -118,6 +122,7 @@ void capture_init()
  {
      memset(&data, 0, sizeof(data));
      data.connfd = -1;
@@ -18,7 +28,7 @@ index 247c04b..0b23ff3 100644
  }
  
  void capture_update_socket()
-@@ -134,7 +136,17 @@ void capture_update_socket()
+@@ -134,7 +139,17 @@ void capture_update_socket()
      }
  
      struct capture_control_data control;
@@ -37,10 +47,15 @@ index 247c04b..0b23ff3 100644
      if (n == sizeof(control)) {
          const bool old_no_modifiers = data.no_modifiers;
          const bool old_linear = data.linear;
-@@ -149,6 +161,22 @@ void capture_update_socket()
+@@ -149,6 +164,27 @@ void capture_update_socket()
              || old_map_host != data.map_host)) {
              data.need_reinit = true;
          }
++        // The consumer may ask us to pace presents to an exact fps (0 = off).
++        if (data.pace_fps != control.pace_fps) {
++            data.pace_fps = control.pace_fps;
++            data.pace_next = 0;
++        }
 +        // The consumer may hand us an eventfd (SCM_RIGHTS) to poke on every
 +        // present; only when it asked via want_present_signal.
 +        if (control.want_present_signal) {
@@ -60,7 +75,7 @@ index 247c04b..0b23ff3 100644
      }
      if (n == -1) {
          if (errno == EAGAIN || errno == EWOULDBLOCK) {
-@@ -162,7 +190,25 @@ void capture_update_socket()
+@@ -162,7 +198,65 @@ void capture_update_socket()
          close(data.connfd);
          data.connfd = -1;
          data.accepted = false;
@@ -68,6 +83,8 @@ index 247c04b..0b23ff3 100644
 +            close(data.present_eventfd);
 +            data.present_eventfd = -1;
 +        }
++        data.pace_fps = 0;
++        data.pace_next = 0;
 +    }
 +}
 +
@@ -79,37 +96,77 @@ index 247c04b..0b23ff3 100644
 +{
 +    if (data.present_eventfd < 0) {
 +        return;
-     }
++    }
 +    const uint64_t one = 1;
 +    ssize_t r = write(data.present_eventfd, &one, sizeof(one));
 +    (void)r;
++}
++
++// Frame pacing for the consumer that asked for it (pace_fps > 0): hold each present
++// until the next slot of an absolute 1/pace_fps grid, so the game presents at exactly
++// pace_fps instead of its own limiter's ~5% overshoot. A late frame (render spike)
++// goes out immediately and the following frames run unthrottled until the grid is
++// caught up again; only when it falls more than PACE_MAX_BEHIND_NS behind does the
++// grid restart from now. Runs on the present thread, before the real present.
++#define PACE_MAX_BEHIND_NS 250000000LL
++static int64_t pace_now_ns(void)
++{
++    // CLOCK_MONOTONIC, the clock clock_nanosleep waits on (os_time_get_nano is RAW).
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
++}
++
++void capture_pace_present()
++{
++    if (data.pace_fps <= 0 || !data.capturing) {
++        data.pace_next = 0;
++        return;
++    }
++    const int64_t interval = 1000000000LL / data.pace_fps;
++    const int64_t now = pace_now_ns();
++    if (data.pace_next == 0 || now - data.pace_next > PACE_MAX_BEHIND_NS) {
++        data.pace_next = now + interval;
++        return;
++    }
++    if (now < data.pace_next) {
++        struct timespec ts = {
++            .tv_sec = data.pace_next / 1000000000LL,
++            .tv_nsec = data.pace_next % 1000000000LL,
++        };
++        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {
++        }
+     }
++    data.pace_next += interval;
  }
  
  void capture_init_shtex(
 diff --git a/src/capture.h b/src/capture.h
-index d8e4b4d..e42280c 100644
+index d8e4b4d..70afae6 100644
 --- a/src/capture.h
 +++ b/src/capture.h
-@@ -82,7 +82,8 @@ struct capture_control_data {
+@@ -82,7 +82,9 @@ struct capture_control_data {
      uint8_t linear;
      uint8_t map_host;
      uint8_t device_uuid[16];
 -    uint8_t padding[12];
 +    uint8_t want_present_signal;
-+    uint8_t padding[11];
++    uint8_t pace_fps;
++    uint8_t padding[10];
  } __attribute__((packed));
  
  #define CAPTURE_CONTROL_DATA_TYPE 10
-@@ -96,6 +97,7 @@ void capture_init_shtex(
+@@ -96,6 +98,8 @@ void capture_init_shtex(
          int offsets[4], uint64_t modifier, uint32_t winid,
          bool flip, uint32_t color_space, int nfd, int fds[4]);
  void capture_stop();
 +void capture_signal_present();
++void capture_pace_present();
  
  bool capture_should_stop();
  bool capture_should_init();
 diff --git a/src/vklayer.c b/src/vklayer.c
-index d8b6f6a..bd5415d 100644
+index d8b6f6a..bc130e3 100644
 --- a/src/vklayer.c
 +++ b/src/vklayer.c
 @@ -1243,6 +1243,7 @@ static void vk_capture(struct vk_data *data, VkQueue queue,
@@ -118,5 +175,13 @@ index d8b6f6a..bd5415d 100644
          vk_shtex_capture(data, &data->funcs, swap, 0, queue, info);
 +        capture_signal_present();
      }
+ }
+ 
+@@ -1258,6 +1259,7 @@ static VkResult VKAPI_CALL OBS_QueuePresentKHR(VkQueue queue,
+         vk_capture(data, data->graphics_queue ? data->graphics_queue : queue, &api);
+     }
+ 
++    capture_pace_present();
+     return funcs->QueuePresentKHR(queue, &api);
  }
  

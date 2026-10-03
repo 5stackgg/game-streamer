@@ -196,7 +196,57 @@ CLIP_REACHED_TERMINAL=0
 
 SAVED_TICK=""
 SAVED_PAUSED=""
+
+# Fixed timestep: while a segment records, cs2 advances exactly 1/fps of demo time per
+# rendered frame (host_framerate) instead of its measured frame time, so a render
+# spike can't make the world jump or the capture repeat a frame. Only with a capture
+# that stamps frames by count (CLIP_CAPTURE_FIXED_TIMESTEP, see clip-capture.sh).
+FIXED_TIMESTEP_ON=0
+set_fixed_timestep() {
+  local fps="$1"
+  if [ "$fps" = "0" ]; then
+    [ "$FIXED_TIMESTEP_ON" = "1" ] || return 0
+    spec_post /demo/exec '{"cmd": "host_framerate 0"}'
+    FIXED_TIMESTEP_ON=0
+  else
+    spec_post /demo/exec "{\"cmd\": \"sv_cheats 1; host_framerate ${fps}\"}"
+    FIXED_TIMESTEP_ON=1
+  fi
+}
+
+# With a fixed timestep the video runs on game time and the pulsesrc audio on wall
+# time. The layer's pacing keeps them within a few frames, but a render stall or an
+# unpatched layer leaves them apart, so stretch the audio to the video's length
+# (atempo, pitch-preserving) whenever they differ by more than ~2 frames.
+retime_segment_audio() {
+  local f="$1" v a tempo tmp="${1}.retime.mp4"
+  v=$(ffprobe -v error -select_streams v:0 -show_entries stream=duration \
+    -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null)
+  a=$(ffprobe -v error -select_streams a:0 -show_entries stream=duration \
+    -of default=noprint_wrappers=1:nokey=1 "$f" 2>/dev/null)
+  case "$v$a" in ''|*N/A*) return 0 ;; esac
+  tempo=$(awk -v v="$v" -v a="$a" 'BEGIN{
+    d = v - a; if (d < 0) d = -d
+    r = a / v
+    if (d <= 0.035 || r < 0.8 || r > 1.25) { print ""; exit }
+    printf "%.6f", r }')
+  if [ -z "$tempo" ]; then
+    say "  audio retime: video=${v}s audio=${a}s — in sync"
+    return 0
+  fi
+  say "  audio retime: video=${v}s audio=${a}s -> atempo=${tempo}"
+  if ffmpeg -y -hide_banner -loglevel warning -i "$f" \
+       -map 0:v -c:v copy -map 0:a -af "atempo=${tempo}" -c:a aac -b:a 192k \
+       -movflags +faststart "$tmp"; then
+    mv -f "$tmp" "$f"
+  else
+    rm -f "$tmp"
+    say "  WARN audio retime failed — keeping the raw segment"
+  fi
+}
+
 restore_user_playback() {
+  set_fixed_timestep 0
   if [ -z "$SAVED_TICK" ]; then return 0; fi
   spec_post /demo/pause '{"force": true}'
   spec_post /demo/seek "{\"tick\": ${SAVED_TICK}}"
@@ -683,10 +733,14 @@ api_status "status=rendering" "progress=0.05"
 say "STEP 1b: disable cs2 auto-director (spec_autodirector 0)"
 spec_post /demo/exec '{"cmd": "spec_autodirector 0"}'
 
-# cs2 should render at the capture rate: above it (e.g. 90-120fps for a 60fps capture)
-# captured frames land one or two renders apart and motion steps unevenly. The cap is set
-# at launch (run-demo.sh) because cs2 ignores a runtime fps_max.
-if [ "${CS2_FPS_MAX:-}" = "${CLIP_OUTPUT_FPS:-60}" ]; then
+# Fixed timestep (default): the capture layer paces cs2 to exactly the output rate
+# while recording, so fps_max only needs headroom above it (run-demo.sh sets 2x).
+# Without it cs2 should render at the capture rate: above it captured frames land one
+# or two renders apart and motion steps unevenly. The cap is set at launch
+# (run-demo.sh) because cs2 ignores a runtime fps_max.
+if [ "${CLIP_FIXED_TIMESTEP:-1}" = "1" ]; then
+  say "STEP 1c: fixed timestep — host_framerate ${CLIP_OUTPUT_FPS:-60} + layer pacing while recording (fps_max ${CS2_FPS_MAX:-?})"
+elif [ "${CS2_FPS_MAX:-}" = "${CLIP_OUTPUT_FPS:-60}" ]; then
   say "STEP 1c: render cap fps_max ${CS2_FPS_MAX} matches output"
 else
   say "STEP 1c: WARN render cap fps_max ${CS2_FPS_MAX:-?} != output ${CLIP_OUTPUT_FPS:-60}fps — expect uneven motion"
@@ -1139,6 +1193,10 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   # GSI stops while paused, so this baseline is usually stale — that's fine: fresh
   # GSI only resumes once the demo rolls, which is exactly what we wait for.
   PLAY_SIG_BEFORE=$(playback_sig "${SEG_POV_STEAMID:-}" any) || PLAY_SIG_BEFORE=""
+  if [ "${CLIP_CAPTURE_FIXED_TIMESTEP:-0}" = "1" ]; then
+    say "STEP 5: fixed timestep on (host_framerate ${CLIP_OUTPUT_FPS:-60})"
+    set_fixed_timestep "${CLIP_OUTPUT_FPS:-60}"
+  fi
   now_ms PLAY_T0
   spec_post /demo/toggle '{}'
 
@@ -1340,6 +1398,10 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   stop_capture_diag
   say "STEP 8: stop capture (segment $SEG_IDX)"
   stop_clip_capture
+  if [ "$FIXED_TIMESTEP_ON" = "1" ]; then
+    set_fixed_timestep 0
+    has_audio_stream "$SEG_FILE" && retime_segment_audio "$SEG_FILE"
+  fi
 
   # Sanity check the RAW capture before any polish: capture sometimes
   # produces an mp4 with no decodable frames (cs2 mid-load, audio attach
