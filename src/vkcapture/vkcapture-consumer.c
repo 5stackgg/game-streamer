@@ -123,9 +123,13 @@ struct state {
     bool        frame_pts;
     int         pace_fps;
     bool        fixed_ts;         // engaged: layer confirmed pacing, frame-count PTS
-    GstClockTime pts_base;        // running time of the first stamped frame
+    GstClockTime pts_base;        // running time of present 0 (moves on a re-anchor)
+    GstClockTime pts_first;       // PTS of the first stamped frame
+    GstClockTime pts_last;        // PTS of the latest stamped frame
+    GstClockTime pts_first_rt;    // running time of the first stamped frame
     GstClockTime pts_last_rt;     // running time of the latest stamped frame
     guint64     pts_frames;       // presents stamped so far (game steps)
+    guint64     pts_reanchors;    // times the stamps were pulled back to the clock
     const char *timing_path;      // VKCAP_TIMING_FILE: video vs wall span, written at exit
     // Frame handoff (VKCAP_FRAME_ACK=1, host-map only): the layer pokes only once the
     // frame's GPU copy has landed in the shared image, and doesn't overwrite it with
@@ -425,6 +429,9 @@ static bool start_gate_open(void)
     return st.started;
 }
 
+// How far frame-count stamps may trail the clock before they're re-anchored.
+#define FRAME_PTS_MAX_LAG (250 * GST_MSECOND)
+
 // Pipeline running time now (clock - base_time): the timeline pulsesrc stamps on.
 static GstClockTime running_time_now(void)
 {
@@ -533,12 +540,28 @@ static bool push_one_frame(guint64 steps)
         // Coalesced pokes advance N by every present they stand for, so the timeline
         // stays one step per present (videorate fills the gap with a repeat).
         GstClockTime rt = running_time_now();
-        if (st.pts_frames == 0) st.pts_base = rt;
+        if (st.pts_frames == 0) { st.pts_base = rt; st.pts_first_rt = rt; }
         if (steps < 1) steps = 1;
         st.pts_frames += steps;
         st.pts_last_rt = rt;
+        GstClockTime pts = st.pts_base + gst_util_uint64_scale(st.pts_frames - 1, GST_SECOND, st.fps);
+        // If the render can't hold the rate, game time (and these stamps) fall behind
+        // the wall clock the live audio runs on, and the muxer's audio queue backs up
+        // until the audio source blocks — at EOS that deadlocked the whole pipeline.
+        // Bound the lag: past it, re-anchor the count to the clock (the slowdown then
+        // shows as videorate repeats instead of piling up).
+        if (rt > pts + FRAME_PTS_MAX_LAG) {
+            const GstClockTime shift = rt - FRAME_PTS_MAX_LAG - pts;
+            st.pts_base += shift;
+            pts += shift;
+            if (st.pts_reanchors++ == 0)
+                log_msg("WARN: render fell %" G_GUINT64_FORMAT "ms behind the %dfps timestep — re-anchoring frame stamps to the clock",
+                        (guint64)((shift + FRAME_PTS_MAX_LAG) / GST_MSECOND), st.fps);
+        }
+        if (st.pts_frames == steps) st.pts_first = pts;
+        st.pts_last = pts;
         out = gst_buffer_make_writable(out);   // a held last_buf is shared
-        GST_BUFFER_PTS(out) = st.pts_base + gst_util_uint64_scale(st.pts_frames - 1, GST_SECOND, st.fps);
+        GST_BUFFER_PTS(out) = pts;
         GST_BUFFER_DTS(out) = GST_CLOCK_TIME_NONE;
         GST_BUFFER_DURATION(out) = gst_util_uint64_scale(1, GST_SECOND, st.fps);
     }
@@ -615,8 +638,8 @@ static gboolean on_debug_tick(gpointer user)
         // Game time (presents/fps) vs wall-clock over the same frames. Negative =
         // render fell behind the pacing grid (a stall the layer couldn't catch up).
         // The clip renderer retimes the audio by the final figures (timing file).
-        gint64 video_ms = (gint64)(st.pts_frames * 1000 / (guint64)st.fps);
-        gint64 wall_ms  = (gint64)((st.pts_last_rt - st.pts_base) / GST_MSECOND) + 1000 / st.fps;
+        gint64 video_ms = (gint64)((st.pts_last - st.pts_first) / GST_MSECOND) + 1000 / st.fps;
+        gint64 wall_ms  = (gint64)((st.pts_last_rt - st.pts_first_rt) / GST_MSECOND) + 1000 / st.fps;
         log_msg("DEBUG frame-pts: frames=%llu video=%" G_GINT64_FORMAT "ms wall=%" G_GINT64_FORMAT
                 "ms drift=%+" G_GINT64_FORMAT "ms",
                 (unsigned long long)st.pts_frames, video_ms, wall_ms, video_ms - wall_ms);
@@ -815,6 +838,27 @@ static gboolean on_listen(gint fd, GIOCondition cond, gpointer user)
 }
 
 // ---- shutdown -------------------------------------------------------------
+// EOS for every source but appsrc, sent off the main loop. When the muxer is waiting
+// on video, a live audio source sits blocked on a full queue holding its stream lock,
+// and gst_element_send_event blocks until that clears; on the main loop that wedged
+// everything (no EOS reached the video, the backstop timer never ran). appsrc's own
+// EOS lets the muxer drain the audio, which unblocks the source and this thread.
+static gpointer send_eos_to_other_sources(gpointer pipeline)
+{
+    GstIterator *it = gst_bin_iterate_sources(GST_BIN(pipeline));
+    GValue v = G_VALUE_INIT;
+    while (gst_iterator_next(it, &v) == GST_ITERATOR_OK) {
+        GstElement *src = g_value_get_object(&v);
+        if (src != GST_ELEMENT(st.appsrc))
+            gst_element_send_event(src, gst_event_new_eos());
+        g_value_reset(&v);
+    }
+    g_value_unset(&v);
+    gst_iterator_free(it);
+    gst_object_unref(pipeline);
+    return NULL;
+}
+
 static gboolean on_sigint(gpointer user)
 {
     (void)user;
@@ -828,7 +872,8 @@ static gboolean on_sigint(gpointer user)
         // EOS the WHOLE pipeline (same as `gst-launch -e`) so BOTH the video appsrc
         // and the audio pulsesrc branch drain into qtmux and the moov atom is
         // written — EOS-ing only appsrc would leave audio open and truncate the mp4.
-        gst_element_send_event(st.pipeline, gst_event_new_eos());
+        gst_app_src_end_of_stream(st.appsrc);   // queued behind the frames; never blocks
+        g_thread_unref(g_thread_new("vkcap-eos", send_eos_to_other_sources, gst_object_ref(st.pipeline)));
         // backstop in case EOS never reaches the bus (the EOS bus handler quits too)
         g_timeout_add(5000, (GSourceFunc)g_main_loop_quit, st.loop);
     } else {
@@ -1025,11 +1070,12 @@ int main(int argc, char **argv)
         // renderer stretches the pulsesrc audio by wall/video so the two line up.
         FILE *f = fopen(st.timing_path, "w");
         if (f) {
-            fprintf(f, "frames=%llu fps=%d video_ns=%llu wall_ns=%llu\n",
+            const GstClockTime frame = gst_util_uint64_scale(1, GST_SECOND, st.fps);
+            fprintf(f, "frames=%llu fps=%d video_ns=%llu wall_ns=%llu reanchors=%llu\n",
                     (unsigned long long)st.pts_frames, st.fps,
-                    (unsigned long long)gst_util_uint64_scale(st.pts_frames, GST_SECOND, st.fps),
-                    (unsigned long long)(st.pts_last_rt - st.pts_base
-                                         + gst_util_uint64_scale(1, GST_SECOND, st.fps)));
+                    (unsigned long long)(st.pts_last - st.pts_first + frame),
+                    (unsigned long long)(st.pts_last_rt - st.pts_first_rt + frame),
+                    (unsigned long long)st.pts_reanchors);
             fclose(f);
         }
     }
@@ -1038,6 +1084,9 @@ int main(int argc, char **argv)
     if (st.hud_pad) gst_object_unref(st.hud_pad);
     g_free(st.hud_ctl_path);
     if (st.pipeline) {
+        // A streaming thread that's still stuck must not hang the process: the shell
+        // waits on our exit before it can probe (or retry) the segment.
+        alarm(5);
         gst_element_set_state(st.pipeline, GST_STATE_NULL);
         gst_object_unref(st.pipeline);
     }

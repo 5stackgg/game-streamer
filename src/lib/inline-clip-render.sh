@@ -778,7 +778,7 @@ spec_post /demo/exec '{"cmd": "spec_autodirector 0; host_framerate 0"}'
 # Without it cs2 should render at the capture rate: above it captured frames land one
 # or two renders apart and motion steps unevenly. The cap is set at launch
 # (run-demo.sh) because cs2 ignores a runtime fps_max.
-if [ "${CLIP_FIXED_TIMESTEP:-1}" = "1" ]; then
+if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ]; then
   say "STEP 1c: fixed timestep — host_framerate ${CLIP_OUTPUT_FPS:-60} + layer pacing while recording (fps_max ${CS2_FPS_MAX:-?})"
 elif [ "${CS2_FPS_MAX:-}" = "${CLIP_OUTPUT_FPS:-60}" ]; then
   say "STEP 1c: render cap fps_max ${CS2_FPS_MAX} matches output"

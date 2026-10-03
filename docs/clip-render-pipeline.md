@@ -185,8 +185,10 @@ live stream uses, and it's unchanged.
 
 cs2's own `fps_max` limiter overshoots (~63-64 presents/s at `fps_max 60`), so a
 wall-clock capture squeezed 64 renders into 60 slots — `videorate` dropped 3-4 frames a
-second — and any render spike froze frames. While a segment records (`CLIP_FIXED_TIMESTEP`,
-default on):
+second — and any render spike froze frames. While a segment records (`CLIP_FIXED_TIMESTEP=1`,
+**off by default**: in production cs2 fell to ~25fps under it during a fight, so the
+game ran at ~0.45x; frame stamps are now re-anchored rather than trail the clock by
+more than 250ms, which had backed the muxer's audio queue up into an EOS deadlock):
 
 | Piece | Where | What it does |
 | --- | --- | --- |
@@ -203,7 +205,7 @@ the exact pacing. An image without the patched layer degrades to the wall-clock 
 The layer copies each frame into ONE shared image that the consumer reads on the CPU.
 Poking the consumer right after the copy was *submitted* let it read before the copy
 *landed* — the previous frame, or a torn one, depending on GPU timing. With
-`CLIP_FRAME_HANDOFF` (default on, host-map path only):
+`CLIP_FRAME_HANDOFF=1` (**off by default** until it's proven on a node; host-map path only):
 
 1. The layer hands the copy's fence to a helper thread; the present thread doesn't wait.
 2. The helper waits for the fence, pokes, then waits (≤20ms) for the consumer to report
