@@ -173,7 +173,7 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
     else
       pipeline="$vsrc ! $convert ! $enc ! $parse_caps ! qtmux faststart=true ! filesink location=$out_file"
     fi
-    # Fixed timestep (CLIP_FIXED_TIMESTEP, default on): cs2 steps exactly 1/fps of
+    # Fixed timestep (CLIP_FIXED_TIMESTEP=1, off by default): cs2 steps exactly 1/fps of
     # game time per frame (host_framerate, set by the renderer), the layer holds its
     # presents to exactly $fps, and the consumer stamps present N at N/fps — so every
     # output frame is one game step, with no wall-clock dup/drop from videorate. The
@@ -181,14 +181,14 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
     # in the ready file; it writes the video-vs-wall span to the timing file at exit
     # for the audio retime. Scoped to this spawn so the live consumer never inherits it.
     local fixed=0 pace=0
-    [ "${CLIP_FIXED_TIMESTEP:-1}" = "1" ] && { fixed=1; pace=$fps; }
+    [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] && { fixed=1; pace=$fps; }
     CLIP_CAPTURE_TIMING_FILE="${out_file}.timing"
     rm -f "$CLIP_CAPTURE_TIMING_FILE"
-    # Frame handoff (CLIP_FRAME_HANDOFF, default on; host-map path): the layer pokes
+    # Frame handoff (CLIP_FRAME_HANDOFF=1, off by default; host-map path): the layer pokes
     # only once the frame's GPU copy has landed and holds the next copy until the
     # consumer has read it — otherwise a read can get the previous frame or a torn one.
     VKCAP_FRAME_PTS=$fixed VKCAP_PACE_FPS=$pace VKCAP_TIMING_FILE="$CLIP_CAPTURE_TIMING_FILE" \
-    VKCAP_FRAME_ACK="${CLIP_FRAME_HANDOFF:-1}" \
+    VKCAP_FRAME_ACK="${CLIP_FRAME_HANDOFF:-0}" \
       spawn_logged vkcap-clip "${capture_pin[@]}" vkcapture-consumer "$pipeline"
     local pid=$SPAWNED_PID
     sleep 0.5
@@ -310,7 +310,7 @@ wait_clip_capture_ready() {
       log "  clip capture armed after ${waited}ms"
       if grep -q '^paced=1' "$marker" 2>/dev/null; then
         CLIP_CAPTURE_FIXED_TIMESTEP=1
-      elif [ "${CLIP_FIXED_TIMESTEP:-1}" = "1" ]; then
+      elif [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ]; then
         warn "  fixed timestep unavailable: layer didn't confirm pacing (image predates it?) — recording on the wall clock"
       fi
       return 0

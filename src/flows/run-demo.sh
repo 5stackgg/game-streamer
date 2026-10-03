@@ -45,13 +45,13 @@ start_status_reporter
 # (drops, no dups) — headroom keeps the 60fps output dup-free + A/V synced. The GPU
 # clock-lock (cs2_autotune) keeps it steady. 0 = uncapped; lower only if heat-limited.
 # Clip batches are set at launch (cs2 ignores a later fps_max). With the fixed timestep
-# (CLIP_FIXED_TIMESTEP, default on) the capture layer paces cs2 to exactly the clip rate
+# (CLIP_FIXED_TIMESTEP=1, off by default) the capture layer paces cs2 to exactly the clip rate
 # while recording, so the cap is only headroom: 2x the clip rate. cs2's own limiter
 # overshoots (~63-64 presents/s at fps_max 60), so it can't be the 60Hz clock itself.
 # Without the fixed timestep, launch at the clip rate.
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ] && [ -z "${CS2_FPS_MAX:-}" ]; then
   CS2_FPS_MAX=$(printf '%s' "${CLIP_BATCH_JOBS:-}" | node "$LIB_DIR/clip-helpers.mjs" jobs-fps)
-  [ "${CLIP_FIXED_TIMESTEP:-1}" = "1" ] && CS2_FPS_MAX=$(( CS2_FPS_MAX * 2 ))
+  [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ] && CS2_FPS_MAX=$(( CS2_FPS_MAX * 2 ))
 fi
 : "${CS2_FPS_MAX:=120}"
 export CS2_FPS_MAX
