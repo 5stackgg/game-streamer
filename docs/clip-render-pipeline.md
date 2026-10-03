@@ -247,14 +247,15 @@ follows the read.
 
 ### Encode quality
 
-Segments are captured with NVENC at `CLIP_VIDEO_KBPS` (40 Mbps) CBR, p5/high-quality,
+Segments are captured with NVENC at `CLIP_VIDEO_KBPS` (24 Mbps) CBR, p5/high-quality,
 with spatial and temporal AQ when the element has them. That file is an intermediate:
-STEP 9 (and the chip polish) re-encode it once more, with `h264_nvenc` p6/hq at constant
-quality `CLIP_FINAL_CQ` (19) capped at `CLIP_FINAL_MAXRATE` (30 Mbps), spatial+temporal
-AQ, lookahead and B-frames as references. The old final encode, libx264 veryfast at
-crf 22, came out around 8 Mbps and blocked up in smoke, flashes and fast flicks. NVENC
-is checked with a tiny test encode first; libx264 medium at `CLIP_FINAL_CRF` (18) is the
-fallback, and `CLIP_FINAL_ENCODER=x264` forces it.
+STEP 9 (and the chip polish) re-encode it with `h264_nvenc` p6/hq, two-pass (quarter
+res), spatial+temporal AQ, lookahead and B-frames as references, at `CLIP_FINAL_BITRATE`
+(9 Mbps) VBR with peaks to `CLIP_FINAL_MAXRATE` (14 Mbps) — about the size the old
+libx264 veryfast/crf 22 encode made, and roughly twice as fast. Constant quality 19
+tripled the file size without a visible difference. NVENC is checked with a tiny test
+encode first; the old libx264 encode is the fallback, and `CLIP_FINAL_ENCODER=x264`
+forces it.
 
 ---
 

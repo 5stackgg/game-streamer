@@ -685,15 +685,15 @@ has_audio_stream() {
 # (gst + ffmpeg); downgrade to h264 if either is missing.
 CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h264}"
 # yuv420p + high@4.2 are required for broad Safari/iOS/Android MP4 playback.
-# This is the delivered encode, so quality matters more than speed. NVENC (p6, hq,
-# constant quality 19 capped at 30Mbps, spatial+temporal AQ, lookahead, B-frames as
-# references) is both faster and much cleaner than the old libx264 veryfast/crf 22,
-# which came out at ~8Mbps and blocked up in smoke, flashes and fast flicks. NVENC
-# is checked with a tiny test encode; libx264 medium/crf 18 is the fallback.
-# CLIP_FINAL_CQ / CLIP_FINAL_MAXRATE tune it; CLIP_FINAL_ENCODER=x264 forces libx264.
-H264_X264_ARGS=(-c:v libx264 -preset medium -crf "${CLIP_FINAL_CRF:-18}" -pix_fmt yuv420p -profile:v high -level 4.2)
-H264_NVENC_ARGS=(-c:v h264_nvenc -preset p6 -tune hq -rc vbr -cq "${CLIP_FINAL_CQ:-19}" -b:v 0
-  -maxrate "${CLIP_FINAL_MAXRATE:-30M}" -bufsize "${CLIP_FINAL_BUFSIZE:-60M}"
+# The delivered encode. NVENC (p6/hq, spatial+temporal AQ, lookahead, B-frames as
+# references) at a target bitrate around what the old libx264 veryfast/crf 22 made
+# (~8-9Mbps, ~30MB for a 25s clip) — same size, cleaner, and about twice as fast.
+# Constant quality 19 tripled the size without a visible difference. NVENC is checked
+# with a tiny test encode; the old libx264 encode is the fallback.
+# CLIP_FINAL_BITRATE / CLIP_FINAL_MAXRATE tune it; CLIP_FINAL_ENCODER=x264 forces libx264.
+H264_X264_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
+H264_NVENC_ARGS=(-c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr
+  -b:v "${CLIP_FINAL_BITRATE:-9M}" -maxrate "${CLIP_FINAL_MAXRATE:-14M}" -bufsize "${CLIP_FINAL_BUFSIZE:-18M}"
   -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -b_ref_mode middle
   -pix_fmt yuv420p -profile:v high -level 4.2)
 # True when ffmpeg can encode with these args on this node (driver, GPU, options).
@@ -703,10 +703,10 @@ ffmpeg_venc_ok() {
 }
 if [ "${CLIP_FINAL_ENCODER:-nvenc}" != "x264" ] && ffmpeg_venc_ok "${H264_NVENC_ARGS[@]}"; then
   H264_VENC_ARGS=("${H264_NVENC_ARGS[@]}")
-  say "final encode: h264_nvenc p6/hq cq=${CLIP_FINAL_CQ:-19} maxrate=${CLIP_FINAL_MAXRATE:-30M}"
+  say "final encode: h264_nvenc p6/hq ${CLIP_FINAL_BITRATE:-9M} (max ${CLIP_FINAL_MAXRATE:-14M})"
 else
   H264_VENC_ARGS=("${H264_X264_ARGS[@]}")
-  say "final encode: libx264 medium crf=${CLIP_FINAL_CRF:-18} (h264_nvenc unavailable or CLIP_FINAL_ENCODER=x264)"
+  say "final encode: libx264 veryfast crf 22 (h264_nvenc unavailable or CLIP_FINAL_ENCODER=x264)"
 fi
 case "$CLIP_VIDEO_CODEC" in
   h265|hevc)
@@ -726,7 +726,7 @@ case "$CLIP_VIDEO_CODEC" in
       say "h265 probe: ffmpeg hevc_nvenc NOT FOUND in 'ffmpeg -encoders' (this build was compiled without NVENC HEVC)"
     fi
     if [ "$GST_H265_OK" = "1" ] && [ "$FFMPEG_H265_OK" = "1" ]; then
-      FFMPEG_VENC_ARGS=(-c:v hevc_nvenc -preset p6 -tune hq -rc vbr -cq "${CLIP_FINAL_CQ_HEVC:-22}" -b:v 0 -maxrate "${CLIP_FINAL_MAXRATE:-30M}" -bufsize "${CLIP_FINAL_BUFSIZE:-60M}" -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -tag:v hvc1)
+      FFMPEG_VENC_ARGS=(-c:v hevc_nvenc -preset p5 -rc vbr -cq 24 -tag:v hvc1)
       CLIP_VIDEO_CODEC=h265
       say "h265 selected for this render"
     else
@@ -1281,7 +1281,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   say "STEP 6: start capture (paused at $SEG_PRE) -> $SEG_FILE"
   # The gate now also waits out the pre-roll; keep the consumer's record-anyway backstop past it.
   export VKCAP_START_TIMEOUT_MS="${VKCAP_START_TIMEOUT_MS:-20000}"
-  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-40000}" 1; then
+  if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
   say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
