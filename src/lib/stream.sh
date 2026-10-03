@@ -170,6 +170,20 @@ $hud_src"
       capture_pin=(taskset -c "$GS_CAPTURE_CPUS")
       log "  capture pinned to cores $GS_CAPTURE_CPUS (cs2 confined to ${GS_CS2_CPUS:-all})"
     fi
+    # Grid pacing + frame handoff, as for clips (LIVE_PACE / LIVE_FRAME_HANDOFF, on by
+    # default; 0 = off). cs2 renders at fps_max 2x$fps and overshoots its own limiter,
+    # so stamping arrivals by wall clock and thinning with videorate stepped 2-3
+    # presents at a time (uneven motion). The layer now paces presents onto an exact
+    # $fps grid, a late frame skips the slots it missed, and each frame is stamped by
+    # slot count (re-anchored to the clock if the render ever lags) — so videorate
+    # passes every frame through. The handoff makes the layer hold its next copy until
+    # we've read the shared image, so a read never gets a torn or stale frame.
+    if [ "${LIVE_PACE:-1}" = "1" ]; then
+      export VKCAP_FRAME_PTS=1 VKCAP_PACE_FPS="$fps" VKCAP_PACE_SKIP=1
+    else
+      unset VKCAP_FRAME_PTS VKCAP_PACE_FPS VKCAP_PACE_SKIP
+    fi
+    export VKCAP_FRAME_ACK="${LIVE_FRAME_HANDOFF:-1}"
     spawn_logged "$gst_tag" "${capture_pin[@]}" vkcapture-consumer "$pipeline"
     sleep 1
     if kill -0 "$SPAWNED_PID" 2>/dev/null; then
