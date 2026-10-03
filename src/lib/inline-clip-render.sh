@@ -773,13 +773,15 @@ say "STEP 1b: disable cs2 auto-director (spec_autodirector 0)"
 # through this job's seeks and lead-ins (it's only set while a segment records).
 spec_post /demo/exec '{"cmd": "spec_autodirector 0; host_framerate 0"}'
 
-# Fixed timestep (default): the capture layer paces cs2 to exactly the output rate
+# Fixed timestep / grid pacing (CLIP_FIXED_TIMESTEP / CLIP_PACE): the capture layer paces cs2 to exactly the output rate
 # while recording, so fps_max only needs headroom above it (run-demo.sh sets 2x).
 # Without it cs2 should render at the capture rate: above it captured frames land one
 # or two renders apart and motion steps unevenly. The cap is set at launch
 # (run-demo.sh) because cs2 ignores a runtime fps_max.
 if [ "${CLIP_FIXED_TIMESTEP:-0}" = "1" ]; then
   say "STEP 1c: fixed timestep — host_framerate ${CLIP_OUTPUT_FPS:-60} + layer pacing while recording (fps_max ${CS2_FPS_MAX:-?})"
+elif [ "${CLIP_PACE:-0}" = "1" ]; then
+  say "STEP 1c: grid pacing — layer paces to ${CLIP_OUTPUT_FPS:-60}fps while recording, game clock untouched (fps_max ${CS2_FPS_MAX:-?})"
 elif [ "${CS2_FPS_MAX:-}" = "${CLIP_OUTPUT_FPS:-60}" ]; then
   say "STEP 1c: render cap fps_max ${CS2_FPS_MAX} matches output"
 else

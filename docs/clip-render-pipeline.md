@@ -200,6 +200,17 @@ more than 250ms, which had backed the muxer's audio queue up into an EOS deadloc
 `fps_max` for clip batches is 2x the clip rate: headroom for the catch-up, the layer does
 the exact pacing. An image without the patched layer degrades to the wall-clock capture.
 
+### Grid pacing
+
+`CLIP_PACE=1` (off by default) keeps the exact pacing and frame-count PTS but leaves the
+game clock alone (no `host_framerate`). A frame that misses its 1/fps slot presents in
+the slot it lands in and the missed slots are skipped, keeping the grid's phase, instead
+of the next frames catching up; the layer's poke carries how many slots the frame
+advanced, so the consumer's frame count always equals wall time. That fixes the
+`fps_max` overshoot drops, a render spike shows as an honest repeated frame, and the
+stamps can't drift behind the audio. The consumer's `DEBUG` line reports slots/s, frames,
+skipped slots and how long each frame took to read.
+
 ### The frame handoff
 
 The layer copies each frame into ONE shared image that the consumer reads on the CPU.

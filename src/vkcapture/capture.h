@@ -83,7 +83,8 @@ struct capture_texture_data {
     uint32_t color_space;
     uint8_t pace_fps;              // layer->consumer: the pacing it applies (patched layer; 0 = none)
     uint8_t frame_ack;             // layer->consumer: it hands frames off and waits for our read acks
-    uint8_t padding[63];
+    uint8_t pace_skip;             // layer->consumer: late frames skip missed slots (pokes carry slots)
+    uint8_t padding[62];
 } __attribute__((packed));
 
 #define CAPTURE_TEXTURE_DATA_TYPE 11
@@ -99,7 +100,8 @@ struct capture_control_data {
     uint8_t want_present_signal;   // consumer->layer: poke the SCM_RIGHTS eventfd per present
     uint8_t pace_fps;              // consumer->layer: hold presents to this exact fps (0 = off)
     uint8_t want_frame_ack;        // consumer->layer: 2nd SCM_RIGHTS fd is our read-done socket
-    uint8_t padding[9];
+    uint8_t pace_skip;             // consumer->layer: skip missed grid slots instead of catching up
+    uint8_t padding[8];
 } __attribute__((packed));
 
 #define CAPTURE_CONTROL_DATA_TYPE 10

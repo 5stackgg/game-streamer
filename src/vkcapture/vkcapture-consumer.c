@@ -111,7 +111,10 @@ struct state {
     int         present_efd;
     guint       present_src;
     bool        present_locked;   // engaged: presents drive the push, timer off
-    guint64     present_signals;  // VKCAP_DEBUG: total presents seen
+    guint64     present_signals;  // VKCAP_DEBUG: total presents (grid slots) seen
+    guint64     dbg_wakeups;      // VKCAP_DEBUG: present wakeups since the last tick
+    gint64      dbg_read_us_sum;  // VKCAP_DEBUG: wakeup -> frame pushed, summed / max per tick
+    gint64      dbg_read_us_max;
     // Fixed-timestep capture (VKCAP_FRAME_PTS=1, clips only): cs2 runs with
     // host_framerate = fps, so every present is exactly 1/fps of game time. Stamp
     // present N at base + N/fps instead of its wall-clock arrival, so a render spike
@@ -122,6 +125,7 @@ struct state {
     // it presents run at cs2's own rate and counting them would change the speed.
     bool        frame_pts;
     int         pace_fps;
+    bool        pace_skip;        // VKCAP_PACE_SKIP: grid pacing — late frames skip slots, game time untouched
     bool        fixed_ts;         // engaged: layer confirmed pacing, frame-count PTS
     GstClockTime pts_base;        // running time of present 0 (moves on a re-anchor)
     GstClockTime pts_first;       // PTS of the first stamped frame
@@ -269,8 +273,10 @@ static void send_control(int fd, bool capturing)
     if (capturing && st.present_efd >= 0)
         c.want_present_signal = 1;
     // Unpatched/older layers treat this as padding too: no pacing, cs2's own fps_max.
-    if (capturing && st.pace_fps > 0 && st.pace_fps <= 255)
+    if (capturing && st.pace_fps > 0 && st.pace_fps <= 255) {
         c.pace_fps = (uint8_t)st.pace_fps;
+        c.pace_skip = st.pace_skip ? 1 : 0;
+    }
     // Frame handoff: only on the host-map path, where the CPU read IS the consumption
     // (zero-copy hands the dmabuf to cudaupload, which reads it later, asynchronously).
     // A layer without handoff takes just the first fd (the kernel drops the second).
@@ -612,7 +618,12 @@ static gboolean on_present_signal(gint fd, GIOCondition cond, gpointer user)
     if (n != (ssize_t)sizeof(cnt)) return G_SOURCE_CONTINUE;  // spurious / EAGAIN
     if (!st.present_locked) engage_present_lock();
     st.present_signals += cnt;
+    const gint64 t0 = g_get_monotonic_time();
     const bool ok = push_one_frame(cnt);
+    const gint64 took = g_get_monotonic_time() - t0;
+    st.dbg_wakeups++;
+    st.dbg_read_us_sum += took;
+    if (took > st.dbg_read_us_max) st.dbg_read_us_max = took;
     // The frame is copied out (or deliberately skipped): release the shared image to
     // the layer's next copy. The running total makes a late ack harmless.
     if (st.handoff && st.ack_fd >= 0) {
@@ -631,9 +642,17 @@ static gboolean on_debug_tick(gpointer user)
     (void)user;
     guint64 d = st.present_signals - st.dbg_last;
     st.dbg_last = st.present_signals;
-    log_msg("DEBUG %s: presents/s=%llu (total=%llu)",
+    // presents/s counts grid slots under grid pacing (skipped=slots no frame came for);
+    // read = wakeup -> frame copied + pushed, which the frame handoff waits on.
+    const guint64 w = st.dbg_wakeups;
+    log_msg("DEBUG %s: presents/s=%llu frames=%llu skipped=%llu read avg/max=%.1f/%.1fms (total=%llu)",
             st.present_locked ? "present-locked" : "timer-fallback",
-            (unsigned long long)d, (unsigned long long)st.present_signals);
+            (unsigned long long)d, (unsigned long long)w, (unsigned long long)(d > w ? d - w : 0),
+            w ? (double)st.dbg_read_us_sum / (double)w / 1000.0 : 0.0, (double)st.dbg_read_us_max / 1000.0,
+            (unsigned long long)st.present_signals);
+    st.dbg_wakeups = 0;
+    st.dbg_read_us_sum = 0;
+    st.dbg_read_us_max = 0;
     if (st.fixed_ts && st.pts_frames > 0) {
         // Game time (presents/fps) vs wall-clock over the same frames. Negative =
         // render fell behind the pacing grid (a stall the layer couldn't catch up).
@@ -761,13 +780,15 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
                                : "WARN: layer has no frame handoff (image predates it?) — reads can race the GPU copy");
         }
         if (st.frame_pts && !st.playing) {
-            const bool paced = st.pace_fps > 0 && td->pace_fps == st.pace_fps;
+            const bool paced = st.pace_fps > 0 && td->pace_fps == st.pace_fps
+                               && (!st.pace_skip || td->pace_skip);
             if (paced != st.fixed_ts) {
                 st.fixed_ts = paced;
                 g_object_set(st.appsrc, "do-timestamp", paced ? FALSE : TRUE, NULL);
             }
             if (paced)
-                log_msg("fixed timestep ENGAGED (layer paces at %dfps; frame-count PTS)", st.pace_fps);
+                log_msg("%s ENGAGED (layer paces at %dfps; frame-count PTS)",
+                        st.pace_skip ? "grid pacing" : "fixed timestep", st.pace_fps);
             else
                 log_msg("WARN: layer didn't confirm %dfps pacing (got %d) — wall-clock PTS, no fixed timestep",
                         st.pace_fps, td->pace_fps);
@@ -959,6 +980,7 @@ int main(int argc, char **argv)
     { const char *t = getenv("VKCAP_START_TIMEOUT_MS"); st.start_timeout_ms = t ? atoi(t) : 10000; }
     st.frame_pts = getenv("VKCAP_FRAME_PTS") && atoi(getenv("VKCAP_FRAME_PTS")) != 0;
     st.pace_fps  = getenv("VKCAP_PACE_FPS") ? atoi(getenv("VKCAP_PACE_FPS")) : 0;
+    st.pace_skip = getenv("VKCAP_PACE_SKIP") && atoi(getenv("VKCAP_PACE_SKIP")) != 0;
     { const char *p = getenv("VKCAP_TIMING_FILE"); st.timing_path = (p && *p) ? p : NULL; }
     st.frame_ack = getenv("VKCAP_FRAME_ACK") && atoi(getenv("VKCAP_FRAME_ACK")) != 0;
     st.ack_fd = st.ack_peer = -1;
@@ -992,7 +1014,8 @@ int main(int argc, char **argv)
         // do-timestamp stays on until the layer confirms pacing (see the texture handler).
         g_object_set(src, "is-live", TRUE, "format", GST_FORMAT_TIME, "do-timestamp", TRUE, NULL);
         if (st.frame_pts || st.pace_fps > 0)
-            log_msg("fixed timestep requested: frame-pts=%d pace=%dfps", st.frame_pts, st.pace_fps);
+            log_msg("%s requested: frame-pts=%d pace=%dfps", st.pace_skip ? "grid pacing" : "fixed timestep",
+                    st.frame_pts, st.pace_fps);
         GstBus *bus = gst_element_get_bus(st.pipeline);
         gst_bus_add_watch(bus, on_bus, NULL);
         gst_object_unref(bus);
