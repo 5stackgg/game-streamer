@@ -1062,14 +1062,37 @@ CS2_LOG_OFFSET="${CS2_LOG_OFFSET//[!0-9]/}"; CS2_LOG_OFFSET="${CS2_LOG_OFFSET:-0
 # (Running it after the POV lock instead put the backward seek immediately before
 # capture and wrecked the whole segment — do not move it.) Gated once per cs2 by a
 # marker (one cs2 serves the whole batch → every later job/segment is then warm).
-# Off by default (CLIP_WARMUP=1 enables): every segment's uncaptured lead-in + 2s
-# pre-roll already draws the same spot before recording, and with the fixed
-# timestep a compile stall no longer shows as a frozen frame. CLIP_WARMUP_RATE sets
-# the speed (lower = more thorough).
+# On by default (CLIP_WARMUP=0 disables): with the warm-up off, the first segment of
+# a pod rendered at ~25fps for ~7s while cs2 compiled pipelines on every core (CPU
+# ~1000%, GPU idle) — the 2s pre-roll can't absorb that. After the replay it also
+# waits for cs2's CPU to settle (the compile queue draining), up to
+# CLIP_WARMUP_SETTLE_MS. CLIP_WARMUP_RATE sets the speed (lower = more thorough).
 WARM_MARKER="${CLIP_WARMUP_MARKER:-/tmp/game-streamer/.pipelines-warmed}"
+
+# Wait (bounded) for cs2's pipeline compiles to drain: while it compiles, cs2 burns
+# most cores; paused and idle it sits around 100-200%.
+warmup_wait_compile() {
+  local cap="${CLIP_WARMUP_SETTLE_MS:-12000}" cs2_pid hz a b pct=0 waited=0
+  # By process name: a full-cmdline match can hit a launcher/wrapper carrying cs2's path.
+  cs2_pid=$(pgrep -x cs2 | head -1)
+  [ -n "$cs2_pid" ] || return 0
+  hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+  while [ "$waited" -lt "$cap" ]; do
+    a=$(awk '{print $14+$15}' "/proc/$cs2_pid/stat" 2>/dev/null) || return 0
+    sleep 0.5
+    b=$(awk '{print $14+$15}' "/proc/$cs2_pid/stat" 2>/dev/null) || return 0
+    waited=$((waited + 500))
+    pct=$(( (b - a) * 200 / hz ))   # % of one core over the 0.5s window
+    if [ "$pct" -lt "${CLIP_WARMUP_SETTLE_CPU:-400}" ]; then
+      say "WARM-UP: compiles settled (cs2 at ${pct}% CPU) after ${waited}ms"
+      return 0
+    fi
+  done
+  say "WARM-UP: cs2 still busy (${pct}% CPU) after ${cap}ms — continuing"
+}
 warm_pipelines_if_cold() {
   local start="$1" dur_ms="$2"
-  [ "${CLIP_WARMUP:-0}" = "1" ] || return 0
+  [ "${CLIP_WARMUP:-1}" = "1" ] || return 0
   [ -f "$WARM_MARKER" ] && return 0
   local rate="${CLIP_WARMUP_RATE:-4}"
   [ "$rate" -lt 1 ] 2>/dev/null && rate=1
@@ -1091,6 +1114,7 @@ warm_pipelines_if_cold() {
   sleep "$(awk -v ms="$wait_ms" 'BEGIN{printf "%.2f", ms/1000}')"
   spec_post /demo/pause  '{"force": true}'
   spec_post /demo/speed  '{"rate": 1}'
+  warmup_wait_compile
   # No seek back: STEP 3 seeks to the segment's pre-roll next anyway, and a seek to
   # the tick cs2 is already parked on never shows a GSI change, so it can't settle.
   mkdir -p "$(dirname "$WARM_MARKER")" 2>/dev/null || true
