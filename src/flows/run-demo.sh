@@ -332,6 +332,7 @@ CS2_CONSOLE_OFFSET="${CS2_CONSOLE_OFFSET//[!0-9]/}"
 do_applaunch
 wait_for_cs2_process do_applaunch
 apply_cpu_split   # cs2 is Steam's child, not ours: pin it (and the HUD side) now
+( shader_log_report "this launch"; shader_cache_breakdown ) &   # diagnostics; du of ~20GB, off the launch path
 
 minimize_steam_windows
 trim_steam_webhelper  # ~1GB of CEF we no longer need once cs2 is up
