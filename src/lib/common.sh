@@ -530,14 +530,53 @@ compute_cpu_split() {
     # GS_CS2_PIN_MIN_CORES (default 6 → cs2 keeps ≥4) we'd hand heavily-threaded
     # cs2 too few exclusive cores, which hurts more than the contention it removes.
     [ -z "${CAPTURE_CPUS+x}" ] && CAPTURE_CPUS="${caplo}-${caphi}"
+    # Streams (not clip batches) also run the HUD (Electron), spec-server and picom
+    # all the time; give them AUX_CORES (default 1) just below the capture cores so
+    # they stop preempting cs2. Only with ≥ GS_AUX_PIN_MIN_CORES (10) cores.
+    local auxn=0
+    if [ -z "${AUX_CPUS+x}" ] && [ "${CLIP_BATCH_MODE:-0}" != "1" ] \
+       && [ "$ncpu" -ge "${GS_AUX_PIN_MIN_CORES:-10}" ]; then
+      auxn="${AUX_CORES:-1}"
+      [ "$auxn" -ge 1 ] && AUX_CPUS="$(( caplo - auxn ))-$(( caplo - 1 ))"
+    fi
     if [ -z "${CS2_CPUS+x}" ] && [ "$ncpu" -ge "${GS_CS2_PIN_MIN_CORES:-6}" ]; then
-      CS2_CPUS="0-$(( caplo - 1 ))"
+      CS2_CPUS="0-$(( caplo - auxn - 1 ))"
     fi
   fi
   GS_CAPTURE_CPUS="${CAPTURE_CPUS:-}"
   GS_CS2_CPUS="${CS2_CPUS:-}"
+  GS_AUX_CPUS="${AUX_CPUS:-}"
   GS_CPU_SPLIT_DONE=1
-  export GS_CAPTURE_CPUS GS_CS2_CPUS GS_CPU_SPLIT_DONE CAPTURE_CPUS CS2_CPUS
+  export GS_CAPTURE_CPUS GS_CS2_CPUS GS_AUX_CPUS GS_CPU_SPLIT_DONE CAPTURE_CPUS CS2_CPUS AUX_CPUS
+}
+
+# Set the CPU affinity of <pid>, every thread of it, and all its descendants.
+# Threads and children created later inherit it. Usage: pin_pid_tree <cpus> <pid>
+pin_pid_tree() {
+  local cpus="$1" pid="$2" kid
+  [ -n "$cpus" ] && [ -n "$pid" ] && command -v taskset >/dev/null 2>&1 || return 0
+  taskset -a -p -c "$cpus" "$pid" >/dev/null 2>&1 || return 0
+  for kid in $(pgrep -P "$pid" 2>/dev/null); do pin_pid_tree "$cpus" "$kid"; done
+}
+
+# Apply the CPU split to the running processes. cs2 is started by the already-running
+# Steam client (-applaunch just forwards the command line and exits), so wrapping
+# the launch in taskset never reached it: cs2 ran on every core, capture cores
+# included. Pin it — and, on streams, the HUD/spec-server/picom — once it's up.
+apply_cpu_split() {
+  compute_cpu_split
+  local cs2 p n=0
+  cs2=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
+  if [ -n "$cs2" ] && [ -n "$GS_CS2_CPUS" ]; then
+    pin_pid_tree "$GS_CS2_CPUS" "$cs2"
+    log "cpu split: cs2 (pid $cs2) -> cores $GS_CS2_CPUS"
+  fi
+  if [ -n "$GS_AUX_CPUS" ]; then
+    for p in $(pgrep -f '[j]ts-hud-manager') $(pgrep -f '[s]pectator/server.mjs') $(pgrep -x picom); do
+      pin_pid_tree "$GS_AUX_CPUS" "$p"; n=$((n + 1))
+    done
+    log "cpu split: HUD/spec-server/picom ($n procs) -> cores $GS_AUX_CPUS; capture -> ${GS_CAPTURE_CPUS:-all}"
+  fi
 }
 
 # taskset prefix array for cs2: confines cs2 to GS_CS2_CPUS so it never shares a

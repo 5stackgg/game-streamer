@@ -231,6 +231,7 @@ do_applaunch() {
 }
 do_applaunch
 wait_for_cs2_process do_applaunch
+apply_cpu_split   # cs2 is Steam's child, not ours: pin it (and the HUD side) now
 
 minimize_steam_windows
 trim_steam_webhelper  # ~1GB of CEF we no longer need once cs2 is up
