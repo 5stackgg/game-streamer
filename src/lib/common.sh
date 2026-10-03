@@ -155,6 +155,28 @@ _probe_cache_store() {
   printf '%s=%s\n' "$var" "${!var}" >> "$GS_PROBE_CACHE" 2>/dev/null || true
 }
 
+# Adaptive-quantization props for a CUDA NVENC element, when it has them: spatial AQ
+# moves bits into flat/dark areas and fast detail (smoke, flashes, sky) that plain CBR
+# leaves blocky; clips also get temporal AQ. Probed with gst-inspect once per pod (a
+# property the element lacks would kill the pipeline at parse time).
+# Usage: _nvenc_aq_props <element> <live|clip>
+_nvenc_aq_props() {
+  local el="$1" mode="$2" var="GS_AQ_${1//[!A-Za-z0-9]/_}" props=""
+  if ! _probe_cache_load "$var"; then
+    local spec
+    spec=$(gst-inspect-1.0 "$el" 2>/dev/null)
+    local found=""
+    grep -q '^ *spatial-aq ' <<<"$spec" && found+="s"
+    grep -q '^ *temporal-aq ' <<<"$spec" && found+="t"
+    printf -v "$var" '%s' "${found:-none}"
+    export "${var?}"
+    [ -n "$spec" ] && _probe_cache_store "$var"
+  fi
+  case "${!var}" in *s*) props+=" spatial-aq=true" ;; esac
+  [ "$mode" = clip ] && case "${!var}" in *t*) props+=" temporal-aq=true" ;; esac
+  printf '%s' "$props"
+}
+
 # Pick an H.264 encoder fragment. Tries nvcudah264enc, then nvh264enc
 # with a probed preset (driver 550+ dropped legacy preset GUIDs so
 # strict validation rejects them), then x264enc. Cached in GS_NVENC_PICK
@@ -178,8 +200,8 @@ pick_h264_pipeline() {
       esac
       # No leading `cudaupload` — pick_scale_convert owns the system->CUDA
       # upload (and does the scale/convert on the GPU when possible).
-      printf 'nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
-        "$preset" "$tune" "$gop" "$kbps"
+      printf 'nvcudah264enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s%s' \
+        "$preset" "$tune" "$gop" "$kbps" "$(_nvenc_aq_props nvcudah264enc "$mode")"
       ;;
     nvh264enc:*)
       local preset="${GS_NVENC_PICK#nvh264enc:}"
@@ -283,8 +305,8 @@ pick_h265_pipeline() {
       esac
       # No leading `cudaupload` — pick_scale_convert owns the system->CUDA
       # upload (and does the scale/convert on the GPU when possible).
-      printf 'nvcudah265enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s' \
-        "$preset" "$tune" "$gop" "$h265_kbps"
+      printf 'nvcudah265enc preset=%s tune=%s rate-control=cbr gop-size=%s bitrate=%s%s' \
+        "$preset" "$tune" "$gop" "$h265_kbps" "$(_nvenc_aq_props nvcudah265enc "$mode")"
       ;;
     nvh265enc:*)
       local preset="${GS_NVENC_PICK_H265#nvh265enc:}"

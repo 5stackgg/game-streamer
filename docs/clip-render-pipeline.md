@@ -74,7 +74,7 @@ These are the `STEP` labels as they print in the render log, in order.
 | `STEP 1b` | `spec_autodirector 0` — otherwise CS2's director fights the POV lock and the camera flickers at segment starts. |
 | `STEP 1a` | Stop the live capture (live pods only — the GPU encoder can't serve stream and clip at once). |
 | prep | Decide branding; **defer** the Remotion player-chip render. Running it during a capture caused a visible stutter, so it's kept outside the capture window. |
-| warm-up | Replay the first range at 4x, uncaptured, then wait for the compiles to settle. Once per CS2 process. |
+| warm-up | Before each segment, replay its range at 4x, uncaptured, then wait for the compiles to settle. Ranges this CS2 already warmed are skipped. |
 | `STEP 2`–`STEP 8` | **Segment loop**, once per kill. Each pass writes one `seg-NNN.mp4`. See below. |
 | polish | Burn the chip overlay into each segment, backgrounded so it overlaps the next segment's capture. Reaped before assembly. |
 | `STEP 9` | Concat segments + append the outro. Tries a stream copy first and verifies the output duration; falls back to a filter-graph re-encode if the copy is refused or the duration drifts >2s. Direct cuts, no fades — crossfades compounded with CS2's seek-load frames into ~1s of dead air per join. |
@@ -211,6 +211,9 @@ advanced, so the consumer's frame count always equals wall time. That fixes the
 stamps can't drift behind the audio. The consumer's `DEBUG` line reports slots/s, frames,
 skipped slots and how long each frame took to read.
 
+Live and replay streams use the same pacing and the frame handoff on their cs2+HUD
+composite capture (`LIVE_PACE`, `LIVE_FRAME_HANDOFF`, both on by default).
+
 ### Zero-copy
 
 `CLIP_ZEROCOPY=1` (off by default). Measured on a node against the host-map copy with the frame handoff on: it engaged cleanly but capture CPU didn't drop (34% → 38%), GPU use rose (49% → 60%) and frame reads went from 1.4ms to ~5ms (the synchronous CUDA copy), so it stays opt-in. `cudaupload` has never taken DMABuf input on any
@@ -241,6 +244,17 @@ Poking the consumer right after the copy was *submitted* let it read before the 
 The consumer logs `frame handoff ENGAGED`, or a WARN when the layer predates it. It covers
 zero-copy too: the CUDA copy out of the shared image is synchronous, so the ack still
 follows the read.
+
+### Encode quality
+
+Segments are captured with NVENC at `CLIP_VIDEO_KBPS` (40 Mbps) CBR, p5/high-quality,
+with spatial and temporal AQ when the element has them. That file is an intermediate:
+STEP 9 (and the chip polish) re-encode it once more, with `h264_nvenc` p6/hq at constant
+quality `CLIP_FINAL_CQ` (19) capped at `CLIP_FINAL_MAXRATE` (30 Mbps), spatial+temporal
+AQ, lookahead and B-frames as references. The old final encode, libx264 veryfast at
+crf 22, came out around 8 Mbps and blocked up in smoke, flashes and fast flicks. NVENC
+is checked with a tiny test encode first; libx264 medium at `CLIP_FINAL_CRF` (18) is the
+fallback, and `CLIP_FINAL_ENCODER=x264` forces it.
 
 ---
 
