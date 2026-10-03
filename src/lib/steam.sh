@@ -1406,7 +1406,9 @@ kill_steam() {
 }
 
 # Ask the running Steam client to exit cleanly, then SIGKILL whatever is left after
-# <timeout>s (default 20). Steam only saves its runtime state on a clean exit, and
+# <timeout>s (default 20). When cs2 exits, Steam first merges the NVIDIA shader cache
+# (~30s here) and only then exits, so short timeouts kill it mid-merge — the first
+# try (15s) did exactly that and the next boot reprocessed again. Steam only saves its runtime state on a clean exit, and
 # every pod used to end with kill_steam (SIGKILL). Its shader log shows the cost:
 # each boot "Committed bucket ... (AppID 730) from 0 to <manifest>" — it forgot the
 # precompiled shader bucket it had already processed — then spends ~40s replaying

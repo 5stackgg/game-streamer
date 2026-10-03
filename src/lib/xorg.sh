@@ -285,7 +285,9 @@ stop_xorg() {
 # Orderly end-of-pod teardown: GPU clients first, then the X server.
 shutdown_display() {
   if declare -F steam_graceful_shutdown >/dev/null 2>&1; then
-    steam_graceful_shutdown "${STEAM_SHUTDOWN_TIMEOUT:-15}"
+    # On TERM, Kubernetes allows terminationGracePeriodSeconds (30s by default) in all,
+    # so stay under it; raise that in the pod spec (and this) to let the merge finish.
+    steam_graceful_shutdown "${STEAM_SHUTDOWN_TIMEOUT:-25}"
   else
     declare -F kill_steam >/dev/null 2>&1 && kill_steam
   fi
