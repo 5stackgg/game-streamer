@@ -24,7 +24,7 @@ export_cs2_shader_cache_env() {
   local _cn _cb
   _cn=$(find "$__GL_SHADER_DISK_CACHE_PATH" -type f 2>/dev/null | wc -l | tr -d ' ')
   _cb=$(du -sh "$__GL_SHADER_DISK_CACHE_PATH" 2>/dev/null | awk '{print $1}')
-  log "cs2 shader cache: path=$__GL_SHADER_DISK_CACHE_PATH size=$__GL_SHADER_DISK_CACHE_SIZE occupancy=${_cb:-?} files=${_cn:-?}"
+  log "cs2 shader cache: steam=$(cs2_shadercache_dir) ($(cs2_shadercache_mib)MiB, what cs2 uses) nvcache=${_cb:-?}/${_cn:-?} files"
 }
 
 shader_log_file() {
