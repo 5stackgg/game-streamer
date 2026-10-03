@@ -184,7 +184,11 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
     [ "${CLIP_FIXED_TIMESTEP:-1}" = "1" ] && { fixed=1; pace=$fps; }
     CLIP_CAPTURE_TIMING_FILE="${out_file}.timing"
     rm -f "$CLIP_CAPTURE_TIMING_FILE"
+    # Frame handoff (CLIP_FRAME_HANDOFF, default on; host-map path): the layer pokes
+    # only once the frame's GPU copy has landed and holds the next copy until the
+    # consumer has read it — otherwise a read can get the previous frame or a torn one.
     VKCAP_FRAME_PTS=$fixed VKCAP_PACE_FPS=$pace VKCAP_TIMING_FILE="$CLIP_CAPTURE_TIMING_FILE" \
+    VKCAP_FRAME_ACK="${CLIP_FRAME_HANDOFF:-1}" \
       spawn_logged vkcap-clip "${capture_pin[@]}" vkcapture-consumer "$pipeline"
     local pid=$SPAWNED_PID
     sleep 0.5

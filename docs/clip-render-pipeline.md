@@ -198,6 +198,22 @@ default on):
 `fps_max` for clip batches is 2x the clip rate: headroom for the catch-up, the layer does
 the exact pacing. An image without the patched layer degrades to the wall-clock capture.
 
+### The frame handoff
+
+The layer copies each frame into ONE shared image that the consumer reads on the CPU.
+Poking the consumer right after the copy was *submitted* let it read before the copy
+*landed* — the previous frame, or a torn one, depending on GPU timing. With
+`CLIP_FRAME_HANDOFF` (default on, host-map path only):
+
+1. The layer hands the copy's fence to a helper thread; the present thread doesn't wait.
+2. The helper waits for the fence, pokes, then waits (≤20ms) for the consumer to report
+   the read done on an ack socket (a running total, so a late ack can't count twice).
+3. The next present drains that before submitting its copy, so the image never changes
+   under a read.
+
+The consumer logs `frame handoff ENGAGED`, or a WARN when the layer predates it. Zero-copy
+isn't covered: there `cudaupload` reads the dmabuf later, asynchronously.
+
 ---
 
 ## 4. Every wait, and what happens when it expires

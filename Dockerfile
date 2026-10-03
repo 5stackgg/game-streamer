@@ -102,8 +102,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends cuda-nvrtc-12-6
 # vkcapture-consumer (compiled below) is the socket consumer. Pinned to a release
 # tag for reproducible builds. Requires nvidia-drm.modeset=1 on the host.
 # present-eventfd.patch adds a per-present eventfd poke (see src/vkcapture/) so the
-# consumer can frame-lock to cs2's presents, plus exact present pacing on request
-# (clip fixed timestep); copied in before the clone so `git
+# consumer can frame-lock to cs2's presents, plus, on request, exact present pacing
+# (clip fixed timestep) and a frame handoff (poke after the GPU copy lands, hold the
+# next copy until the consumer has read it); copied in before the clone so `git
 # apply` can patch the freshly cloned tree (src/ proper isn't COPY'd until later).
 COPY src/vkcapture/present-eventfd.patch /tmp/present-eventfd.patch
 RUN set -eux; \

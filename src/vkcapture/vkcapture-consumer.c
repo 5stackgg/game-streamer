@@ -127,6 +127,16 @@ struct state {
     GstClockTime pts_last_rt;     // running time of the latest stamped frame
     guint64     pts_frames;       // presents stamped so far (game steps)
     const char *timing_path;      // VKCAP_TIMING_FILE: video vs wall span, written at exit
+    // Frame handoff (VKCAP_FRAME_ACK=1, host-map only): the layer pokes only once the
+    // frame's GPU copy has landed in the shared image, and doesn't overwrite it with
+    // the next copy until we report the read done on ack_fd (a SEQPACKET socketpair;
+    // the peer end goes to the layer). Without it the poke raced the copy, so a read
+    // got the previous frame or a torn one.
+    bool        frame_ack;
+    int         ack_fd;           // our end: we send the running count of presents read
+    int         ack_peer;         // the layer's end, passed via SCM_RIGHTS
+    bool        handoff;          // engaged: the layer echoed frame_ack
+    guint64     ack_count;        // presents read since the fds were (re)sent
     guint64     dbg_last;         // VKCAP_DEBUG: present_signals at last debug tick
     bool        debug;
 
@@ -257,21 +267,33 @@ static void send_control(int fd, bool capturing)
     // Unpatched/older layers treat this as padding too: no pacing, cs2's own fps_max.
     if (capturing && st.pace_fps > 0 && st.pace_fps <= 255)
         c.pace_fps = (uint8_t)st.pace_fps;
+    // Frame handoff: only on the host-map path, where the CPU read IS the consumption
+    // (zero-copy hands the dmabuf to cudaupload, which reads it later, asynchronously).
+    // A layer without handoff takes just the first fd (the kernel drops the second).
+    if (c.want_present_signal && st.frame_ack && !st.zerocopy && st.ack_peer >= 0)
+        c.want_frame_ack = 1;
 
     struct iovec io = { .iov_base = &c, .iov_len = sizeof(c) };
     struct msghdr msg = {0};
     msg.msg_iov = &io;
     msg.msg_iovlen = 1;
-    char cmsg_buf[CMSG_SPACE(sizeof(int))];
+    char cmsg_buf[CMSG_SPACE(sizeof(int) * 2)];
     if (c.want_present_signal) {
+        const int nfds = c.want_frame_ack ? 2 : 1;
+        const int fds[2] = { st.present_efd, st.ack_peer };
         msg.msg_control = cmsg_buf;
         msg.msg_controllen = sizeof(cmsg_buf);
         struct cmsghdr *cm = CMSG_FIRSTHDR(&msg);
         cm->cmsg_level = SOL_SOCKET;
         cm->cmsg_type  = SCM_RIGHTS;
-        cm->cmsg_len   = CMSG_LEN(sizeof(int));
-        memcpy(CMSG_DATA(cm), &st.present_efd, sizeof(int));
+        cm->cmsg_len   = CMSG_LEN(sizeof(int) * nfds);
+        memcpy(CMSG_DATA(cm), fds, sizeof(int) * nfds);
         msg.msg_controllen = cm->cmsg_len;
+        // The layer restarts its poke count with these fds: restart ours too, and
+        // drop pokes still queued from before so they can't count as reads.
+        uint64_t stale;
+        while (read(st.present_efd, &stale, sizeof(stale)) == sizeof(stale)) {}
+        st.ack_count = 0;
     }
 
     ssize_t n = sendmsg(fd, &msg, MSG_NOSIGNAL);
@@ -567,7 +589,15 @@ static gboolean on_present_signal(gint fd, GIOCondition cond, gpointer user)
     if (n != (ssize_t)sizeof(cnt)) return G_SOURCE_CONTINUE;  // spurious / EAGAIN
     if (!st.present_locked) engage_present_lock();
     st.present_signals += cnt;
-    if (!push_one_frame(cnt)) { st.present_src = 0; return G_SOURCE_REMOVE; }
+    const bool ok = push_one_frame(cnt);
+    // The frame is copied out (or deliberately skipped): release the shared image to
+    // the layer's next copy. The running total makes a late ack harmless.
+    if (st.handoff && st.ack_fd >= 0) {
+        st.ack_count += cnt;
+        ssize_t w = send(st.ack_fd, &st.ack_count, sizeof(st.ack_count), MSG_DONTWAIT | MSG_NOSIGNAL);
+        (void)w;
+    }
+    if (!ok) { st.present_src = 0; return G_SOURCE_REMOVE; }
     return G_SOURCE_CONTINUE;
 }
 
@@ -701,6 +731,12 @@ static gboolean on_client_data(gint fd, GIOCondition cond, gpointer user)
         // Frame-count PTS needs the layer's exact pacing: engage it only when the
         // layer echoes the rate we asked for (older layers send 0). Decided before
         // recording starts, then held for the whole capture.
+        if (st.frame_ack && st.ack_fd >= 0 && !st.zerocopy) {
+            // Once per texture (i.e. per swapchain), so the log shows which way it went.
+            st.handoff = td->frame_ack != 0;
+            log_msg(st.handoff ? "frame handoff ENGAGED (poke after the GPU copy lands; layer waits for our read)"
+                               : "WARN: layer has no frame handoff (image predates it?) — reads can race the GPU copy");
+        }
         if (st.frame_pts && !st.playing) {
             const bool paced = st.pace_fps > 0 && td->pace_fps == st.pace_fps;
             if (paced != st.fixed_ts) {
@@ -785,6 +821,9 @@ static gboolean on_sigint(gpointer user)
     log_msg("SIGINT — sending EOS and finalizing");
     if (st.tick_src)    { g_source_remove(st.tick_src);    st.tick_src = 0; }
     if (st.present_src) { g_source_remove(st.present_src); st.present_src = 0; }
+    // No more reads: closing our ack end tells the layer to stop waiting on us now,
+    // instead of timing out on every present until it notices the disconnect.
+    if (st.ack_fd >= 0) { close(st.ack_fd); st.ack_fd = -1; st.handoff = false; }
     if (st.pipeline && st.playing) {
         // EOS the WHOLE pipeline (same as `gst-launch -e`) so BOTH the video appsrc
         // and the audio pulsesrc branch drain into qtmux and the moov atom is
@@ -876,6 +915,8 @@ int main(int argc, char **argv)
     st.frame_pts = getenv("VKCAP_FRAME_PTS") && atoi(getenv("VKCAP_FRAME_PTS")) != 0;
     st.pace_fps  = getenv("VKCAP_PACE_FPS") ? atoi(getenv("VKCAP_PACE_FPS")) : 0;
     { const char *p = getenv("VKCAP_TIMING_FILE"); st.timing_path = (p && *p) ? p : NULL; }
+    st.frame_ack = getenv("VKCAP_FRAME_ACK") && atoi(getenv("VKCAP_FRAME_ACK")) != 0;
+    st.ack_fd = st.ack_peer = -1;
     for (int i = 0; i < 4; i++) st.fds[i] = -1;
 
     if (!st.test_mode) {
@@ -952,6 +993,15 @@ int main(int argc, char **argv)
             log_msg("WARN: eventfd failed (%s) — present-lock off, fps timer only", strerror(errno));
         else
             st.present_src = g_unix_fd_add(st.present_efd, G_IO_IN | G_IO_ERR, on_present_signal, NULL);
+        if (st.frame_ack && st.present_efd >= 0) {
+            int sv[2];
+            if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv) == 0) {
+                st.ack_fd = sv[0];
+                st.ack_peer = sv[1];
+            } else {
+                log_msg("WARN: ack socketpair failed (%s) — no frame handoff", strerror(errno));
+            }
+        }
 
         guint interval_ms = (guint)(1000 / st.fps);
         if (interval_ms < 1) interval_ms = 1;   // clamp: absurd VKCAP_FPS -> 0 -> busy loop
@@ -994,6 +1044,8 @@ int main(int argc, char **argv)
     release_frame();
     if (st.present_src) g_source_remove(st.present_src);
     if (st.present_efd >= 0) close(st.present_efd);
+    if (st.ack_fd >= 0) close(st.ack_fd);
+    if (st.ack_peer >= 0) close(st.ack_peer);
     if (st.client_fd >= 0) close(st.client_fd);
     if (st.listen_fd >= 0) close(st.listen_fd);
     log_msg("exit");
