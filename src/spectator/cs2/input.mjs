@@ -51,6 +51,16 @@ async function focusCs2(win) {
   await run(["xdotool", "windowfocus", "--sync", win]);
 }
 
+// Map + focus cs2's window without sending a key. Anything that only LOOKS at the
+// screen (the demo-bar watcher) otherwise sees the empty root window for as long
+// as cs2 stays withdrawn. False when there's no cs2 window.
+export async function revealCs2() {
+  const win = await findCs2Window();
+  if (win === null) return false;
+  await focusCs2(win);
+  return true;
+}
+
 export async function focusState() {
   const win = await findCs2Window();
   const current = await run(["xdotool", "getwindowfocus"]);
