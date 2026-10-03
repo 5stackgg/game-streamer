@@ -125,20 +125,42 @@ spawn_logged() {
   SPAWNED_PID=$!
 }
 
+# GStreamer element probes are slow — each gst-inspect / test pipeline loads the
+# nvcodec plugin and initialises CUDA (~1-2s) — and most callers run inside $(...)
+# subshells, where an exported "per-process" cache dies with the subshell: clip
+# capture re-probed the encoder and scaler on every segment (~15s). The answers
+# can't change for the life of the pod, so they're cached in a file.
+GS_PROBE_CACHE="${GS_PROBE_CACHE:-/tmp/game-streamer/gst-probes.env}"
+
+# Load <var> from the probe cache unless it's already set. 0 if it's set now.
+_probe_cache_load() {
+  local var="$1" line
+  [ -n "${!var:-}" ] && return 0
+  line=$(grep -m1 "^${var}=" "$GS_PROBE_CACHE" 2>/dev/null) || return 1
+  printf -v "$var" '%s' "${line#*=}"
+  export "${var?}"
+  [ -n "${!var}" ]
+}
+
+# Append <var>'s value to the probe cache (the first entry wins on load).
+_probe_cache_store() {
+  local var="$1"
+  [ -n "${!var:-}" ] || return 0
+  mkdir -p "$(dirname "$GS_PROBE_CACHE")" 2>/dev/null || return 0
+  printf '%s=%s\n' "$var" "${!var}" >> "$GS_PROBE_CACHE" 2>/dev/null || true
+}
+
 # Pick an H.264 encoder fragment. Tries nvcudah264enc, then nvh264enc
 # with a probed preset (driver 550+ dropped legacy preset GUIDs so
-# strict validation rejects them), then x264enc. Cached per-process in
-# GS_NVENC_PICK; override with GS_NVENC_ELEMENT.
+# strict validation rejects them), then x264enc. Cached in GS_NVENC_PICK
+# and the probe cache; override with GS_NVENC_ELEMENT.
 # Usage: pick_h264_pipeline <gop> <kbps> [live|clip]
 pick_h264_pipeline() {
   local gop="${1:?gop required}"
   local kbps="${2:?kbps required}"
   local mode="${3:-live}"
 
-  if [ -z "${GS_NVENC_PICK:-}" ]; then
-    GS_NVENC_PICK=$(_resolve_h264_method) || return 1
-    export GS_NVENC_PICK
-  fi
+  _ensure_nvenc_pick h264
 
   case "$GS_NVENC_PICK" in
     nvcudah264enc)
@@ -243,10 +265,7 @@ pick_h265_pipeline() {
   local kbps="${2:?kbps required}"
   local mode="${3:-live}"
 
-  if [ -z "${GS_NVENC_PICK_H265:-}" ]; then
-    GS_NVENC_PICK_H265=$(_resolve_h265_method) || true
-    export GS_NVENC_PICK_H265
-  fi
+  _ensure_nvenc_pick h265
 
   local h265_kbps=$((kbps * 7 / 10))
 
@@ -279,10 +298,7 @@ pick_h265_pipeline() {
 
 # 0 if NVENC HEVC is available on this pod. Caches into GS_NVENC_PICK_H265.
 h265_available() {
-  if [ -z "${GS_NVENC_PICK_H265:-}" ]; then
-    GS_NVENC_PICK_H265=$(_resolve_h265_method) || true
-    export GS_NVENC_PICK_H265
-  fi
+  _ensure_nvenc_pick h265
   case "${GS_NVENC_PICK_H265:-none}" in
     none|"") return 1 ;;
     *)       return 0 ;;
@@ -354,17 +370,24 @@ _probe_nvh265enc_preset() {
 # in a `$(...)` subshell so its cached export never reaches the parent;
 # re-resolve here (same probe, stderr muted) so the scaler's CUDA-vs-CPU choice
 # matches the chosen encoder — else the scaler picks CPU for a CUDA encoder.
+# Resolve once per pod: the env, then the probe cache, then a real probe. Only GPU
+# picks are cached — x264enc / none can be a transient NVENC failure worth retrying.
+# Usage: _ensure_nvenc_pick <h264|h265> [quiet]  (quiet mutes the probe's log line)
 _ensure_nvenc_pick() {
+  local var=GS_NVENC_PICK resolve=_resolve_h264_method pick
   case "${1:-h264}" in
-    h265|hevc)
-      [ -n "${GS_NVENC_PICK_H265:-}" ] && return 0
-      GS_NVENC_PICK_H265=$(_resolve_h265_method 2>/dev/null) || true
-      export GS_NVENC_PICK_H265 ;;
-    *)
-      [ -n "${GS_NVENC_PICK:-}" ] && return 0
-      GS_NVENC_PICK=$(_resolve_h264_method 2>/dev/null) || true
-      export GS_NVENC_PICK ;;
+    h265|hevc) var=GS_NVENC_PICK_H265 resolve=_resolve_h265_method ;;
   esac
+  _probe_cache_load "$var" && return 0
+  if [ "${2:-}" = quiet ]; then
+    pick=$("$resolve" 2>/dev/null) || true
+  else
+    pick=$("$resolve") || true
+  fi
+  printf -v "$var" '%s' "$pick"
+  export "${var?}"
+  case "$pick" in nv*) _probe_cache_store "$var" ;; esac
+  return 0
 }
 
 # True when the resolved NVENC element for $codec is the modern CUDA
@@ -372,7 +395,7 @@ _ensure_nvenc_pick() {
 # Self-heals a cold cache via _ensure_nvenc_pick so it's correct even when
 # called from a different subshell than the one that picked the encoder.
 _active_encoder_is_cuda() {
-  _ensure_nvenc_pick "${1:-h264}"
+  _ensure_nvenc_pick "${1:-h264}" quiet
   case "${1:-h264}" in
     h265|hevc) [ "${GS_NVENC_PICK_H265:-}" = "nvcudah265enc" ] ;;
     *)         [ "${GS_NVENC_PICK:-}" = "nvcudah264enc" ] ;;
@@ -380,12 +403,12 @@ _active_encoder_is_cuda() {
 }
 
 # True when GPU scale+convert is usable: not disabled via GS_GPU_SCALE, and
-# both cudaupload + cudaconvertscale exist on this pod. Cached per-process.
+# both cudaupload + cudaconvertscale exist on this pod. Cached per pod.
 _cuda_scale_available() {
   case "${GS_GPU_SCALE:-auto}" in
     0|off|false|no) return 1 ;;
   esac
-  if [ -z "${GS_CUDASCALE_OK:-}" ]; then
+  if ! _probe_cache_load GS_CUDASCALE_OK; then
     if gst-inspect-1.0 cudaupload >/dev/null 2>&1 \
        && gst-inspect-1.0 cudaconvertscale >/dev/null 2>&1; then
       GS_CUDASCALE_OK=1
@@ -393,6 +416,7 @@ _cuda_scale_available() {
       GS_CUDASCALE_OK=0
     fi
     export GS_CUDASCALE_OK
+    _probe_cache_store GS_CUDASCALE_OK
   fi
   [ "$GS_CUDASCALE_OK" = 1 ]
 }
@@ -401,15 +425,16 @@ _cuda_scale_available() {
 # prerequisite for the zero-copy clip path (consumer pushes memory:DMABuf buffers;
 # without import support negotiation fails and the consumer dies mid-render). Older
 # gst-plugins-bad builds lack it. Gates VKCAP_ZEROCOPY so a miss degrades to the
-# host-map copy path up front instead of crashing. Cached per-process.
+# host-map copy path up front instead of crashing. Cached per pod.
 _cudaupload_dmabuf_ok() {
-  if [ -z "${GS_CUDAUPLOAD_DMABUF:-}" ]; then
+  if ! _probe_cache_load GS_CUDAUPLOAD_DMABUF; then
     if gst-inspect-1.0 cudaupload 2>/dev/null | grep -q 'memory:DMABuf'; then
       GS_CUDAUPLOAD_DMABUF=1
     else
       GS_CUDAUPLOAD_DMABUF=0
     fi
     export GS_CUDAUPLOAD_DMABUF
+    _probe_cache_store GS_CUDAUPLOAD_DMABUF
   fi
   [ "$GS_CUDAUPLOAD_DMABUF" = 1 ]
 }
