@@ -284,7 +284,11 @@ stop_xorg() {
 
 # Orderly end-of-pod teardown: GPU clients first, then the X server.
 shutdown_display() {
-  declare -F kill_steam >/dev/null 2>&1 && kill_steam
+  if declare -F steam_graceful_shutdown >/dev/null 2>&1; then
+    steam_graceful_shutdown "${STEAM_SHUTDOWN_TIMEOUT:-15}"
+  else
+    declare -F kill_steam >/dev/null 2>&1 && kill_steam
+  fi
   sleep 1
   stop_xorg || true
 }
