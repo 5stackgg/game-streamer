@@ -113,6 +113,11 @@ cs2_mark_fatal() {
   printf '%s\n' "${1:-cs2 GetClassBaseline fatal}" > "$CS2_FATAL_SENTINEL" 2>/dev/null || true
 }
 
+# mawk (Ubuntu's awk) block-buffers its input from a pipe, so a daemon's lines only
+# surfaced in bursts (often all at exit, every line carrying the same timestamp).
+# -W interactive makes it read line by line; gawk doesn't need or know it.
+if awk -W version 2>&1 | grep -q mawk; then GS_AWK_LINES=(-W interactive); else GS_AWK_LINES=(); fi
+
 # Stdout+stderr of the daemon stream to this process's stderr with a
 # "[<tag>] " prefix per line — k8s container logs become self-describing.
 # nohup detaches so HUP doesn't kill it when launcher scripts exit;
@@ -120,7 +125,7 @@ cs2_mark_fatal() {
 spawn_logged() {
   local tag="$1"; shift
   nohup "$@" \
-    > >(awk -v t="$tag" '{print "["t"] " $0; fflush()}' >&2) \
+    > >(awk "${GS_AWK_LINES[@]}" -v t="$tag" '{print "["t"] " $0; fflush()}' >&2) \
     2>&1 &
   SPAWNED_PID=$!
 }
