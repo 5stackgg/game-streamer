@@ -173,7 +173,7 @@ struct state {
     guint64     pts_frames;       // presents stamped so far (game steps)
     guint64     pts_reanchors;    // times the stamps were pulled back to the clock
     const char *timing_path;      // VKCAP_TIMING_FILE: video vs wall span, written at exit
-    // Frame handoff (VKCAP_FRAME_ACK=1, host-map only): the layer pokes only once the
+    // Frame handoff (VKCAP_FRAME_ACK=1): the layer pokes only once the
     // frame's GPU copy has landed in the shared image, and doesn't overwrite it with
     // the next copy until we report the read done on ack_fd (a SEQPACKET socketpair;
     // the peer end goes to the layer). Without it the poke raced the copy, so a read
