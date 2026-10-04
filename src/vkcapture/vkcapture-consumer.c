@@ -172,6 +172,9 @@ struct state {
     GstClockTime pts_last_rt;     // running time of the latest stamped frame
     guint64     pts_frames;       // presents stamped so far (game steps)
     guint64     pts_reanchors;    // times the stamps were pulled back to the clock
+    GstClockTimeDiff grid_lag_min; // grid pacing: smallest clock - PTS this window
+    guint       grid_lag_frames;  // frames into the current window
+    guint64     grid_reanchors;   // grid restarts taken back out
     const char *timing_path;      // VKCAP_TIMING_FILE: video vs wall span, written at exit
     // Frame handoff (VKCAP_FRAME_ACK=1): the layer pokes only once the
     // frame's GPU copy has landed in the shared image, and doesn't overwrite it with
@@ -495,6 +498,17 @@ static bool start_gate_open(void)
 
 // How far frame-count stamps may trail the clock before they're re-anchored.
 #define FRAME_PTS_MAX_LAG (250 * GST_MSECOND)
+// Grid pacing counts every slot (a late frame carries the ones it skipped), so its
+// frame count IS wall time, except across a grid restart: a capture reset (swapchain
+// rebuild on a demo seek, a map change) advances one slot for the whole gap. The
+// audio is stamped on the clock, so under FRAME_PTS_MAX_LAG that gap stayed in as a
+// permanent A/V offset, and each one added to it until audio ran 250ms behind for
+// the rest of the stream; mpegtsmux then held that much audio waiting on the video,
+// so a video hitch tipped the leaky audio queue into dropping audio. So: allow this
+// much lag, judged by its floor over a short window, then put the stamps back on
+// the clock outright.
+#define FRAME_PTS_GRID_MAX_LAG_FRAMES 2
+#define FRAME_PTS_GRID_WINDOW_FRAMES  30
 
 // Pipeline running time now (clock - base_time): the timeline pulsesrc stamps on.
 static GstClockTime running_time_now(void)
@@ -731,6 +745,25 @@ static bool push_one_frame(guint64 steps)
                 log_msg("WARN: render fell %" G_GUINT64_FORMAT "ms behind the %dfps timestep — re-anchoring frame stamps to the clock",
                         (guint64)((shift + FRAME_PTS_MAX_LAG) / GST_MSECOND), st.fps);
         }
+        if (st.pace_skip) {
+            // Grid pacing: take out what's left of a grid restart (see
+            // FRAME_PTS_GRID_MAX_LAG_FRAMES). Reads only ever add lag, so the window's
+            // smallest lag is the stamps' real offset; one late read can't move it.
+            const GstClockTimeDiff lag = GST_CLOCK_DIFF(pts, rt);
+            if (st.grid_lag_frames == 0 || lag < st.grid_lag_min) st.grid_lag_min = lag;
+            if (++st.grid_lag_frames >= FRAME_PTS_GRID_WINDOW_FRAMES) {
+                const GstClockTimeDiff max_lag = (GstClockTimeDiff)
+                    gst_util_uint64_scale(FRAME_PTS_GRID_MAX_LAG_FRAMES, GST_SECOND, st.fps);
+                if (st.grid_lag_min > max_lag) {
+                    st.pts_base += (GstClockTime)st.grid_lag_min;
+                    pts += (GstClockTime)st.grid_lag_min;
+                    st.grid_reanchors++;
+                    log_msg("grid restart: frame stamps were %" G_GINT64_FORMAT "ms behind the clock — re-anchored",
+                            (gint64)(st.grid_lag_min / GST_MSECOND));
+                }
+                st.grid_lag_frames = 0;
+            }
+        }
         if (st.pts_frames == steps) st.pts_first = pts;
         st.pts_last = pts;
         out = gst_buffer_make_writable(out);   // a held last_buf is shared
@@ -832,8 +865,9 @@ static gboolean on_debug_tick(gpointer user)
         gint64 video_ms = (gint64)((st.pts_last - st.pts_first) / GST_MSECOND) + 1000 / st.fps;
         gint64 wall_ms  = (gint64)((st.pts_last_rt - st.pts_first_rt) / GST_MSECOND) + 1000 / st.fps;
         log_msg("DEBUG frame-pts: frames=%llu video=%" G_GINT64_FORMAT "ms wall=%" G_GINT64_FORMAT
-                "ms drift=%+" G_GINT64_FORMAT "ms",
-                (unsigned long long)st.pts_frames, video_ms, wall_ms, video_ms - wall_ms);
+                "ms drift=%+" G_GINT64_FORMAT "ms grid-reanchors=%llu",
+                (unsigned long long)st.pts_frames, video_ms, wall_ms, video_ms - wall_ms,
+                (unsigned long long)st.grid_reanchors);
     }
     return G_SOURCE_CONTINUE;
 }
