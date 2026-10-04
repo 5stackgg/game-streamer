@@ -10,6 +10,8 @@ import subprocess
 import sys
 
 path = sys.argv[1]
+# Pairing window, s: keep it under half of --mark-every or offsets alias.
+WINDOW = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5
 
 
 def probe(lavfi, entries):
@@ -43,7 +45,7 @@ beeps = onsets(af, "lavfi.astats.Overall.RMS_level", -30)
 
 pairs = []
 for fl in flashes:
-    near = [b for b in beeps if abs(b - fl) < 1.5]
+    near = [b for b in beeps if abs(b - fl) < WINDOW]
     if near:
         b = min(near, key=lambda x: abs(x - fl))
         pairs.append((fl, round((b - fl) * 1000)))

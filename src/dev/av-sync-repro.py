@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Reproduce the live stream's A/V behaviour without cs2/NVENC/SRT.
+"""Reproduce the live stream's A/V behaviour without cs2/NVENC.
 
-Mirrors game-streamer's live composite pipeline (src/lib/stream.sh) with the
-pieces that matter for audio:
+Mirrors the live composite pipeline (src/lib/stream.sh) with the pieces that
+matter for A/V sync:
   video: appsrc stamped like vkcapture-consumer's fixed_ts path (frame-count PTS
          and its re-anchoring, --mode), fed by a loop that paces like the layer's
          present-eventfd.patch grid (skip mode; the grid restarts after a capture
-         reset, so a gap advances 1 slot).
+         reset, so a gap advances 1 slot; an overrun pacing sleep pokes 1 slot and
+         the next present carries the rest).
   audio: clock-stamped PCM -> opusenc ! opusparse !
          queue leaky=downstream max-size-time=500ms ! mpegtsmux (as in stream.sh).
-Swaps: x264enc for NVENC, appsrc PCM for pulsesrc, filesink for srtsink.
+Swaps: x264enc for NVENC, appsrc PCM for pulsesrc; filesink, or srtsink (--srt)
+to run it through MediaMTX into a browser.
 
-Every MARK_EVERY seconds of wall clock the video frame goes white and the audio
-beeps at the same instant, so the output file carries its own A/V offset.
+Every --mark-every seconds of wall clock the video frame goes white and the audio
+beeps at the same instant, so the output carries its own A/V offset.
 
   apt install gstreamer1.0-plugins-{base,good,bad,ugly} python3-gst-1.0 ffmpeg
-  python3 av-sync-repro.py --mode current --out current.ts --spike-every 2
-  python3 av-sync-analyze.py current.ts
+  python3 av-sync-repro.py --mode current --out current.ts --mark-every 12 \
+    --gaps 10:180,40:300 --hitch-start 6 --spike-every 2 &
+  sleep 20; kill -STOP $!; sleep 6; kill -CONT $!   # a 6s capture stall
+  wait; python3 av-sync-analyze.py current.ts 6
 """
 import argparse
 import json
@@ -36,6 +40,14 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--seconds", type=float, default=60.0)
 ap.add_argument("--out", default="out.ts")
 ap.add_argument("--events", default="events.json")
+ap.add_argument("--srt", default="", help="also publish to this SRT URL (MediaMTX)")
+ap.add_argument("--mark-every", type=float, default=4.0)
+# Video-only pause (cs2 not presenting): no frames; the grid keeps counting slots.
+ap.add_argument("--vpause", default="", help="at:sec,...")
+# Audio-only pause: no audio pushed. keep = PTS carry on from the sample count
+# (the capture lost that time); skip = PTS jump over the pause (clock-correct).
+ap.add_argument("--apause", default="", help="at:sec,...")
+ap.add_argument("--apause-pts", choices=["keep", "skip"], default="skip")
 # Capture resets (swapchain rebuild on a demo seek, map change, ...): wall time, ms.
 ap.add_argument("--gaps", default="10:180,22:150")
 # Video-leg stalls (compositor / encoder hiccup): first, every, ms.
@@ -56,16 +68,25 @@ FPS = 60
 W, H = 320, 180
 RATE = 48000
 CHUNK_MS = 10
-MARK_EVERY = 4.0
+MARK_EVERY = args.mark_every
 MARK_FIRST = 2.0
 FRAME_PTS_MAX_LAG = 250 * Gst.MSECOND           # vkcapture-consumer.c
 FIX_TOLERANCE = 2 * Gst.SECOND // FPS           # FRAME_PTS_GRID_MAX_LAG_FRAMES
 
+def plan(spec):
+    return [[float(a), float(b), False] for a, b in (x.split(":") for x in filter(None, spec.split(",")))]
+
+
+vpauses = plan(args.vpause)
+apauses = plan(args.apause)
 gaps = []
 for g in filter(None, args.gaps.split(",")):
     t, ms = g.split(":")
     gaps.append([float(t), float(ms) / 1000.0, False])
 
+sink = (f"tee name=t ! queue ! srtsink uri=\"{args.srt}\" latency=200 auto-reconnect=false "
+        f"t. ! queue ! filesink location={args.out}" if args.srt
+        else f"filesink location={args.out}")
 desc = f"""
 appsrc name=vsrc is-live=true format=time do-timestamp=false
   caps=video/x-raw,format=I420,width={W},height={H},framerate={FPS}/1
@@ -78,14 +99,14 @@ appsrc name=asrc is-live=true format=time do-timestamp=false
   caps=audio/x-raw,format=S16LE,rate={RATE},channels=2,layout=interleaved
   ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse
   ! queue name=aq leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux.
-mpegtsmux name=mux alignment=7 ! filesink location={args.out}
+mpegtsmux name=mux alignment=7 ! {sink}
 """
 pipe = Gst.parse_launch(desc)
 vsrc = pipe.get_by_name("vsrc")
 asrc = pipe.get_by_name("asrc")
 aq = pipe.get_by_name("aq")
 
-events = {"overruns": [], "aq_level": [], "lag": [], "reanchors": [], "gaps": [], "hitches": []}
+events = {"vmarks": [], "amarks": [], "overruns": [], "aq_level": [], "lag": [], "reanchors": [], "gaps": [], "hitches": []}
 stop = threading.Event()
 t0_mono = None
 
@@ -128,7 +149,7 @@ def video_loop():
     next_mark = MARK_FIRST
     last_lag_log = -1.0
     next_spike = [args.spike_every or 0.0]
-    win = [0, 0]
+    win = [0, 0, 0]
     while not stop.is_set():
         # Capture reset: no presents for the gap, then the grid restarts (pace_next=0).
         for g in gaps:
@@ -149,6 +170,9 @@ def video_loop():
             time.sleep((pace_next - now) / 1e9)
             pace_next += interval
 
+        if any(p[0] <= wall() < p[0] + p[1] for p in vpauses):
+            continue
+
         is_mark = wall() >= next_mark
         if is_mark:
             next_mark += MARK_EVERY
@@ -164,7 +188,7 @@ def video_loop():
             pts_base = rt
         pts_frames += slots
         pts = pts_base + (pts_frames - 1) * Gst.SECOND // FPS
-        if rt > pts + FRAME_PTS_MAX_LAG:
+        if MODE != "fix" and rt > pts + FRAME_PTS_MAX_LAG:
             shift = rt - FRAME_PTS_MAX_LAG - pts
             pts_base += shift
             pts += shift
@@ -176,7 +200,9 @@ def video_loop():
             pts += shift
             events["reanchors"].append(round(wall(), 3))
         if MODE == "fix":
-            # The patch: floor of the lag over a 30-frame window.
+            # The patch (grid pacing): no immediate re-anchor; the floor of the lag
+            # over a 30-frame window, both ways. Lag jumps forward; a lead is slewed
+            # out a tenth of a frame per frame so PTS never go backwards.
             lag = rt - pts
             if win[1] == 0 or lag < win[0]:
                 win[0] = lag
@@ -186,7 +212,15 @@ def video_loop():
                     pts_base += win[0]
                     pts += win[0]
                     events["reanchors"].append(round(wall(), 3))
+                elif win[0] < -FIX_TOLERANCE:
+                    win[2] = win[0]
+                    events["reanchors"].append(round(wall(), 3))
                 win[1] = 0
+            if win[2] < 0:
+                step = max(win[2], -(Gst.SECOND // FPS) // 10)
+                pts_base += step
+                pts += step
+                win[2] -= step
 
         if wall() - last_lag_log >= 0.5:
             last_lag_log = wall()
@@ -194,6 +228,8 @@ def video_loop():
 
         buf = Gst.Buffer.new_wrapped(white if is_mark else dark)
         buf.pts = pts
+        if is_mark:
+            events["vmarks"].append([round(wall(), 3), round(pts / 1e6, 1)])
         buf.dts = Gst.CLOCK_TIME_NONE
         buf.duration = Gst.SECOND // FPS
         vsrc.emit("push-buffer", buf)
@@ -208,7 +244,15 @@ def audio_loop():
     beep_left = 0
     next_mark = MARK_FIRST
     phase = 0.0
+    skipped = 0
     while not stop.is_set():
+        for p in apauses:
+            if not p[2] and wall() >= p[0]:
+                p[2] = True
+                time.sleep(p[1])
+                start += p[1]  # pacing resumes from now
+                if args.apause_pts == "skip":
+                    skipped += int(round(p[1] * 1000 / CHUNK_MS))
         target = start + i * CHUNK_MS / 1000.0
         d = target - time.monotonic()
         if d > 0:
@@ -216,6 +260,7 @@ def audio_loop():
         if wall() >= next_mark:
             next_mark += MARK_EVERY
             beep_left = 3  # 30ms
+            events["amarks"].append([round(wall(), 3), round((base + (i + skipped) * CHUNK_MS * Gst.MSECOND) / 1e6, 1)])
         frames = []
         for _ in range(n):
             if beep_left > 0:
@@ -227,7 +272,8 @@ def audio_loop():
         if beep_left > 0:
             beep_left -= 1
         buf = Gst.Buffer.new_wrapped(b"".join(frames))
-        buf.pts = base + i * CHUNK_MS * Gst.MSECOND
+        # skip: PTS stay on the clock across a pause; keep: they lose the pause.
+        buf.pts = base + (i + skipped) * CHUNK_MS * Gst.MSECOND
         buf.duration = CHUNK_MS * Gst.MSECOND
         asrc.emit("push-buffer", buf)
         i += 1

@@ -174,7 +174,8 @@ struct state {
     guint64     pts_reanchors;    // times the stamps were pulled back to the clock
     GstClockTimeDiff grid_lag_min; // grid pacing: smallest clock - PTS this window
     guint       grid_lag_frames;  // frames into the current window
-    guint64     grid_reanchors;   // grid restarts taken back out
+    guint64     grid_reanchors;   // times the stamps were put back on the clock
+    GstClockTimeDiff grid_slew;   // lead still to take out (negative), a little per frame
     const char *timing_path;      // VKCAP_TIMING_FILE: video vs wall span, written at exit
     // Frame handoff (VKCAP_FRAME_ACK=1): the layer pokes only once the
     // frame's GPU copy has landed in the shared image, and doesn't overwrite it with
@@ -499,16 +500,22 @@ static bool start_gate_open(void)
 // How far frame-count stamps may trail the clock before they're re-anchored.
 #define FRAME_PTS_MAX_LAG (250 * GST_MSECOND)
 // Grid pacing counts every slot (a late frame carries the ones it skipped), so its
-// frame count IS wall time, except across a grid restart: a capture reset (swapchain
-// rebuild on a demo seek, a map change) advances one slot for the whole gap. The
-// audio is stamped on the clock, so under FRAME_PTS_MAX_LAG that gap stayed in as a
-// permanent A/V offset, and each one added to it until audio ran 250ms behind for
-// the rest of the stream; mpegtsmux then held that much audio waiting on the video,
-// so a video hitch tipped the leaky audio queue into dropping audio. So: allow this
-// much lag, judged by its floor over a short window, then put the stamps back on
-// the clock outright.
+// frame count IS wall time and FRAME_PTS_MAX_LAG must not apply. A present held
+// past its slot (the pacing sleep overran: cs2 starved or throttled) still pokes 1
+// slot and the slots it overran come with the next present, so re-anchoring on the
+// late one counted that time twice and left video that far AHEAD of the audio for
+// the rest of the stream (a 3s stall: audio 2.75s early). What does need fixing is
+// a grid restart: a capture reset (swapchain rebuild on a demo seek, a map change)
+// advances one slot for the whole gap, which stayed in as audio running up to
+// 250ms late, and mpegtsmux holding that much audio is what tipped the leaky audio
+// queue into dropping it on the next video hitch. So: judge the offset by the floor
+// of the lag over a window (one late read can't move it); past this much lag put
+// the stamps back on the clock, past this much lead slew them back (PTS must never
+// go backwards).
 #define FRAME_PTS_GRID_MAX_LAG_FRAMES 2
 #define FRAME_PTS_GRID_WINDOW_FRAMES  30
+// Lead taken back per frame, as a fraction of a frame: ~10% slower video until in sync.
+#define FRAME_PTS_GRID_SLEW_DIVISOR   10
 
 // Pipeline running time now (clock - base_time): the timeline pulsesrc stamps on.
 static GstClockTime running_time_now(void)
@@ -732,37 +739,49 @@ static bool push_one_frame(guint64 steps)
         st.pts_frames += steps;
         st.pts_last_rt = rt;
         GstClockTime pts = st.pts_base + gst_util_uint64_scale(st.pts_frames - 1, GST_SECOND, st.fps);
-        // If the render can't hold the rate, game time (and these stamps) fall behind
-        // the wall clock the live audio runs on, and the muxer's audio queue backs up
-        // until the audio source blocks — at EOS that deadlocked the whole pipeline.
-        // Bound the lag: past it, re-anchor the count to the clock (the slowdown then
-        // shows as videorate repeats instead of piling up).
-        if (rt > pts + FRAME_PTS_MAX_LAG) {
+        if (st.pace_skip) {
+            // Grid pacing: keep the stamps on the clock (see FRAME_PTS_GRID_MAX_LAG_FRAMES).
+            // Reads only ever add lag, so the window's smallest lag is the stamps' real
+            // offset from the clock.
+            const GstClockTimeDiff lag = GST_CLOCK_DIFF(pts, rt);
+            if (st.grid_lag_frames == 0 || lag < st.grid_lag_min) st.grid_lag_min = lag;
+            if (++st.grid_lag_frames >= FRAME_PTS_GRID_WINDOW_FRAMES) {
+                const GstClockTimeDiff max_off = (GstClockTimeDiff)
+                    gst_util_uint64_scale(FRAME_PTS_GRID_MAX_LAG_FRAMES, GST_SECOND, st.fps);
+                if (st.grid_lag_min > max_off) {
+                    st.pts_base += (GstClockTime)st.grid_lag_min;
+                    pts += (GstClockTime)st.grid_lag_min;
+                    st.grid_reanchors++;
+                    log_msg("grid restart: frame stamps were %" G_GINT64_FORMAT "ms behind the clock — re-anchored",
+                            (gint64)(st.grid_lag_min / GST_MSECOND));
+                } else if (st.grid_lag_min < -max_off) {
+                    st.grid_slew = st.grid_lag_min;
+                    st.grid_reanchors++;
+                    log_msg("frame stamps %" G_GINT64_FORMAT "ms ahead of the clock — slewing back",
+                            (gint64)(-st.grid_lag_min / GST_MSECOND));
+                }
+                st.grid_lag_frames = 0;
+            }
+            if (st.grid_slew < 0) {
+                const GstClockTimeDiff step = MAX(st.grid_slew, -(GstClockTimeDiff)
+                    gst_util_uint64_scale(1, GST_SECOND, (guint64)st.fps * FRAME_PTS_GRID_SLEW_DIVISOR));
+                st.pts_base -= (GstClockTime)(-step);
+                pts -= (GstClockTime)(-step);
+                st.grid_slew -= step;
+            }
+        } else if (rt > pts + FRAME_PTS_MAX_LAG) {
+            // Fixed timestep: if the render can't hold the rate, game time (and these
+            // stamps) fall behind the wall clock the live audio runs on, and the muxer's
+            // audio queue backs up until the audio source blocks — at EOS that
+            // deadlocked the whole pipeline. Bound the lag: past it, re-anchor the count
+            // to the clock (the slowdown then shows as videorate repeats instead of
+            // piling up).
             const GstClockTime shift = rt - FRAME_PTS_MAX_LAG - pts;
             st.pts_base += shift;
             pts += shift;
             if (st.pts_reanchors++ == 0)
                 log_msg("WARN: render fell %" G_GUINT64_FORMAT "ms behind the %dfps timestep — re-anchoring frame stamps to the clock",
                         (guint64)((shift + FRAME_PTS_MAX_LAG) / GST_MSECOND), st.fps);
-        }
-        if (st.pace_skip) {
-            // Grid pacing: take out what's left of a grid restart (see
-            // FRAME_PTS_GRID_MAX_LAG_FRAMES). Reads only ever add lag, so the window's
-            // smallest lag is the stamps' real offset; one late read can't move it.
-            const GstClockTimeDiff lag = GST_CLOCK_DIFF(pts, rt);
-            if (st.grid_lag_frames == 0 || lag < st.grid_lag_min) st.grid_lag_min = lag;
-            if (++st.grid_lag_frames >= FRAME_PTS_GRID_WINDOW_FRAMES) {
-                const GstClockTimeDiff max_lag = (GstClockTimeDiff)
-                    gst_util_uint64_scale(FRAME_PTS_GRID_MAX_LAG_FRAMES, GST_SECOND, st.fps);
-                if (st.grid_lag_min > max_lag) {
-                    st.pts_base += (GstClockTime)st.grid_lag_min;
-                    pts += (GstClockTime)st.grid_lag_min;
-                    st.grid_reanchors++;
-                    log_msg("grid restart: frame stamps were %" G_GINT64_FORMAT "ms behind the clock — re-anchored",
-                            (gint64)(st.grid_lag_min / GST_MSECOND));
-                }
-                st.grid_lag_frames = 0;
-            }
         }
         if (st.pts_frames == steps) st.pts_first = pts;
         st.pts_last = pts;
