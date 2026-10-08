@@ -40,6 +40,7 @@ say() { printf '%s %s\n' "$LOG_PREFIX" "$*" >&2; }
 : "${NADE_TECHNIQUE:=}"
 : "${NADE_THROW_STRENGTH:=}"
 : "${NADE_JUMP_THROW_BIND:=0}"
+: "${NADE_APPROACH_FILE:=}"
 
 case "$(printf '%s' "${NADE_SIDE:-}" | tr '[:upper:]' '[:lower:]')" in
   t|terrorist) NADE_JOIN_TEAM=2 ;;
@@ -92,7 +93,7 @@ else
 fi
 
 poll_sleep() { sleep "$(awk -v ms="$NADE_POLL_MS" 'BEGIN{printf "%.3f", ms/1000}')"; }
-sleep_ms() { sleep "$(awk -v ms="$1" 'BEGIN{printf "%.3f", ms/1000}')"; }
+sleep_ms() { local s; printf -v s '%d.%03d' $(($1 / 1000)) $(($1 % 1000)); sleep "$s"; }
 
 json_body() { node "$CLIP_HELPERS" status-body "$@"; }
 
@@ -222,6 +223,7 @@ on_exit() {
   stop_clip_capture
   stop_render_tail
   rm -rf "$NADE_THUMB_FILE" "$NADE_STILLS_DIR" "$NADE_EVENTS_FILE"
+  [ -n "$NADE_APPROACH_FILE" ] && rm -f "$NADE_APPROACH_FILE"
   if [ "$rc" -ne 0 ] && [ "$NADE_REACHED_TERMINAL" != "1" ]; then
     api_status "status=error" \
       "error=nade render exited rc=${rc} before reaching terminal status" || true
@@ -264,13 +266,19 @@ if [ -f "$CS2_FATAL_SENTINEL" ]; then
   die_failed "cs2 session already dead: $(head -1 "$CS2_FATAL_SENTINEL" 2>/dev/null)"
 fi
 
-ACT_PRESS="" ACT_RELEASE="" ACT_AFTER=""
-{
-  IFS= read -r -d '' ACT_PRESS
-  IFS= read -r -d '' ACT_RELEASE
-  IFS= read -r -d '' ACT_AFTER
-} < <(node "$CLIP_HELPERS" nade-act "$NADE_TECHNIQUE" "$NADE_THROW_STRENGTH" "$NADE_JUMP_THROW_BIND")
-[ -n "$ACT_PRESS" ] || die_failed "could not work out the throw keys"
+ACT_AT=() ACT_CMD=() ACT_PLAN=""
+APPROACH_SRC=/dev/null
+[ -s "$NADE_APPROACH_FILE" ] && APPROACH_SRC="$NADE_APPROACH_FILE"
+while IFS=$'\t' read -r at cmd; do
+  case "$at" in ''|*[!0-9]*) continue ;; esac
+  [[ "$cmd" =~ ^[+-][a-z0-9]+$ ]] || continue
+  ACT_AT+=("$at")
+  ACT_CMD+=("$cmd")
+  ACT_PLAN+="${ACT_PLAN:+, }${at} ${cmd}"
+done < <(node "$CLIP_HELPERS" nade-timeline "$NADE_TECHNIQUE" "$NADE_THROW_STRENGTH" \
+           "$NADE_JUMP_THROW_BIND" "$NADE_PIN_PULL_MS" <"$APPROACH_SRC")
+[ "${#ACT_CMD[@]}" -gt 0 ] || die_failed "could not work out the throw keys"
+say "throw keys (ms after the pin pull): ${ACT_PLAN}"
 
 api_status "status=rendering" "progress=0.02"
 
@@ -341,29 +349,27 @@ api_status "status=rendering" "progress=0.3"
 # One action per exec. cs2 refuses a single exec that combines actions the way
 # a jumpthrow bind does (+jump with -attack): the pin came out on +attack and
 # "+jump; -attack" never let go of it -- the grenade only fell when the pod
-# disconnected. Separate execs land on separate frames, which is also what a
-# hand-timed jump throw is.
-act_steps() {
-  local step
-  local -a steps=()
-  IFS=';' read -r -a steps <<<"$1"
-  for step in "${steps[@]}"; do
-    step="${step#"${step%%[![:space:]]*}"}"
-    step="${step%"${step##*[![:space:]]}"}"
-    [ -n "$step" ] && cs2_exec "$step"
-  done
-}
-
+# disconnected.
+# The clock starts once the offset-0 keys are down, so the pin pull is timed
+# from +attack itself; every later step waits for its own offset on that one
+# clock, so a slow exec delays only itself and never the rest of the run-up.
 ACTED=0
 act_throw() {
   [ "$ACTED" = "1" ] && return 0
   ACTED=1
-  say "  act: ${ACT_PRESS} -> ${ACT_RELEASE}"
-  act_steps "$ACT_PRESS"
-  sleep_ms "$NADE_PIN_PULL_MS"
-  act_steps "$ACT_RELEASE"
-  sleep_ms 150
-  act_steps "$ACT_AFTER"
+  local i at start="" now wait
+  for i in "${!ACT_CMD[@]}"; do
+    at="${ACT_AT[$i]}"
+    if [ "$at" -gt 0 ]; then
+      [ -n "$start" ] || now_ms start
+      now_ms now
+      wait=$((start + at - now))
+      [ "$wait" -gt 0 ] && sleep_ms "$wait"
+    fi
+    now_ms now
+    say "  act ${ACT_CMD[$i]} at ${at}ms (sent at $((now - ${start:-$now}))ms)"
+    spec_post /demo/exec "{\"cmd\":\"${ACT_CMD[$i]}\"}"
+  done
 }
 
 declare -A STILL_AT_MS=()

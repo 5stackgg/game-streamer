@@ -10,7 +10,8 @@
 #   "HighExplosive"|"Molotov"|"Decoy"), side, origin_x/y/z, eye_z, view_yaw,
 #   view_pitch, flight_time_ms, confidence, plugin_runtime, technique,
 #   throw_strength, jump_throw_bind, and either has_seed:true|false or the six
-#   initial_pos_*/initial_vel_* values, plus
+#   initial_pos_*/initial_vel_* values, approach (the run-up's 64Hz samples,
+#   null for a throw made standing still), plus
 #   output: { resolution: "720p"|"1080p", fps: <int> }.
 #
 # The practice plugin stages a lineup by lineup_id (`/render_stage <id>`).
@@ -83,6 +84,9 @@ nade_render_one_job() {
 
   local marker="${NADE_OUT_DIR:-/tmp/game-streamer/nades}/${job_id}.cs2done"
   rm -f "$marker"
+  local approach_file="${NADE_OUT_DIR:-/tmp/game-streamer/nades}/${job_id}.approach.json"
+  printf '%s' "$job_json" | node "$CLIP_HELPERS" nade-approach >"$approach_file" \
+    || : >"$approach_file"
   (
     export NADE_RENDER_JOB_ID="$job_id"
     export NADE_RENDER_TOKEN="$token"
@@ -104,6 +108,7 @@ nade_render_one_job() {
     export NADE_TECHNIQUE="$technique"
     export NADE_THROW_STRENGTH="$throw_strength"
     export NADE_JUMP_THROW_BIND="$jump_bind"
+    export NADE_APPROACH_FILE="$approach_file"
     export NADE_CS2_RELEASE_MARKER="$marker"
     export SPEC_SERVER_URL="${SPEC_SERVER_URL:-http://127.0.0.1:1350}"
     bash "$LIB_DIR/nade-clip.sh"

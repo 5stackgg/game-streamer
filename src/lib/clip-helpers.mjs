@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 
-import { nadeActKeys } from "./nade-act.mjs";
+import { nadeActTimeline } from "./nade-act.mjs";
 
 function readStdinJson() {
   try {
@@ -340,14 +340,28 @@ switch (subcmd) {
     break;
   }
 
-  // argv: <technique> <strength> <jump_bind 0|1> -> press\0release\0after\0
-  case "nade-act": {
-    const keys = nadeActKeys({
+  // [stdin: nade job_json] -> spec.approach as JSON, or nothing for a throw
+  // made standing still.
+  case "nade-approach": {
+    const approach = readStdinJson()?.spec?.approach;
+    if (Array.isArray(approach) && approach.length > 0) {
+      process.stdout.write(JSON.stringify(approach));
+    }
+    break;
+  }
+
+  // [stdin: spec.approach JSON, or nothing]
+  // argv: <technique> <strength> <jump_bind 0|1> <pin_pull_ms>
+  //   -> one "<ms>\t<console action>" line per step of the throw
+  case "nade-timeline": {
+    const timeline = nadeActTimeline({
+      approach: readStdinJson(),
       technique: args[0],
       strength: args[1],
       jumpBind: args[2] === "1",
+      pinPullMs: args[3],
     });
-    process.stdout.write([keys.press, keys.release, keys.after].map((f) => f + "\u0000").join(""));
+    process.stdout.write(timeline.map(({ at, cmd }) => `${at}\t${cmd}\n`).join(""));
     break;
   }
 
