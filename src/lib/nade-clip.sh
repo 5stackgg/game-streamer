@@ -221,41 +221,8 @@ event_field() {
   printf '%s' "$EVENT_LINE" | tr ' ' '\n' | awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }'
 }
 
-THIRDPERSON=0
-
-# cs2's own third-person camera films the stance: a view entity never draws
-# the local player's body, and the client ignores a view entity while it is
-# in third person, so this camera is the view until the director's `cut`.
-# Behind, a little to the right and above the thrower, who looks level.
-# cs2 has dropped a lone `thirdperson` sent while staging, so every
-# third-person shot asks again; both commands are idempotent.
-enter_thirdperson() {
-  local mark
-  mark=$(wc -l <"$CS2_CONSOLE_LOG" 2>/dev/null || echo 0)
-  cs2_exec "cam_idealdist ${NADE_STANCE_CAM_DIST:-160}; cam_idealpitch ${NADE_STANCE_CAM_PITCH:-12}; cam_idealyaw ${NADE_STANCE_CAM_YAW:-20}; cam_collision 1; thirdperson"
-  THIRDPERSON=1
-  report_thirdperson "$mark" &
-}
-
-# cs2 has refused `thirdperson` on some renders with no sign in this log; what
-# its own console said in the moment after the exec is the only evidence.
-report_thirdperson() {
-  local mark="$1"
-  sleep 0.6
-  tail -n +"$((mark + 1))" "$CS2_CONSOLE_LOG" 2>/dev/null | tr -d '\r' \
-    | grep -aiE "thirdperson|cam_|cheat|unknown command|not allowed|can.t" \
-    | head -n 8 | sed 's/^/    cs2 | /' >&2
-}
-
-leave_thirdperson() {
-  [ "$THIRDPERSON" = "1" ] || return 0
-  cs2_exec "firstperson"
-  THIRDPERSON=0
-}
-
 on_exit() {
   local rc=$?
-  leave_thirdperson
   stop_clip_capture
   stop_render_tail
   rm -rf "$NADE_THUMB_FILE" "$NADE_STILLS_DIR" "$NADE_EVENTS_FILE" "$NADE_DELIVERY_FILE"
@@ -369,7 +336,6 @@ for attempt in $(seq 1 "$NADE_STAGE_ATTEMPTS"); do
 done
 [ "$STAGED" = "1" ] || die_failed "the practice plugin never staged the lineup — is UTILITY_RENDER_MODE on and the lineup in this session's library?"
 api_status "status=rendering" "progress=0.15"
-enter_thirdperson
 
 # --- STEP 2: record while the plugin directs ---------------------------------
 
@@ -442,11 +408,6 @@ while :; do
     case "$EVENT" in
       shot)
         say "  shot $(event_field name) through the $(event_field view)"
-        if [ "$(event_field view)" = "thirdperson" ]; then
-          enter_thirdperson
-        else
-          leave_thirdperson
-        fi
         ;;
       still)
         kind=$(event_field kind)
