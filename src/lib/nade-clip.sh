@@ -149,12 +149,15 @@ cs2_exec() {
 
 # Every [5stack-render] line the plugin prints from here on, one per line,
 # appended as it arrives. grep --line-buffered only ever writes whole lines, so
-# a reader never sees half of one.
+# a reader never sees half of one. Anchored: the plugin's line STARTS with the
+# prefix (after cs2's optional timestamp), so the same text quoted in chat or
+# anywhere else mid-line is never read as an event.
+RENDER_LINE_RE='^([0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)? )?\[5stack-render\] [a-z_]+( |\r?$)'
 start_render_tail() {
   : >"$NADE_EVENTS_FILE"
   (
     tail -n0 -F "$CS2_CONSOLE_LOG" 2>/dev/null \
-      | grep -a --line-buffered -o '\[5stack-render\].*' >>"$NADE_EVENTS_FILE"
+      | grep -a --line-buffered -E "$RENDER_LINE_RE" >>"$NADE_EVENTS_FILE"
   ) &
   RENDER_TAIL_PID=$!
   EVENTS_READ=0
@@ -171,7 +174,8 @@ stop_render_tail() {
 # there is none yet.
 next_render_event() {
   local line
-  line=$(sed -n "$((EVENTS_READ + 1))p" "$NADE_EVENTS_FILE" 2>/dev/null | tr -d '\r')
+  line=$(sed -n "$((EVENTS_READ + 1))p" "$NADE_EVENTS_FILE" 2>/dev/null \
+    | tr -d '\r' | sed 's/^.*\(\[5stack-render\] \)/\1/')
   [ -n "$line" ] || return 1
   EVENTS_READ=$((EVENTS_READ + 1))
   EVENT_LINE="$line"
@@ -315,10 +319,12 @@ while :; do
         ;;
       still)
         kind=$(event_field kind)
-        if [ -n "$kind" ]; then
-          STILL_AT_MS[$kind]=$((NOW - CAPTURE_START_MS - NADE_STILL_LEAD_MS))
-          say "  still ${kind} at $((NOW - CAPTURE_START_MS))ms"
-        fi
+        case "$kind" in
+          stance|aim|aim_close|landing)
+            STILL_AT_MS[$kind]=$((NOW - CAPTURE_START_MS - NADE_STILL_LEAD_MS))
+            say "  still ${kind} at $((NOW - CAPTURE_START_MS))ms"
+            ;;
+        esac
         ;;
       act)
         say "  act: ${ACT_PRESS} -> ${ACT_RELEASE}"
