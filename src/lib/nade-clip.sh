@@ -314,7 +314,7 @@ for attempt in $(seq 1 "$NADE_STAGE_ATTEMPTS"); do
     if next_render_event; then
       case "$EVENT" in
         staged)
-          say "STEP 1: staged at $(event_field x),$(event_field y),$(event_field z) pitch=$(event_field pitch) yaw=$(event_field yaw)"
+          say "STEP 1: staged at $(event_field x),$(event_field y),$(event_field z) (dz=$(event_field dz) off the recorded stance) pitch=$(event_field pitch) yaw=$(event_field yaw)"
           STAGED=1
           ;;
         error)
