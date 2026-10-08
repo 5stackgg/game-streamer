@@ -55,16 +55,22 @@ esac
 : "${NADE_SKIP_STATUS:=skipped}"
 
 # The plugin answers a stage within a tick or two of the library landing; the
-# library is a panel round trip, so the first answer can take a few seconds.
-: "${NADE_STAGE_TIMEOUT_MS:=8000}"
+# library is a panel round trip that can take a while. Re-sending is safe: the
+# plugin re-announces a lineup it already staged instead of starting over.
+: "${NADE_STAGE_TIMEOUT_MS:=15000}"
 : "${NADE_STAGE_ATTEMPTS:=3}"
 # go -> done is ~10s of fixed beats plus however long the grenade flies.
 : "${NADE_MAX_CLIP_MS:=45000}"
 # The pin has to be fully out before the release counts as a throw.
 : "${NADE_PIN_PULL_MS:=600}"
 : "${NADE_POLL_MS:=50}"
-# A still's line reaches console.log a little after the frame it names.
-: "${NADE_STILL_LEAD_MS:=60}"
+# From `say /render_go` leaving this pod to the plugin starting its clock: the
+# exec-cfg keypress plus a server tick. Stills are placed on the plugin's
+# clock (t=, ms since go) because console.log can reach us late.
+: "${NADE_GO_LATENCY_MS:=100}"
+# When to throw if the `act` line has not reached us: the plugin's throw beat
+# starts 4.6s after go, and it also accepts the throw during the close-up.
+: "${NADE_ACT_AT_MS:=5000}"
 
 CLIP_OUTPUT_DIMS="$NADE_OUTPUT_DIMS"
 CLIP_OUTPUT_FPS="$NADE_OUTPUT_FPS"
@@ -152,7 +158,7 @@ cs2_exec() {
 # a reader never sees half of one. Anchored: the plugin's line STARTS with the
 # prefix (after cs2's optional timestamp), so the same text quoted in chat or
 # anywhere else mid-line is never read as an event.
-RENDER_LINE_RE='^([0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)? )?\[5stack-render\] [a-z_]+( |\r?$)'
+RENDER_LINE_RE='^[0-9/:. ]*(\[[A-Za-z ]+\] )*\[5stack-render\] [a-z_]+([[:space:]]|$)'
 start_render_tail() {
   : >"$NADE_EVENTS_FILE"
   (
@@ -170,17 +176,27 @@ stop_render_tail() {
   RENDER_TAIL_PID=""
 }
 
-# Sets EVENT (the name) and EVENT_LINE for the next unread line; false when
-# there is none yet.
+# Sets EVENT (the name) and EVENT_LINE for the next unread line about THIS
+# lineup; false when there is none yet. A line naming another lineup is from a
+# take this pod already gave up on, and is skipped.
 next_render_event() {
-  local line
-  line=$(sed -n "$((EVENTS_READ + 1))p" "$NADE_EVENTS_FILE" 2>/dev/null \
-    | tr -d '\r' | sed 's/^.*\(\[5stack-render\] \)/\1/')
-  [ -n "$line" ] || return 1
-  EVENTS_READ=$((EVENTS_READ + 1))
-  EVENT_LINE="$line"
-  EVENT=$(printf '%s' "$line" | awk '{print $2}')
-  return 0
+  local line lineup
+  while :; do
+    line=$(sed -n "$((EVENTS_READ + 1))p" "$NADE_EVENTS_FILE" 2>/dev/null \
+      | tr -d '\r' | sed 's/^.*\(\[5stack-render\] \)/\1/')
+    [ -n "$line" ] || return 1
+    EVENTS_READ=$((EVENTS_READ + 1))
+    EVENT_LINE="$line"
+    EVENT=$(printf '%s' "$line" | awk '{print $2}')
+    lineup=$(event_field lineup)
+    if [ -n "$lineup" ] && [ "$lineup" != "-" ] \
+       && [ "$(printf '%s' "$lineup" | tr '[:upper:]' '[:lower:]')" \
+            != "$(printf '%s' "$NADE_LINEUP_ID" | tr '[:upper:]' '[:lower:]')" ]; then
+      say "  ignoring a line for lineup ${lineup}: ${EVENT}"
+      continue
+    fi
+    return 0
+  done
 }
 
 # key=value off the current event line, "" when absent.
@@ -306,7 +322,20 @@ wait_clip_capture_ready || true
 clip_capture_go
 now_ms CAPTURE_START_MS
 cs2_exec "say /render_go"
+now_ms GO_SENT_MS
 api_status "status=rendering" "progress=0.3"
+
+ACTED=0
+act_throw() {
+  [ "$ACTED" = "1" ] && return 0
+  ACTED=1
+  say "  act: ${ACT_PRESS} -> ${ACT_RELEASE}"
+  cs2_exec "$ACT_PRESS"
+  sleep_ms "$NADE_PIN_PULL_MS"
+  cs2_exec "$ACT_RELEASE"
+  sleep_ms 150
+  cs2_exec "$ACT_AFTER"
+}
 
 declare -A STILL_AT_MS=()
 DONE=0
@@ -319,20 +348,21 @@ while :; do
         ;;
       still)
         kind=$(event_field kind)
+        t=$(event_field t)
+        case "$t" in ''|*[!0-9]*) t="" ;; esac
         case "$kind" in
           stance|aim|aim_close|landing)
-            STILL_AT_MS[$kind]=$((NOW - CAPTURE_START_MS - NADE_STILL_LEAD_MS))
-            say "  still ${kind} at $((NOW - CAPTURE_START_MS))ms"
+            if [ -n "$t" ]; then
+              STILL_AT_MS[$kind]=$((GO_SENT_MS - CAPTURE_START_MS + NADE_GO_LATENCY_MS + t))
+            else
+              STILL_AT_MS[$kind]=$((NOW - CAPTURE_START_MS))
+            fi
+            say "  still ${kind} at ${STILL_AT_MS[$kind]}ms into the clip (line read $((NOW - CAPTURE_START_MS))ms in)"
             ;;
         esac
         ;;
       act)
-        say "  act: ${ACT_PRESS} -> ${ACT_RELEASE}"
-        cs2_exec "$ACT_PRESS"
-        sleep_ms "$NADE_PIN_PULL_MS"
-        cs2_exec "$ACT_RELEASE"
-        sleep_ms 150
-        cs2_exec "$ACT_AFTER"
+        act_throw
         ;;
       thrown)
         say "  thrown (the pod's own release was $(event_field release_drift)u off the seed)"
@@ -353,6 +383,11 @@ while :; do
     continue
   fi
   now_ms NOW
+  if [ "$ACTED" != "1" ] && [ $((NOW - GO_SENT_MS)) -ge "$NADE_ACT_AT_MS" ]; then
+    say "  no act line ${NADE_ACT_AT_MS}ms after go — throwing on the clock"
+    act_throw
+    continue
+  fi
   if [ $((NOW - CAPTURE_START_MS)) -ge "$NADE_MAX_CLIP_MS" ]; then
     cs2_exec "say /render_reset"
     die_failed "no done from the practice plugin within ${NADE_MAX_CLIP_MS}ms"
