@@ -159,11 +159,15 @@ cs2_exec() {
 # prefix (after cs2's optional timestamp), so the same text quoted in chat or
 # anywhere else mid-line is never read as an event.
 RENDER_LINE_RE='^[0-9/:. ]*(\[[A-Za-z ]+\] )*\[5stack-render\] [a-z_]+([[:space:]]|$)'
+# Chat: "Name: text" puts a colon right before the prefix, and team/all chat
+# leads with its channel tag.
+RENDER_CHAT_RE=': \[5stack-render\]|^[0-9/:. ]*\[(ALL|T|CT|DEAD|SPEC|SPECTATOR|TEAM)\]'
 start_render_tail() {
   : >"$NADE_EVENTS_FILE"
   (
     tail -n0 -F "$CS2_CONSOLE_LOG" 2>/dev/null \
-      | grep -a --line-buffered -E "$RENDER_LINE_RE" >>"$NADE_EVENTS_FILE"
+      | grep -a --line-buffered -E "$RENDER_LINE_RE" \
+      | grep -a --line-buffered -vE "$RENDER_CHAT_RE" >>"$NADE_EVENTS_FILE"
   ) &
   RENDER_TAIL_PID=$!
   EVENTS_READ=0
@@ -177,8 +181,9 @@ stop_render_tail() {
 }
 
 # Sets EVENT (the name) and EVENT_LINE for the next unread line about THIS
-# lineup; false when there is none yet. A line naming another lineup is from a
-# take this pod already gave up on, and is skipped.
+# lineup; false when there is none yet. The plugin names the lineup on every
+# line, so one naming another lineup (a take this pod already gave up on) or
+# none at all is skipped.
 next_render_event() {
   local line lineup
   while :; do
@@ -189,10 +194,9 @@ next_render_event() {
     EVENT_LINE="$line"
     EVENT=$(printf '%s' "$line" | awk '{print $2}')
     lineup=$(event_field lineup)
-    if [ -n "$lineup" ] && [ "$lineup" != "-" ] \
-       && [ "$(printf '%s' "$lineup" | tr '[:upper:]' '[:lower:]')" \
-            != "$(printf '%s' "$NADE_LINEUP_ID" | tr '[:upper:]' '[:lower:]')" ]; then
-      say "  ignoring a line for lineup ${lineup}: ${EVENT}"
+    if [ "$(printf '%s' "$lineup" | tr '[:upper:]' '[:lower:]')" \
+         != "$(printf '%s' "$NADE_LINEUP_ID" | tr '[:upper:]' '[:lower:]')" ]; then
+      say "  ignoring a line for lineup ${lineup:-?}: ${EVENT}"
       continue
     fi
     return 0
@@ -321,7 +325,7 @@ fi
 wait_clip_capture_ready || true
 clip_capture_go
 now_ms CAPTURE_START_MS
-cs2_exec "say /render_go"
+cs2_exec "say /render_go ${NADE_LINEUP_ID}"
 now_ms GO_SENT_MS
 api_status "status=rendering" "progress=0.3"
 
