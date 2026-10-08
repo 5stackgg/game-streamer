@@ -85,6 +85,7 @@ api_status() {
   local body
   body=$(node "$CLIP_HELPERS" status-body "$@")
   curl --fail --silent --show-error --max-time 10 \
+       --retry 3 --retry-connrefused --retry-delay 1 \
        --header "x-origin-auth: ${CLIP_RENDER_JOB_ID}:${CLIP_RENDER_TOKEN}" \
        --header "content-type: application/json" \
        --data "$body" \
@@ -174,12 +175,74 @@ die_failed() {
   exit 1
 }
 
-# Fail the job on the GetClassBaseline crash; drop the sentinel so the batch skips.
+# Fail the job on an engine fatal (the GetClassBaseline crash, or cs2 gone) and drop
+# the sentinel so the batch relaunches cs2. With CLIP_CS2_FATAL_RETRY=1 the batch
+# also retries this job on the new cs2, so no error is posted for it.
 fail_on_cs2_fatal() {
-  local reason
-  reason=$(cs2_fatal_reason "${CS2_LOG_OFFSET:-0}") || return 0
+  local reason msg
+  if reason=$(cs2_fatal_reason "${CS2_LOG_OFFSET:-0}"); then
+    msg="cs2 cannot play this demo (${reason}) — known unfixed cs2 replay bug"
+  elif ! pgrep -f '/linuxsteamrt64/cs2' >/dev/null 2>&1; then
+    reason="cs2 process exited"
+    msg="cs2 engine fatal: cs2 exited during seg ${SEG_IDX}"
+  else
+    return 0
+  fi
   cs2_mark_fatal "$reason"
-  die_failed "cs2 cannot play this demo (${reason}) — known unfixed cs2 replay bug"
+  stop_capture_diag
+  stop_clip_capture
+  if [ "${CLIP_CS2_FATAL_RETRY:-0}" = "1" ]; then
+    say "ERROR: ${msg} — the batch relaunches cs2 and retries this job"
+    api_progress_settle kill
+    CLIP_REACHED_TERMINAL=1
+    exit "$CS2_FATAL_RETRY_RC"
+  fi
+  die_failed "$msg"
+}
+
+# What the spec-server believes about playback: its paused flag, /demo/seek-state
+# (seeking|tick|round), and who holds X focus, since the play toggle is an XTest key.
+playback_diag() {
+  local paused seek focus j
+  paused=$(spec_get_state 2>/dev/null | node "$CLIP_HELPERS" state-paused 2>/dev/null)
+  seek=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || true)
+  j=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/spec/focus" || true)
+  case "$j" in
+    *'"cs2_has_focus":true'*) focus=cs2 ;;
+    *'"cs2_has_focus":false'*)
+      focus=$(printf '%s' "$j" | sed -n 's/.*"focused_name":"\([^"]*\)".*/\1/p')
+      [ -n "$focus" ] || focus=$(printf '%s' "$j" | sed -n 's/.*"focused_window":"\([^"]*\)".*/\1/p')
+      focus="other:${focus:-none}"
+      case "$j" in *'"cs2_mapped":false'*) focus+=" cs2-unmapped" ;; esac
+      ;;
+    *) focus='?' ;;
+  esac
+  printf 'paused=%s, seek-state=%s, focus=%s' "${paused:-?}" "${seek:-?}" "$focus"
+}
+
+dump_console_since_job() {
+  local log="${CS2_DIR}/game/csgo/console.log" since="${CS2_LOG_OFFSET:-0}" size
+  [ -f "$log" ] || return 0
+  size=$(wc -c < "$log" 2>/dev/null || echo 0)
+  size="${size//[!0-9]/}"
+  [ "${size:-0}" -lt "$since" ] && since=0
+  say "cs2 console since this job started (last 20 lines):"
+  tail -c "+$((since + 1))" "$log" 2>/dev/null | tr -d '\r' | tail -n 20 | sed 's/^/    | /' >&2
+}
+
+# A segment whose GSI never changed: the demo did not play. An engine fatal ends the
+# job; anything else (left paused by a seek, a play toggle lost to focus) returns 0
+# once per segment so the caller redoes it from a fresh seek, then fails only this job.
+flat_segment_redo() {
+  fail_on_cs2_fatal
+  local msg="demo did not advance in seg ${SEG_IDX} (GSI flat ${GSI_SIG_POLLS} polls; ${FLAT_DIAG:-$(playback_diag)})"
+  if [ "${FLAT_RETRY_SEG:-}" != "$SEG_IDX" ]; then
+    FLAT_RETRY_SEG=$SEG_IDX
+    say "WARN ${msg} — re-seeking and redoing the segment once"
+    return 0
+  fi
+  dump_console_since_job
+  die_failed "$msg"
 }
 
 # Flag flipped to 1 once we've POSTed a terminal status (done / error /
@@ -1123,6 +1186,7 @@ SEG_IDX=0
 VKCAP_FELL_BACK=0
 VKCAP_RETRY_SEG=""        # segment being redone on ximagesrc after a one-off failure
 VKCAP_ONE_OFF_FAILS=0     # those one-off failures so far (capped, then the job stays on ximagesrc)
+FLAT_RETRY_SEG=""         # segment already redone once after its GSI stayed flat
 # Parse the segment table once (one node spawn) instead of 3x per
 # segment iteration. POV accountid = steamid64 - 76561197960265728;
 # the lock is applied AFTER seeking + lead-in so the freshly-seeked
@@ -1448,6 +1512,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   GSI_SIG_FIRST=""     # frozen-capture guard: did GSI ever change?
   GSI_SIG_CHANGED=0
   GSI_SIG_POLLS=0
+  FLAT_DIAG=""
   # Billing starts at the gate: recording began there, and the checks above (a cs2
   # fatal probe can take seconds) were recorded but went unbilled, so the clip ran
   # long and every "+Nt" below was measured from the wrong moment.
@@ -1490,6 +1555,10 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
       GSI_SIG_POLLS=$((GSI_SIG_POLLS + 1))
       if [ -z "$GSI_SIG_FIRST" ]; then GSI_SIG_FIRST="$GSI_SIG"
       elif [ "$GSI_SIG" != "$GSI_SIG_FIRST" ]; then GSI_SIG_CHANGED=1; fi
+      # Snapshot now: the stop below force-pauses, which would hide whether it was paused.
+      if [ "$GSI_SIG_POLLS" = 12 ] && [ "$GSI_SIG_CHANGED" = 0 ]; then
+        FLAT_DIAG=$(playback_diag)
+      fi
     fi
 
     # Anchor the bleed guard to the round we opened in (first fresh reading).
@@ -1593,13 +1662,6 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     say "STEP 7: loop iters=${LOOP_ITERS} avg_period=$(( (NOW_MS - WALLCLOCK_START_MS) / LOOP_ITERS ))ms"
   fi
 
-  # GSI never changed all segment -> demo halted -> frozen clip; fail and mark
-  # the session dead so the batch skips.
-  if [ "$GSI_SIG_POLLS" -ge 12 ] && [ "$GSI_SIG_CHANGED" = "0" ]; then
-    cs2_mark_fatal "demo never advanced (GSI flat over ${GSI_SIG_POLLS} polls): ${GSI_SIG_FIRST}"
-    die_failed "cs2 cannot play this demo (GetClassBaseline replay bug)"
-  fi
-
   stop_capture_diag
   say "STEP 8: stop capture (segment $SEG_IDX)"
   stop_clip_capture
@@ -1609,6 +1671,12 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     has_audio_stream "$SEG_FILE" && retime_segment_audio "$SEG_FILE" "${CLIP_CAPTURE_TIMING_FILE:-}"
   fi
   [ -n "${CLIP_CAPTURE_TIMING_FILE:-}" ] && rm -f "$CLIP_CAPTURE_TIMING_FILE"
+
+  if [ "$GSI_SIG_POLLS" -ge 12 ] && [ "$GSI_SIG_CHANGED" = "0" ]; then
+    flat_segment_redo
+    rm -f "$SEG_FILE"
+    continue   # same SEG_IDX: STEP 2 re-pauses, re-seeks and plays it again
+  fi
 
   # Sanity check the RAW capture before any polish: capture sometimes
   # produces an mp4 with no decodable frames (cs2 mid-load, audio attach
