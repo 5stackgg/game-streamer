@@ -51,7 +51,9 @@ esac
 : "${NADE_OUT_DIR:=/tmp/game-streamer/nades}"
 : "${NADE_OUTPUT_DIMS:=1920x1080}"
 : "${NADE_OUTPUT_FPS:=60}"
-: "${NADE_VIDEO_KBPS:=24000}"
+# The capture is only kept long enough to cut the stills from and re-encode;
+# a static aim shot at this rate is near-lossless, which is what the stills need.
+: "${NADE_VIDEO_KBPS:=50000}"
 : "${NADE_CLIP_AUDIO:=1}"
 : "${NADE_SKIP_STATUS:=skipped}"
 
@@ -304,7 +306,7 @@ say "throw keys (ms after the pin pull): ${ACT_PLAN}"
 api_status "status=rendering" "progress=0.02"
 
 mkdir -p "$NADE_OUT_DIR" "$NADE_STILLS_DIR"
-rm -f "$NADE_CLIP_FILE" "$NADE_THUMB_FILE" "$NADE_STILLS_DIR"/*.jpg
+rm -f "$NADE_CLIP_FILE" "$NADE_THUMB_FILE" "$NADE_STILLS_DIR"/*.jpg "$NADE_STILLS_DIR"/*.webp
 
 start_render_tail
 
@@ -514,6 +516,19 @@ fi
 # Grid pacing keeps the clip's frame count on wall time, so a still's offset
 # from the capture gate is its timestamp in the mp4.
 
+# The aim shots are what a player lines their crosshair up against, so they
+# are kept lossless; the rest are high-quality lossy. jpeg only when this
+# ffmpeg cannot write webp.
+
+cut_frame() {
+  local at_ms="$1" out="$2"
+  shift 2
+  ffmpeg -y -hide_banner -loglevel error \
+    -ss "$(awk -v ms="$at_ms" 'BEGIN{printf "%.3f", ms/1000}')" \
+    -i "$NADE_CLIP_FILE" -frames:v 1 "$@" "$out" 2>/dev/null \
+    && [ -s "$out" ]
+}
+
 for kind in stance stance_eyes aim aim_pin aim_close landing; do
   at_ms="${STILL_AT_MS[$kind]:-}"
   if [ -z "$at_ms" ]; then
@@ -524,19 +539,26 @@ for kind in stance stance_eyes aim aim_pin aim_close landing; do
   if [ "$at_ms" -ge "$CLIP_DURATION_MS" ]; then
     at_ms=$((CLIP_DURATION_MS - 100))
   fi
-  if ! ffmpeg -y -hide_banner -loglevel warning \
-       -ss "$(awk -v ms="$at_ms" 'BEGIN{printf "%.3f", ms/1000}')" \
-       -i "$NADE_CLIP_FILE" -frames:v 1 -q:v 2 \
-       "$NADE_STILLS_DIR/${kind}.jpg" 2>/dev/null \
-     || [ ! -s "$NADE_STILLS_DIR/${kind}.jpg" ]; then
+  case "$kind" in
+    aim|aim_pin|aim_close) webp_args=(-c:v libwebp -lossless 1 -compression_level 6) ;;
+    *) webp_args=(-c:v libwebp -quality 90 -compression_level 6) ;;
+  esac
+  if cut_frame "$at_ms" "$NADE_STILLS_DIR/${kind}.webp" "${webp_args[@]}"; then
+    :
+  elif rm -f "$NADE_STILLS_DIR/${kind}.webp" \
+       && cut_frame "$at_ms" "$NADE_STILLS_DIR/${kind}.jpg" -q:v 2; then
+    say "WARN ${kind} still fell back to jpeg"
+  else
     say "WARN ffmpeg could not cut the ${kind} still"
     rm -f "$NADE_STILLS_DIR/${kind}.jpg"
   fi
 done
 
-# The aim is what a viewer needs to copy, so it is the poster.
-if [ -s "$NADE_STILLS_DIR/aim.jpg" ]; then
-  cp "$NADE_STILLS_DIR/aim.jpg" "$NADE_THUMB_FILE"
+# The aim is what a viewer needs to copy, so it is the poster -- a jpeg, which
+# every link preview can show.
+if [ -n "${STILL_AT_MS[aim]:-}" ]; then
+  cut_frame "${STILL_AT_MS[aim]}" "$NADE_THUMB_FILE" -q:v 2 \
+    || rm -f "$NADE_THUMB_FILE"
 fi
 
 # --- STEP 5: the delivered encode ---------------------------------------------
@@ -571,11 +593,12 @@ fi
 
 api_status "status=uploading" "progress=0.0"
 
-upload_jpeg() {
-  local path="$1" file="$2"
+upload_image() {
+  local path="$1" file="$2" type="image/jpeg"
+  case "$file" in *.webp) type="image/webp" ;; esac
   curl --fail --silent --show-error --max-time 60 \
        --header "x-origin-auth: ${NADE_RENDER_JOB_ID}:${NADE_RENDER_TOKEN}" \
-       --header "content-type: image/jpeg" \
+       --header "content-type: ${type}" \
        --data-binary "@${file}" \
        --output /dev/null \
        "${STATUS_API_BASE}/nade-renders/${NADE_RENDER_JOB_ID}/${path}"
@@ -584,12 +607,15 @@ upload_jpeg() {
 # Everything the clip points at lands before the clip: the api records the
 # stills and the thumbnail that already exist when the clip upload finalizes.
 for kind in stance stance_eyes aim aim_pin aim_close landing; do
-  [ -s "$NADE_STILLS_DIR/${kind}.jpg" ] || continue
-  upload_jpeg "still/${kind}" "$NADE_STILLS_DIR/${kind}.jpg" \
-    || say "WARN ${kind} still upload failed — continuing without it"
+  for still in "$NADE_STILLS_DIR/${kind}.webp" "$NADE_STILLS_DIR/${kind}.jpg"; do
+    [ -s "$still" ] || continue
+    upload_image "still/${kind}" "$still" \
+      || say "WARN ${kind} still upload failed — continuing without it"
+    break
+  done
 done
 if [ -s "$NADE_THUMB_FILE" ]; then
-  upload_jpeg thumbnail "$NADE_THUMB_FILE" \
+  upload_image thumbnail "$NADE_THUMB_FILE" \
     || say "WARN thumbnail upload failed — continuing without one"
 fi
 
