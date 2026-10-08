@@ -230,9 +230,21 @@ THIRDPERSON=0
 # cs2 has dropped a lone `thirdperson` sent while staging, so every
 # third-person shot asks again; both commands are idempotent.
 enter_thirdperson() {
-  cs2_exec "cam_idealdist ${NADE_STANCE_CAM_DIST:-160}; cam_idealpitch ${NADE_STANCE_CAM_PITCH:-12}; cam_idealyaw ${NADE_STANCE_CAM_YAW:-20}; cam_collision 1"
-  cs2_exec "thirdperson"
+  local mark
+  mark=$(wc -l <"$CS2_CONSOLE_LOG" 2>/dev/null || echo 0)
+  cs2_exec "cam_idealdist ${NADE_STANCE_CAM_DIST:-160}; cam_idealpitch ${NADE_STANCE_CAM_PITCH:-12}; cam_idealyaw ${NADE_STANCE_CAM_YAW:-20}; cam_collision 1; thirdperson"
   THIRDPERSON=1
+  report_thirdperson "$mark" &
+}
+
+# cs2 has refused `thirdperson` on some renders with no sign in this log; what
+# its own console said in the moment after the exec is the only evidence.
+report_thirdperson() {
+  local mark="$1"
+  sleep 0.6
+  tail -n +"$((mark + 1))" "$CS2_CONSOLE_LOG" 2>/dev/null | tr -d '\r' \
+    | grep -aiE "thirdperson|cam_|cheat|unknown command|not allowed|can.t" \
+    | head -n 8 | sed 's/^/    cs2 | /' >&2
 }
 
 leave_thirdperson() {
