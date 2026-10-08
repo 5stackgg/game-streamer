@@ -70,8 +70,8 @@ esac
 # clock (t=, ms since go) because console.log can reach us late.
 : "${NADE_GO_LATENCY_MS:=100}"
 # When to throw if the `act` line has not reached us: the plugin's throw beat
-# starts 4.6s after go, and it also accepts the throw during the close-up.
-: "${NADE_ACT_AT_MS:=5000}"
+# starts ~5.9s after go, and it also accepts the throw during the close-up.
+: "${NADE_ACT_AT_MS:=6300}"
 
 CLIP_OUTPUT_DIMS="$NADE_OUTPUT_DIMS"
 CLIP_OUTPUT_FPS="$NADE_OUTPUT_FPS"
@@ -386,7 +386,7 @@ while :; do
         t=$(event_field t)
         case "$t" in ''|*[!0-9]*) t="" ;; esac
         case "$kind" in
-          stance|aim|aim_close|landing)
+          stance|stance_eyes|aim|aim_close|landing)
             if [ -n "$t" ]; then
               STILL_AT_MS[$kind]=$((GO_SENT_MS - CAPTURE_START_MS + NADE_GO_LATENCY_MS + t))
             else
@@ -459,7 +459,7 @@ fi
 # Grid pacing keeps the clip's frame count on wall time, so a still's offset
 # from the capture gate is its timestamp in the mp4.
 
-for kind in stance aim aim_close landing; do
+for kind in stance stance_eyes aim aim_close landing; do
   at_ms="${STILL_AT_MS[$kind]:-}"
   if [ -z "$at_ms" ]; then
     say "WARN no ${kind} still was called for"
@@ -498,7 +498,7 @@ upload_jpeg() {
 
 # Everything the clip points at lands before the clip: the api records the
 # stills and the thumbnail that already exist when the clip upload finalizes.
-for kind in stance aim aim_close landing; do
+for kind in stance stance_eyes aim aim_close landing; do
   [ -s "$NADE_STILLS_DIR/${kind}.jpg" ] || continue
   upload_jpeg "still/${kind}" "$NADE_STILLS_DIR/${kind}.jpg" \
     || say "WARN ${kind} still upload failed — continuing without it"
