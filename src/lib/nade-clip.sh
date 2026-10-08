@@ -79,6 +79,7 @@ CLIP_OUT_DIR="$NADE_OUT_DIR"
 export CLIP_OUTPUT_DIMS CLIP_OUTPUT_FPS CLIP_OUT_DIR
 
 NADE_CLIP_FILE="$NADE_OUT_DIR/${NADE_RENDER_JOB_ID}.mp4"
+NADE_DELIVERY_FILE="$NADE_OUT_DIR/${NADE_RENDER_JOB_ID}.delivery.mp4"
 NADE_THUMB_FILE="$NADE_OUT_DIR/${NADE_RENDER_JOB_ID}.jpg"
 NADE_EVENTS_FILE="$NADE_OUT_DIR/${NADE_RENDER_JOB_ID}.events"
 NADE_STILLS_DIR="$NADE_OUT_DIR/${NADE_RENDER_JOB_ID}.stills"
@@ -242,7 +243,7 @@ on_exit() {
   leave_thirdperson
   stop_clip_capture
   stop_render_tail
-  rm -rf "$NADE_THUMB_FILE" "$NADE_STILLS_DIR" "$NADE_EVENTS_FILE"
+  rm -rf "$NADE_THUMB_FILE" "$NADE_STILLS_DIR" "$NADE_EVENTS_FILE" "$NADE_DELIVERY_FILE"
   [ -n "$NADE_APPROACH_FILE" ] && rm -f "$NADE_APPROACH_FILE"
   if [ "$rc" -ne 0 ] && [ "$NADE_REACHED_TERMINAL" != "1" ]; then
     api_status "status=error" \
@@ -536,6 +537,36 @@ done
 # The aim is what a viewer needs to copy, so it is the poster.
 if [ -s "$NADE_STILLS_DIR/aim.jpg" ]; then
   cp "$NADE_STILLS_DIR/aim.jpg" "$NADE_THUMB_FILE"
+fi
+
+# --- STEP 5: the delivered encode ---------------------------------------------
+# The capture runs at 24Mbps so the stills above are clean. What ships is
+# re-encoded the way highlights are (~9Mbps): a raw capture is ~60MB for a
+# 20s render, too big for Discord to play inline when the lineup is shared.
+
+nade_delivery_encode() {
+  rm -f "$NADE_DELIVERY_FILE"
+  timeout 180 ffmpeg -y -hide_banner -loglevel error -i "$NADE_CLIP_FILE" "$@" \
+    -c:a copy -movflags +faststart "$NADE_DELIVERY_FILE" 2>/dev/null \
+    && [ -s "$NADE_DELIVERY_FILE" ]
+}
+
+NADE_NVENC_ARGS=(-c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr
+  -b:v "${NADE_FINAL_BITRATE:-9M}" -maxrate "${NADE_FINAL_MAXRATE:-14M}" -bufsize "${NADE_FINAL_BUFSIZE:-18M}"
+  -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3
+  -pix_fmt yuv420p -profile:v high -level 4.2)
+
+# Pre-Turing GPUs reject B-frames as references, and a node without NVENC
+# falls back to the CPU encode highlights used before NVENC.
+if nade_delivery_encode "${NADE_NVENC_ARGS[@]}" -b_ref_mode middle \
+   || nade_delivery_encode "${NADE_NVENC_ARGS[@]}" \
+   || nade_delivery_encode -c:v libx264 -preset veryfast -crf 22 \
+        -pix_fmt yuv420p -profile:v high -level 4.2; then
+  mv -f "$NADE_DELIVERY_FILE" "$NADE_CLIP_FILE"
+  say "delivery encode: $(stat -c '%s' "$NADE_CLIP_FILE" 2>/dev/null || stat -f '%z' "$NADE_CLIP_FILE")B"
+else
+  rm -f "$NADE_DELIVERY_FILE"
+  say "WARN delivery encode failed — uploading the capture as recorded"
 fi
 
 api_status "status=uploading" "progress=0.0"
