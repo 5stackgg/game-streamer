@@ -44,9 +44,8 @@ else
   die "no practice server to connect to — set CONNECT_ADDR (+CONNECT_PASSWORD)"
 fi
 
-# The api resolves this via get_server_host: an SDR relay token ([A:1:...]) on
-# a relay region, else host:port. A relay server answers ONLY over Steam
-# datagram, so a raw ip:port here lands the client on cs2's loopback map.
+# 127.0.0.1:<port>: the api books the practice server on this pod's node, and
+# loopback is the one address it accepts a connect on from here.
 log "connect target: $CS2_CONNECT_ADDR"
 
 : "${NADE_OUT_DIR:=/tmp/game-streamer/nades}"
@@ -84,16 +83,30 @@ write_cs2_video_cfg demo
 
 # The clip IS the alignment reference, so the crosshair and viewmodel stay on;
 # only the chrome a viewer can't act on is trimmed. cl_draw_only_deathnotices
-# keeps the crosshair while dropping the rest of the HUD.
+# keeps the crosshair while dropping the rest of the HUD. The crosshair is a
+# fixed small static one, whatever the bot account's profile says, so the
+# close-up shows the exact pixel the lineup is aimed at.
 read -r -d '' NADE_VIEW_CMDS <<'EOF' || true
 snd_mute_losefocus 0
 engine_no_focus_sleep 0
 volume 1.0
 r_drawviewmodel 1
+viewmodel_presetpos 1
 cl_draw_only_deathnotices 1
 cl_showfps 0
 net_graph 0
 r_fullscreen_gamma 2
+cl_crosshairstyle 4
+cl_crosshairsize 2
+cl_crosshairgap -2
+cl_crosshairthickness 0.6
+cl_crosshairdot 0
+cl_crosshair_t 0
+cl_crosshair_drawoutline 1
+cl_crosshair_outlinethickness 1
+cl_crosshaircolor 1
+cl_crosshairusealpha 1
+cl_crosshairalpha 255
 EOF
 
 printf '// see nade_autoexec.cfg\n' > "$CS2_CFG_DIR/autoexec.cfg"
@@ -110,21 +123,11 @@ EOF
 # flushes console commands through) doesn't error before the first write.
 : > "$CS2_CFG_DIR/5stack_exec.cfg"
 
-# The camera check demands a GSI reading no older than NADE_GSI_MAX_AGE_MS
-# (2s) taken while the player stands still at the lineup -- which is exactly
-# when cs2 stops emitting state changes. At the default 10s heartbeat the check
-# is only evaluable for ~2s out of every 10, and reported "GSI is stale" for
-# the rest. Pulse faster than the freshness window it is checked against.
+# The session gate (and the per-job join) read the local player's health off
+# GSI, and a player standing still on a lineup emits no state changes; pulse
+# faster than the gate's 2s freshness window.
 : "${GSI_HEARTBEAT:=0.5}"
 export GSI_HEARTBEAT
-
-# A live-pawn render never receives the observer-only GSI grenade feed (cs2
-# only sends allgrenades to a spectator), so the recorded flight time is the
-# ONLY detonation signal available. An `exact` lineup carries an accurate
-# flight time, so the clip is correctly timed even though the pod flags it
-# unverified. Without this the throw step dies "no detonation signal".
-: "${NADE_ALLOW_TIMED_DETONATION:=1}"
-export NADE_ALLOW_TIMED_DETONATION
 write_gsi_cfg
 
 for base in libpangoft2-1.0 libpango-1.0; do
@@ -147,7 +150,7 @@ do_applaunch() {
   local thread_args=()
   [ "${CS2_THREADS:-0}" != 0 ] && thread_args=(-threads "$CS2_THREADS")
   # -condebug tees cs2's console to csgo/console.log, which is where the
-  # optional NADE_DETONATE_LOG_RE signal is read from.
+  # practice plugin's [5stack-render] lines are read from.
   local cs2_args=(
     -windowed -noborder
     -width "$CS2_WIDTH" -height "$CS2_HEIGHT"
@@ -202,16 +205,9 @@ timeout 5 xdotool windowfocus --sync "$WIN" 2>/dev/null || true
     && report_status status=errored "error=cs2 process exited unexpectedly"
 ) &
 
-# Keep watching. The loop normally stops here so the screen grab cannot
-# compete with a clip capture -- but the connect/join/wait phase (where a
-# render most often wedges) has no capture running, and a live view of it is
-# the whole point while debugging. NADE_KEEP_SNAPSHOTS=0 restores the old
-# stop-before-filming behaviour.
-if [ "${NADE_KEEP_SNAPSHOTS:-1}" = "1" ]; then
-  log "snapshot: keeping the loop running through the batch (NADE_KEEP_SNAPSHOTS=1)"
-else
-  stop_snapshot_loop
-fi
+# The snapshot loop keeps running through the connect/join/wait phase, where a
+# render most often wedges and a live view is the whole point; batch-nades.sh
+# stops it once the session is up so the screen grab never lands in a clip.
 # shellcheck disable=SC1091
 . "$LIB_DIR/batch-nades.sh"
 process_nade_jobs

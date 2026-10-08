@@ -13,6 +13,8 @@
 
 import { readFileSync } from "node:fs";
 
+import { nadeActKeys } from "./nade-act.mjs";
+
 function readStdinJson() {
   try {
     return JSON.parse(readFileSync(0, "utf8"));
@@ -331,7 +333,21 @@ switch (subcmd) {
       S(s.plugin_runtime),
       s?.output?.resolution === "720p" ? "1280x720" : "1920x1080",
       String(Number.isFinite(fps) ? fps : 60),
+      S(s.technique),
+      S(s.throw_strength),
+      s.jump_throw_bind === true ? "1" : "0",
     ].map((f) => f + "\u0000").join(""));
+    break;
+  }
+
+  // argv: <technique> <strength> <jump_bind 0|1> -> press\0release\0after\0
+  case "nade-act": {
+    const keys = nadeActKeys({
+      technique: args[0],
+      strength: args[1],
+      jumpBind: args[2] === "1",
+    });
+    process.stdout.write([keys.press, keys.release, keys.after].map((f) => f + "\u0000").join(""));
     break;
   }
 

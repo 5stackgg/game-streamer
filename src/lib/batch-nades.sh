@@ -5,15 +5,15 @@
 #
 # NADE_BATCH_JOBS is a JSON array; each entry is
 #   { "job_id": "<uuid>", "token": "<session token>", "spec": { ... } }
-# and spec carries the nade_lineups row the pod needs (column names verbatim):
+# and spec carries the utility_lineups row the pod needs (column names verbatim):
 #   lineup_id, lineup_name, map_name, nade_type ("Smoke"|"Flash"|
 #   "HighExplosive"|"Molotov"|"Decoy"), side, origin_x/y/z, eye_z, view_yaw,
-#   view_pitch, flight_time_ms, confidence, plugin_runtime, and either
-#   has_seed:true|false or the six initial_pos_*/initial_vel_* values,
-#   plus output: { resolution: "720p"|"1080p", fps: <int> }.
+#   view_pitch, flight_time_ms, confidence, plugin_runtime, technique,
+#   throw_strength, jump_throw_bind, and either has_seed:true|false or the six
+#   initial_pos_*/initial_vel_* values, plus
+#   output: { resolution: "720p"|"1080p", fps: <int> }.
 #
-# lineup_name is load-bearing: the practice plugin resolves `.load <query>` by
-# name, it has no id lookup.
+# The practice plugin stages a lineup by lineup_id (`/render_stage <id>`).
 
 CLIP_HELPERS="$LIB_DIR/clip-helpers.mjs"
 
@@ -53,15 +53,16 @@ nade_render_one_job() {
         side="${F[6]:-}" origin="${F[7]:-}" eye_z="${F[8]:-}" \
         view_yaw="${F[9]:-}" view_pitch="${F[10]:-}" flight_ms="${F[11]:-0}" \
         has_seed="${F[12]:-0}" confidence="${F[13]:-}" runtime="${F[14]:-}" \
-        output_dims="${F[15]:-}" output_fps="${F[16]:-}"
+        output_dims="${F[15]:-}" output_fps="${F[16]:-}" \
+        technique="${F[17]:-}" throw_strength="${F[18]:-}" jump_bind="${F[19]:-0}"
 
   if [ -z "$job_id" ] || [ -z "$token" ]; then
     say "  skipping malformed nade job blob"
     return 0
   fi
-  if [ -z "$lineup_name" ]; then
-    say "  $job_id: lineup has no name — the plugin cannot load it"
-    nade_skip_job "$job_id" "$token" "lineup has no name; the practice plugin resolves lineups by name only"
+  if [ -z "$lineup_id" ]; then
+    say "  $job_id: job has no lineup id"
+    nade_fail_job "$job_id" "$token" "render job has no lineup id"
     return 0
   fi
   # One server session = one map. A lineup for another map can't be filmed
@@ -78,14 +79,14 @@ nade_render_one_job() {
     return 0
   fi
 
-  say "nade render: $job_id (${lineup_name})"
+  say "nade render: $job_id (${lineup_id} ${lineup_name})"
 
   local marker="${NADE_OUT_DIR:-/tmp/game-streamer/nades}/${job_id}.cs2done"
   rm -f "$marker"
   (
     export NADE_RENDER_JOB_ID="$job_id"
     export NADE_RENDER_TOKEN="$token"
-    export NADE_LINEUP_ID="${lineup_id:-$job_id}"
+    export NADE_LINEUP_ID="$lineup_id"
     export NADE_LINEUP_NAME="$lineup_name"
     export NADE_MAP_NAME="$map_name"
     export NADE_NADE_TYPE="$nade_type"
@@ -100,6 +101,9 @@ nade_render_one_job() {
     export NADE_PLUGIN_RUNTIME="${runtime:-${NADE_PLUGIN_RUNTIME:-swiftlys2}}"
     export NADE_OUTPUT_DIMS="$output_dims"
     export NADE_OUTPUT_FPS="$output_fps"
+    export NADE_TECHNIQUE="$technique"
+    export NADE_THROW_STRENGTH="$throw_strength"
+    export NADE_JUMP_THROW_BIND="$jump_bind"
     export NADE_CS2_RELEASE_MARKER="$marker"
     export SPEC_SERVER_URL="${SPEC_SERVER_URL:-http://127.0.0.1:1350}"
     bash "$LIB_DIR/nade-clip.sh"
@@ -199,11 +203,9 @@ nade_gate_probe() {
   NADE_GATE_LOG_OFFSET=$size
   # And the other half of the gate's condition, so a log reads "in the map
   # per console, no GSI per spec-server" without anyone having to correlate.
-  local self watch
+  local self
   self=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || echo "unreachable")
-  watch=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/watch" || echo "unreachable")
   say "  gsi self  (age|steam|team|health|activity|pos|fwd): ${self}"
-  say "  gsi watch (armed|age|since|thrown|det|bloom|active|type|blocks_seen): ${watch}"
 }
 
 # The boot-time connect (+connect launch arg and the autoexec both) fires
@@ -251,8 +253,8 @@ nade_batch_join_team() {
   ' 2>/dev/null || printf '3'
 }
 
-# Connected, in-game and alive is the only state in which `.load` does
-# anything, so the batch waits for GSI to say so before the first lineup.
+# Connected, in-game and alive is the only state in which a lineup can be
+# staged, so the batch waits for GSI to say so before the first lineup.
 # die() fans the failure out to every job, so a server that never comes up is
 # reported per-lineup instead of leaving rows stuck in-flight.
 wait_for_nade_session() {
@@ -320,6 +322,12 @@ process_nade_jobs() {
   say "batch-nades: ${count} lineup(s) queued"
 
   wait_for_nade_session
+
+  # An X grab every few seconds stalls cs2's present, and that hitch would be
+  # filmed. NADE_KEEP_SNAPSHOTS=1 keeps it for debugging a batch.
+  if [ "${NADE_KEEP_SNAPSHOTS:-0}" != "1" ]; then
+    stop_snapshot_loop
+  fi
 
   local -a TAIL_PIDS=() TAIL_JOBS=() TAIL_MARKERS=()
   local idx job_json

@@ -1,7 +1,6 @@
 import { SNIPER_WEAPONS } from "../constants.mjs";
 import { parsePosition } from "../util/geometry.mjs";
 import { steamIdToAccountId } from "../util/steamid.mjs";
-import { applyNadeUpdate } from "./nades.mjs";
 
 export const gsiState = {
   lastReceivedMs:   0,
@@ -16,8 +15,8 @@ export const gsiState = {
   spectatedSteamId: null,
   specSlots:        [],
   // The `player` block for THIS client. On a server we joined as a player it's
-  // the only block GSI sends (allplayers/allgrenades are observer-only), and
-  // it's what the nade preview recorder confirms its camera against.
+  // the only block GSI sends (allplayers/allgrenades are observer-only); the
+  // nade render pod's session gate reads its health.
   localPosition:    null,
   localForward:     null,
   localHealth:      0,
@@ -75,8 +74,6 @@ export function applyGsiUpdate(body) {
   gsiState.teamTName        = typeof map?.team_t?.name === "string" ? map.team_t.name : null;
   gsiState.teamCtScore      = Number(map?.team_ct?.score ?? 0) || 0;
   gsiState.teamTScore       = Number(map?.team_t?.score ?? 0) || 0;
-
-  applyNadeUpdate(body?.grenades);
 
   let playersUpdated = false;
   if (allPlayers && typeof allPlayers === "object") {
