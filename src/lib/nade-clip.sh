@@ -420,7 +420,9 @@ while :; do
             else
               STILL_AT_MS[$kind]=$((NOW - CAPTURE_START_MS))
             fi
-            say "  still ${kind} at ${STILL_AT_MS[$kind]}ms into the clip (line read $((NOW - CAPTURE_START_MS))ms in)"
+            aim_off=""
+            [ -n "$(event_field dpitch)" ] && aim_off=", aim off by pitch=$(event_field dpitch) yaw=$(event_field dyaw)"
+            say "  still ${kind} at ${STILL_AT_MS[$kind]}ms into the clip (line read $((NOW - CAPTURE_START_MS))ms in${aim_off})"
             ;;
         esac
         ;;
