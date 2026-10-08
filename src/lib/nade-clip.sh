@@ -70,8 +70,8 @@ esac
 # clock (t=, ms since go) because console.log can reach us late.
 : "${NADE_GO_LATENCY_MS:=100}"
 # When to throw if the `act` line has not reached us: the plugin's throw beat
-# starts ~5.9s after go, and it also accepts the throw during the close-up.
-: "${NADE_ACT_AT_MS:=6300}"
+# starts ~8.0s after go, and it also accepts the throw during the close-up.
+: "${NADE_ACT_AT_MS:=8500}"
 
 CLIP_OUTPUT_DIMS="$NADE_OUTPUT_DIMS"
 CLIP_OUTPUT_FPS="$NADE_OUTPUT_FPS"
@@ -225,7 +225,7 @@ THIRDPERSON=0
 # director's ThirdPersonDistance / ThirdPersonYaw, so its glide starts where
 # this camera is.
 enter_thirdperson() {
-  cs2_exec "cam_idealdist 130; cam_idealyaw 25; cam_idealpitch 0; cam_collision 1"
+  cs2_exec "cam_idealdist 150; cam_idealyaw 25; cam_idealpitch 0; cam_collision 1"
   cs2_exec "thirdperson"
   THIRDPERSON=1
 }
@@ -374,13 +374,37 @@ api_status "status=rendering" "progress=0.3"
 # The clock starts once the offset-0 keys are down, so the pin pull is timed
 # from +attack itself; every later step waits for its own offset on that one
 # clock, so a slow exec delays only itself and never the rest of the run-up.
+# The director pulls the pin early (`pin`), so cs2's throw crosshair is up for
+# the pulled-pin and close-up shots: the offset-0 keys go down then, and `act`
+# runs the rest with the pin pull already served.
+PINNED=0
+pin_grip() {
+  [ "$PINNED" = "1" ] && return 0
+  PINNED=1
+  local i
+  for i in "${!ACT_CMD[@]}"; do
+    [ "${ACT_AT[$i]}" -eq 0 ] || continue
+    say "  pin ${ACT_CMD[$i]}"
+    spec_post /demo/exec "{\"cmd\":\"${ACT_CMD[$i]}\"}"
+  done
+}
+
 ACTED=0
 act_throw() {
   [ "$ACTED" = "1" ] && return 0
   ACTED=1
-  local i at start="" now wait
+  local i at start="" now wait served=0
+  if [ "$PINNED" = "1" ]; then
+    served="$NADE_PIN_PULL_MS"
+    now_ms start
+  fi
   for i in "${!ACT_CMD[@]}"; do
     at="${ACT_AT[$i]}"
+    if [ "$PINNED" = "1" ] && [ "$at" -eq 0 ]; then
+      continue
+    fi
+    at=$((at - served))
+    [ "$at" -lt 0 ] && at=0
     if [ "$at" -gt 0 ]; then
       [ -n "$start" ] || now_ms start
       now_ms now
@@ -408,7 +432,7 @@ while :; do
         t=$(event_field t)
         case "$t" in ''|*[!0-9]*) t="" ;; esac
         case "$kind" in
-          stance|stance_eyes|aim|aim_close|landing)
+          stance|stance_eyes|aim|aim_pin|aim_close|landing)
             if [ -n "$t" ]; then
               STILL_AT_MS[$kind]=$((GO_SENT_MS - CAPTURE_START_MS + NADE_GO_LATENCY_MS + t))
             else
@@ -417,6 +441,9 @@ while :; do
             say "  still ${kind} at ${STILL_AT_MS[$kind]}ms into the clip (line read $((NOW - CAPTURE_START_MS))ms in)"
             ;;
         esac
+        ;;
+      pin)
+        pin_grip
         ;;
       act)
         act_throw
@@ -481,7 +508,7 @@ fi
 # Grid pacing keeps the clip's frame count on wall time, so a still's offset
 # from the capture gate is its timestamp in the mp4.
 
-for kind in stance stance_eyes aim aim_close landing; do
+for kind in stance stance_eyes aim aim_pin aim_close landing; do
   at_ms="${STILL_AT_MS[$kind]:-}"
   if [ -z "$at_ms" ]; then
     say "WARN no ${kind} still was called for"
@@ -520,7 +547,7 @@ upload_jpeg() {
 
 # Everything the clip points at lands before the clip: the api records the
 # stills and the thumbnail that already exist when the clip upload finalizes.
-for kind in stance stance_eyes aim aim_close landing; do
+for kind in stance stance_eyes aim aim_pin aim_close landing; do
   [ -s "$NADE_STILLS_DIR/${kind}.jpg" ] || continue
   upload_jpeg "still/${kind}" "$NADE_STILLS_DIR/${kind}.jpg" \
     || say "WARN ${kind} still upload failed — continuing without it"
