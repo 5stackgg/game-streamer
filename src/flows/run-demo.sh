@@ -169,6 +169,9 @@ snd_mute_losefocus 0
 engine_no_focus_sleep 0
 volume 1.0
 cl_show_observer_crosshair 0
+// Pooled Steam accounts also film utility previews, which trim the HUD to the
+// kill feed; cs2 can keep that in the account's config.
+cl_draw_only_deathnotices 0
 // cl_demo_predict is env-tunable via CS2_DEMO_PREDICT (injected into
 // live_autoexec below), not pinned here.
 // Hide assist credits in the kill feed during playback.

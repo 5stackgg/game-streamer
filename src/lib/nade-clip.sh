@@ -108,8 +108,17 @@ api_status() {
     || say "WARN status post failed: $*"
 }
 
+# cs2's own words for the moments before a failure: a refused command, a
+# kick, an unknown command -- none of which reach the render lines.
+dump_console_tail() {
+  [ -f "$CS2_CONSOLE_LOG" ] || return 0
+  say "cs2 console (last 40 lines):"
+  tail -n 40 "$CS2_CONSOLE_LOG" 2>/dev/null | tr -d '\r' | sed 's/^/    | /' >&2
+}
+
 die_failed() {
   say "ERROR: $1"
+  dump_console_tail
   stop_clip_capture
   api_status "status=error" "error=$1"
   NADE_REACHED_TERMINAL=1
@@ -329,16 +338,32 @@ cs2_exec "say /render_go ${NADE_LINEUP_ID}"
 now_ms GO_SENT_MS
 api_status "status=rendering" "progress=0.3"
 
+# One action per exec. cs2 refuses a single exec that combines actions the way
+# a jumpthrow bind does (+jump with -attack): the pin came out on +attack and
+# "+jump; -attack" never let go of it -- the grenade only fell when the pod
+# disconnected. Separate execs land on separate frames, which is also what a
+# hand-timed jump throw is.
+act_steps() {
+  local step
+  local -a steps=()
+  IFS=';' read -r -a steps <<<"$1"
+  for step in "${steps[@]}"; do
+    step="${step#"${step%%[![:space:]]*}"}"
+    step="${step%"${step##*[![:space:]]}"}"
+    [ -n "$step" ] && cs2_exec "$step"
+  done
+}
+
 ACTED=0
 act_throw() {
   [ "$ACTED" = "1" ] && return 0
   ACTED=1
   say "  act: ${ACT_PRESS} -> ${ACT_RELEASE}"
-  cs2_exec "$ACT_PRESS"
+  act_steps "$ACT_PRESS"
   sleep_ms "$NADE_PIN_PULL_MS"
-  cs2_exec "$ACT_RELEASE"
+  act_steps "$ACT_RELEASE"
   sleep_ms 150
-  cs2_exec "$ACT_AFTER"
+  act_steps "$ACT_AFTER"
 }
 
 declare -A STILL_AT_MS=()
