@@ -242,6 +242,37 @@ nade_reconnect() {
        "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
 }
 
+# A client the server DROPPED sits at the main menu behind a dialog. GSI has
+# already fired by then, so nade_reconnect leaves it alone and the gate would
+# wait out its whole timeout: seen when the client stalled entering the map
+# and the server closed its netchan for overflow. The drop is in the client's
+# own console, and a dropped client has nothing to lose from a reconnect --
+# capped all the same.
+NADE_DROP_RECONNECTS=0
+NADE_DROP_MARK=0
+nade_reconnect_if_dropped() {
+  local log="${CS2_CONSOLE_LOG:-$CS2_DIR/game/csgo/console.log}" total reason
+  [ -n "${CS2_CONNECT_ADDR:-}" ] || return 0
+  [ -f "$log" ] || return 0
+  total=$(wc -l <"$log" 2>/dev/null || echo 0)
+  [ "$total" -gt "$NADE_DROP_MARK" ] || return 0
+  reason=$(tail -n +"$((NADE_DROP_MARK + 1))" "$log" | tr -d '\r' \
+    | grep -aoE "NETWORK_DISCONNECT_[A-Z_]+|Overflow error|Disconnected from server" | tail -n 1)
+  NADE_DROP_MARK="$total"
+  [ -n "$reason" ] || return 0
+  if [ "$NADE_DROP_RECONNECTS" -ge "${NADE_DROP_RECONNECT_MAX:-2}" ]; then
+    say "  dropped by the server again (${reason}) — out of reconnects"
+    return 0
+  fi
+  NADE_DROP_RECONNECTS=$((NADE_DROP_RECONNECTS + 1))
+  say "  dropped by the server (${reason}) — reconnecting (${NADE_DROP_RECONNECTS}/${NADE_DROP_RECONNECT_MAX:-2})"
+  curl --fail --silent --max-time 5 \
+       --header "content-type: application/json" \
+       --data "{\"cmd\": \"password \\\"${CS2_CONNECT_PASSWORD:-}\\\"; connect ${CS2_CONNECT_ADDR}\"}" \
+       --output /dev/null \
+       "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
+}
+
 # Same side mapping nade-clip.sh uses, read off the batch's first lineup so the
 # opening spawn is already on the right side.
 nade_batch_join_team() {
@@ -309,6 +340,7 @@ wait_for_nade_session() {
       nade_gate_probe
     fi
     [ $((waited % 45)) -eq 0 ] && nade_reconnect
+    [ $((waited % 5)) -eq 0 ] && nade_reconnect_if_dropped
     sleep 1
   done
 }
