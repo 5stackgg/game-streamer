@@ -107,6 +107,21 @@ cl_crosshair_outlinethickness 1
 cl_crosshaircolor 1
 cl_crosshairusealpha 1
 cl_crosshairalpha 255
+snd_musicvolume 0
+snd_menumusic_volume 0
+snd_roundstart_volume 0
+snd_roundend_volume 0
+snd_roundaction_volume 0
+snd_mapobjective_volume 0
+snd_tensecondwarning_volume 0
+snd_deathcamera_volume 0
+snd_mvp_volume 0
+cl_hud_telemetry_frametime_show 0
+cl_hud_telemetry_ping_show 0
+cl_hud_telemetry_net_misdelivery_show 0
+cl_hud_telemetry_net_detailed 0
+cl_hud_telemetry_serverrecvmargin_graph_show 0
+r_show_build_info 0
 EOF
 
 printf '// see nade_autoexec.cfg\n' > "$CS2_CFG_DIR/autoexec.cfg"
