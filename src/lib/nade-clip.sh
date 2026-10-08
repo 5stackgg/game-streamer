@@ -224,6 +224,8 @@ THIRDPERSON=0
 # own camera: a view entity alone never draws the local player's body. Only
 # the body matters here -- the director's camera is the view, so cs2's own
 # third-person placement (which ignores cam_idealdist) never reaches the clip.
+# cs2 has dropped a lone `thirdperson` sent while staging, so every
+# third-person shot asks again; the command is idempotent.
 enter_thirdperson() {
   cs2_exec "thirdperson"
   THIRDPERSON=1
@@ -424,7 +426,11 @@ while :; do
     case "$EVENT" in
       shot)
         say "  shot $(event_field name) through the $(event_field view)"
-        [ "$(event_field view)" = "thirdperson" ] || leave_thirdperson
+        if [ "$(event_field view)" = "thirdperson" ]; then
+          enter_thirdperson
+        else
+          leave_thirdperson
+        fi
         ;;
       still)
         kind=$(event_field kind)
