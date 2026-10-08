@@ -223,13 +223,14 @@ event_field() {
 
 THIRDPERSON=0
 
-# cs2's third person, held while the director films the thrower through its
-# own camera: a view entity alone never draws the local player's body. Only
-# the body matters here -- the director's camera is the view, so cs2's own
-# third-person placement (which ignores cam_idealdist) never reaches the clip.
+# cs2's own third-person camera films the stance: a view entity never draws
+# the local player's body, and the client ignores a view entity while it is
+# in third person, so this camera is the view until the director's `cut`.
+# Behind, a little to the right and above the thrower, who looks level.
 # cs2 has dropped a lone `thirdperson` sent while staging, so every
-# third-person shot asks again; the command is idempotent.
+# third-person shot asks again; both commands are idempotent.
 enter_thirdperson() {
+  cs2_exec "cam_idealdist ${NADE_STANCE_CAM_DIST:-160}; cam_idealpitch ${NADE_STANCE_CAM_PITCH:-12}; cam_idealyaw ${NADE_STANCE_CAM_YAW:-20}; cam_collision 1"
   cs2_exec "thirdperson"
   THIRDPERSON=1
 }
