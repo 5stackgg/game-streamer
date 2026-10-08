@@ -124,6 +124,10 @@ cl_hud_telemetry_serverrecvmargin_graph_show 0
 r_show_build_info 0
 EOF
 
+# Also kept as its own cfg: the account's saved config can load after the
+# autoexec and bring the music back, so every lineup re-execs this in game.
+printf '%s\n' "$NADE_VIEW_CMDS" > "$CS2_CFG_DIR/nade_view.cfg"
+
 printf '// see nade_autoexec.cfg\n' > "$CS2_CFG_DIR/autoexec.cfg"
 cat > "$CS2_CFG_DIR/nade_autoexec.cfg" <<EOF
 con_enable 1

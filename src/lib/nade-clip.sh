@@ -218,8 +218,27 @@ event_field() {
   printf '%s' "$EVENT_LINE" | tr ' ' '\n' | awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }'
 }
 
+THIRDPERSON=0
+
+# cs2's own third person, which the director films the stance through: a view
+# entity camera never draws the local player. Distance and yaw are the
+# director's ThirdPersonDistance / ThirdPersonYaw, so its glide starts where
+# this camera is.
+enter_thirdperson() {
+  cs2_exec "cam_idealdist 130; cam_idealyaw 25; cam_idealpitch 0; cam_collision 1"
+  cs2_exec "thirdperson"
+  THIRDPERSON=1
+}
+
+leave_thirdperson() {
+  [ "$THIRDPERSON" = "1" ] || return 0
+  cs2_exec "firstperson"
+  THIRDPERSON=0
+}
+
 on_exit() {
   local rc=$?
+  leave_thirdperson
   stop_clip_capture
   stop_render_tail
   rm -rf "$NADE_THUMB_FILE" "$NADE_STILLS_DIR" "$NADE_EVENTS_FILE"
@@ -290,6 +309,7 @@ start_render_tail
 # --- STEP 1: stage -----------------------------------------------------------
 
 say "STEP 1: stage the lineup"
+cs2_exec "exec nade_view"
 join_if_not_spawned() {
   [ -n "$NADE_CMD_JOIN" ] || return 0
   local self health
@@ -332,6 +352,7 @@ for attempt in $(seq 1 "$NADE_STAGE_ATTEMPTS"); do
 done
 [ "$STAGED" = "1" ] || die_failed "the practice plugin never staged the lineup — is UTILITY_RENDER_MODE on and the lineup in this session's library?"
 api_status "status=rendering" "progress=0.15"
+enter_thirdperson
 
 # --- STEP 2: record while the plugin directs ---------------------------------
 
@@ -380,6 +401,7 @@ while :; do
     case "$EVENT" in
       shot)
         say "  shot $(event_field name) through the $(event_field view)"
+        [ "$(event_field view)" = "thirdperson" ] || leave_thirdperson
         ;;
       still)
         kind=$(event_field kind)
