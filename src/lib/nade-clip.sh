@@ -220,12 +220,11 @@ event_field() {
 
 THIRDPERSON=0
 
-# cs2's own third person, which the director films the stance through: a view
-# entity camera never draws the local player. Distance and yaw are the
-# director's ThirdPersonDistance / ThirdPersonYaw, so its glide starts where
-# this camera is.
+# cs2's third person, held while the director films the thrower through its
+# own camera: a view entity alone never draws the local player's body. Only
+# the body matters here -- the director's camera is the view, so cs2's own
+# third-person placement (which ignores cam_idealdist) never reaches the clip.
 enter_thirdperson() {
-  cs2_exec "cam_idealdist 150; cam_idealyaw 25; cam_idealpitch 0; cam_collision 1"
   cs2_exec "thirdperson"
   THIRDPERSON=1
 }
