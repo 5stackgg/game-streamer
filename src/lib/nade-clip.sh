@@ -314,7 +314,7 @@ for attempt in $(seq 1 "$NADE_STAGE_ATTEMPTS"); do
     if next_render_event; then
       case "$EVENT" in
         staged)
-          say "STEP 1: staged at $(event_field x),$(event_field y),$(event_field z) (dz=$(event_field dz) off the recorded stance) pitch=$(event_field pitch) yaw=$(event_field yaw)"
+          say "STEP 1: staged at $(event_field x),$(event_field y),$(event_field z) (dz=$(event_field dz) off the recorded stance) pitch=$(event_field pitch) yaw=$(event_field yaw) body lean=$(event_field lean)"
           STAGED=1
           ;;
         error)
@@ -421,7 +421,7 @@ while :; do
               STILL_AT_MS[$kind]=$((NOW - CAPTURE_START_MS))
             fi
             aim_off=""
-            [ -n "$(event_field dpitch)" ] && aim_off=", aim off by pitch=$(event_field dpitch) yaw=$(event_field dyaw)"
+            [ -n "$(event_field dpitch)" ] && aim_off=", aim off by pitch=$(event_field dpitch) yaw=$(event_field dyaw), eye $(event_field eye_off)u off the stance"
             say "  still ${kind} at ${STILL_AT_MS[$kind]}ms into the clip (line read $((NOW - CAPTURE_START_MS))ms in${aim_off})"
             ;;
         esac
