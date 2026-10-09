@@ -62,6 +62,9 @@ esac
 # plugin re-announces a lineup it already staged instead of starting over.
 : "${NADE_STAGE_TIMEOUT_MS:=15000}"
 : "${NADE_STAGE_ATTEMPTS:=3}"
+# A lineup handed over mid-session reaches this pod a moment before it
+# reaches the plugin, which only re-reads its library when the api says so.
+: "${NADE_UNKNOWN_LINEUP_RETRIES:=8}"
 # go -> done is ~10s of fixed beats plus however long the grenade flies.
 : "${NADE_MAX_CLIP_MS:=45000}"
 # The pin has to be fully out before the release counts as a throw.
@@ -306,25 +309,41 @@ join_if_not_spawned() {
 }
 
 STAGED=0
-for attempt in $(seq 1 "$NADE_STAGE_ATTEMPTS"); do
+RENDER_VERSION=""
+attempt=1
+unknown=0
+while [ "$attempt" -le "$NADE_STAGE_ATTEMPTS" ]; do
   join_if_not_spawned
   cs2_exec "say /render_stage ${NADE_LINEUP_ID}"
   now_ms STAGE_AT
+  RESTAGE=0
   while :; do
     if next_render_event; then
       case "$EVENT" in
         staged)
           say "STEP 1: staged at $(event_field x),$(event_field y),$(event_field z) (dz=$(event_field dz) off the recorded stance) pitch=$(event_field pitch) yaw=$(event_field yaw) body lean=$(event_field lean)"
+          # What the director says it films with. The api files the preview
+          # under it, and a director that says nothing leaves it unversioned.
+          RENDER_VERSION=$(event_field v)
+          case "$RENDER_VERSION" in ''|*[!0-9]*) RENDER_VERSION="" ;; esac
           STAGED=1
           ;;
         error)
           case "$(event_field reason)" in
             no_seed) die_skipped "the practice plugin has no physics seed for this lineup" ;;
+            unknown_lineup)
+              unknown=$((unknown + 1))
+              [ "$unknown" -gt "$NADE_UNKNOWN_LINEUP_RETRIES" ] \
+                && die_failed "staging refused: ${EVENT_LINE#*error }"
+              say "  the plugin does not know this lineup yet (${unknown}/${NADE_UNKNOWN_LINEUP_RETRIES})"
+              RESTAGE=1
+              ;;
             *) die_failed "staging refused: ${EVENT_LINE#*error }" ;;
           esac
           ;;
       esac
       [ "$STAGED" = "1" ] && break
+      [ "$RESTAGE" = "1" ] && break
       continue
     fi
     now_ms NOW
@@ -332,7 +351,12 @@ for attempt in $(seq 1 "$NADE_STAGE_ATTEMPTS"); do
     poll_sleep
   done
   [ "$STAGED" = "1" ] && break
+  if [ "$RESTAGE" = "1" ]; then
+    sleep 2
+    continue
+  fi
   say "  no answer to render_stage after ${NADE_STAGE_TIMEOUT_MS}ms (attempt ${attempt}/${NADE_STAGE_ATTEMPTS})"
+  attempt=$((attempt + 1))
 done
 [ "$STAGED" = "1" ] || die_failed "the practice plugin never staged the lineup — is UTILITY_RENDER_MODE on and the lineup in this session's library?"
 api_status "status=rendering" "progress=0.15"
@@ -595,13 +619,14 @@ if [ -s "$NADE_THUMB_FILE" ]; then
     || say "WARN thumbnail upload failed — continuing without one"
 fi
 
-say "POST ${STATUS_API_BASE}/nade-renders/${NADE_RENDER_JOB_ID}/upload"
+say "POST ${STATUS_API_BASE}/nade-renders/${NADE_RENDER_JOB_ID}/upload (render version ${RENDER_VERSION:-unreported})"
 # --upload-file streams from disk; --data-binary @file would slurp the whole
 # clip into RAM alongside every other pending upload tail.
 if ! curl --fail --silent --show-error --max-time 900 \
        --header "x-origin-auth: ${NADE_RENDER_JOB_ID}:${NADE_RENDER_TOKEN}" \
        --header "content-type: application/octet-stream" \
        --header "x-clip-duration-ms: ${CLIP_DURATION_MS}" \
+       --header "x-render-version: ${RENDER_VERSION}" \
        --upload-file "$NADE_CLIP_FILE" \
        --request POST \
        --output /dev/null \
