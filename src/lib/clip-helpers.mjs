@@ -14,6 +14,7 @@
 import { readFileSync } from "node:fs";
 
 import { nadeActTimeline } from "./nade-act.mjs";
+import { nadeNext } from "./nade-next.mjs";
 
 function readStdinJson() {
   try {
@@ -337,6 +338,16 @@ switch (subcmd) {
       S(s.throw_strength),
       s.jump_throw_bind === true ? "1" : "0",
     ].map((f) => f + "\u0000").join(""));
+    break;
+  }
+
+  // [stdin: the api's answer to nade-render-queue/:match_id/next]
+  //   -> action, map, seconds, jobs (JSON array), each NUL-terminated. A body
+  //      that cannot be read comes out as "done".
+  case "nade-next": {
+    const next = nadeNext(readStdinJson());
+    const out = [next.action, next.map, String(next.seconds), JSON.stringify(next.jobs)];
+    process.stdout.write(out.map((value) => `${value}\0`).join(""));
     break;
   }
 
