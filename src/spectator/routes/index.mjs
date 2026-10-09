@@ -30,6 +30,7 @@ import {
   execHandler,
   pauseHandler,
   reloadHandler,
+  resetSessionHandler,
   resumeHandler,
   roundHandler,
   seekHandler,
@@ -38,6 +39,7 @@ import {
   toggleHandler,
   xrayHandler,
 } from "./demo.mjs";
+import { nadeSelfHandler } from "./nade-self.mjs";
 import { renderClipHandler } from "./render-clip.mjs";
 import { switchMatchHandler } from "./switch-match.mjs";
 import { reconnectHandler } from "./reconnect.mjs";
@@ -54,6 +56,7 @@ const ROUTES = new Map([
   ["GET /demo/pov-state", povStateHandler],
   ["GET /demo/seek-state", seekStateHandler],
   ["GET /demo/demoui-score", demouiScoreHandler],
+  ["GET /nade/self", nadeSelfHandler],
   ["POST /gsi", gsiHandler],
 
   ["POST /spec/click",        clickHandler],
@@ -78,6 +81,7 @@ const ROUTES = new Map([
   ["POST /demo/skip",        skipHandler],
   ["POST /demo/speed",       speedHandler],
   ["POST /demo/reload",      reloadHandler],
+  ["POST /demo/reset-session", resetSessionHandler],
   ["POST /demo/xray",        xrayHandler],
   ["POST /demo/demoui",      demouiHandler],
   ["POST /demo/round",       roundHandler],
@@ -141,6 +145,8 @@ export async function dispatch(req, res) {
 const QUIET_URLS = new Set([
   "/gsi", "/demo/state", "/demo/capture-fields", "/demo/pov-state",
   "/demo/seek-state", "/demo/demoui-score",
+  // Polled every second by the nade render pod's session gate.
+  "/nade/self",
   // Polled by the HUD overlay to follow the spectated player.
   "/camera/state",
 ]);

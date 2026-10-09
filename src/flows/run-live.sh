@@ -106,6 +106,9 @@ engine_no_focus_sleep 0
 volume 1.0
 // TrueView off for live spectating too (cs2 2026-09-23+ cvar): smooth beats pixel-perfect.
 cl_spectator_predict 0
+// Pooled Steam accounts also film utility previews, which trim the HUD to the
+// kill feed; cs2 can keep that in the account's config.
+cl_draw_only_deathnotices 0
 EOF
 
 SPEC_BINDS_BLOCK="$(spec_static_binds_block)"
