@@ -24,6 +24,16 @@ function readStdinJson() {
   }
 }
 
+function readRoundTicks(path) {
+  if (!path) return [];
+  try {
+    const rounds = JSON.parse(readFileSync(path, "utf8"));
+    return Array.isArray(rounds) ? rounds : [];
+  } catch {
+    return [];
+  }
+}
+
 const STEAMID64_BASE = 76561197960265728n;
 const subcmd = process.argv[2];
 const args = process.argv.slice(3);
@@ -538,21 +548,26 @@ switch (subcmd) {
 
   // argv[0]=round_ticks JSON path -> highest end_tick, or empty.
   case "rounds-last-end-tick": {
-    const path = args[0];
-    if (!path) break;
-    let rounds;
-    try {
-      rounds = JSON.parse(readFileSync(path, "utf8"));
-    } catch {
-      break;
-    }
-    if (!Array.isArray(rounds)) break;
+    const rounds = readRoundTicks(args[0]);
     let max = 0;
     for (const r of rounds) {
       const end = Number(r?.end_tick);
       if (Number.isFinite(end) && end > max) max = end;
     }
     if (max > 0) process.stdout.write(String(Math.floor(max)));
+    break;
+  }
+
+  // argv[0]=round_ticks JSON path -> the final round's end_tick when that round
+  // was decided (it has a winner), or empty. The match ends with that round, so
+  // nothing after it can be played without running into gameover.
+  case "rounds-match-end-tick": {
+    const rounds = readRoundTicks(args[0]);
+    const last = rounds[rounds.length - 1];
+    const end = Number(last?.end_tick);
+    if (last?.winner && Number.isFinite(end) && end > 0) {
+      process.stdout.write(String(Math.floor(end)));
+    }
     break;
   }
 

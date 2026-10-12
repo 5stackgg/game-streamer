@@ -939,6 +939,22 @@ fi
 case "$DEMO_TOTAL_TICKS_FOR_GUARD" in
   ''|*[!0-9]*) DEMO_TOTAL_TICKS_FOR_GUARD="" ;;
 esac
+# Without playcast the server keeps recording for tv_delay seconds after gameover, so
+# the demo's last tick can sit minutes past the match end. Guard the match end instead:
+# playing past it (the warm-up's fast replay included) puts cs2 on the post-match screen
+# and back to the main menu, and the clip records that.
+if [ -s "$ROUND_TICKS_PATH" ]; then
+  MATCH_END_TICK=$(node "$CLIP_HELPERS" rounds-match-end-tick "$ROUND_TICKS_PATH" 2>/dev/null || true)
+  case "$MATCH_END_TICK" in
+    ''|*[!0-9]*) ;;
+    *)
+      if [ -z "$DEMO_TOTAL_TICKS_FOR_GUARD" ] || [ "$MATCH_END_TICK" -lt "$DEMO_TOTAL_TICKS_FOR_GUARD" ]; then
+        say "MATCH_END_GUARD match ends at tick ${MATCH_END_TICK}, before the demo's last tick ${DEMO_TOTAL_TICKS_FOR_GUARD:-?}"
+        DEMO_TOTAL_TICKS_FOR_GUARD=$MATCH_END_TICK
+      fi
+      ;;
+  esac
+fi
 if [ -z "$DEMO_TOTAL_TICKS_FOR_GUARD" ] && [ -s "$ROUND_TICKS_PATH" ]; then
   DEMO_TOTAL_TICKS_FOR_GUARD=$(node "$CLIP_HELPERS" rounds-last-end-tick "$ROUND_TICKS_PATH" 2>/dev/null || true)
   case "$DEMO_TOTAL_TICKS_FOR_GUARD" in
