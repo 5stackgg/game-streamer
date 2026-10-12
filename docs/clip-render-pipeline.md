@@ -289,7 +289,7 @@ The record loop doesn't only count down.
 | Condition | Detection | Action |
 | --- | --- | --- |
 | Round bleed | GSI round number advances past the one the segment opened in | Stops immediately — the clip has run out of its round. |
-| Match end | Map phase hits gameover (armed only for segments near the demo's end) | Stops early rather than recording the post-match screen. |
+| Match end | Map phase hits gameover (armed only for segments near the match's end: the decided final round's end tick, or the demo's last tick when that is earlier) | Stops early rather than recording the post-match screen. |
 | Demo frozen | Phase clock flat for 2 consecutive polls | Withholds the time from the budget and kicks playback with pause→toggle, up to 4 times. |
 | Demo never advanced | GSI signature identical across 12+ polls | A real engine fatal fails the job and relaunches CS2 (see the queue rules). Anything else (demo left paused by a seek, a play toggle lost to X focus) redoes the segment from a fresh seek once, then fails only this job with `demo did not advance in seg N (GSI flat X polls; paused=…, seek-state=…, focus=…)` and dumps CS2's console since the job started. |
 | Empty capture | Raw mp4 probes as zero-length or undecodable | Retries the segment once on the ximagesrc path, then drops it from the concat rather than silently truncating the montage. |
