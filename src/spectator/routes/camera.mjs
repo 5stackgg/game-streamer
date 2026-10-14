@@ -2,7 +2,7 @@ import process from "node:process";
 
 import { gsiState } from "../state/gsi.mjs";
 import { STATUS_API_BASE } from "../env.mjs";
-import { sendJson } from "../util/http.mjs";
+import { readBody, sendBodyError, sendJson } from "../util/http.mjs";
 
 // The HUD overlay is a browser page on a different local origin and has no
 // business holding the match password, so the SDP exchange is proxied here:
@@ -10,6 +10,10 @@ import { sendJson } from "../util/http.mjs";
 // x-origin-auth header status-reporter and snapshot use.
 
 const STEAM_ID_PATTERN = /^\d{17}$/;
+
+// The overlay offers a single recvonly video transceiver with its ICE
+// candidates already gathered, which is a few KB of SDP.
+const SDP_BODY_LIMIT = 64 * 1024;
 
 function matchAuth() {
   const matchId = process.env.MATCH_ID ?? "";
@@ -50,12 +54,13 @@ export async function cameraWhepHandler(req, res) {
     return;
   }
 
-  const sdp = await new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
+  let sdp;
+  try {
+    sdp = await readBody(req, SDP_BODY_LIMIT);
+  } catch (err) {
+    sendBodyError(req, res, err);
+    return;
+  }
 
   let response;
   try {
