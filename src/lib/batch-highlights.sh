@@ -31,10 +31,13 @@ patch_title_from_gsi() {
   [ -z "$new_title" ] && return 0
   [ "$new_title" = "$current_title" ] && return 0
 
+  local body
+  body=$(node "$CLIP_HELPERS" status-body "title=${new_title}" 2>/dev/null) \
+    || return 0
   curl --fail --silent --show-error --max-time 5 \
        --header "x-origin-auth: ${job_id}:${token}" \
        --header "content-type: application/json" \
-       --data "$(printf '{"title": "%s"}' "${new_title//\"/\\\"}")" \
+       --data "$body" \
        --output /dev/null \
        "${STATUS_API_BASE}/clip-renders/${job_id}/title" \
     || say "  WARN title patch failed for $job_id"
