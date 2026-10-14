@@ -372,9 +372,11 @@ on_exit() {
   fi
   [ -n "${POLISH_BG_LOG:-}" ] && rm -f "$POLISH_BG_LOG"
   [ -n "${CHIP_RENDER_LOG:-}" ] && rm -f "$CHIP_RENDER_LOG"
-  # ProRes intermediates are ~20MB/s — drop the chip mov even on
-  # error so a flapping pod doesn't fill its scratch dir.
+  # Every job of a batch pod shares CLIP_OUT_DIR, and ProRes intermediates
+  # are ~20MB/s — a job that never reached upload drops all of its scratch.
   if [ -n "${CHIP_MOV:-}" ]; then rm -f "$CHIP_MOV"; fi
+  if [ -n "${SEG_DIR:-}" ]; then rm -rf "$SEG_DIR"; fi
+  if [ -n "${CLIP_OUT_FILE:-}" ]; then rm -f "$CLIP_OUT_FILE"; fi
   stop_capture_diag
   restore_user_playback
   # Belt-and-suspenders status report. If we exited without having
@@ -2072,6 +2074,7 @@ else
   fi
 fi
 rm -rf "$SEG_DIR"
+if [ -n "$CHIP_MOV" ]; then rm -f "$CHIP_MOV"; fi
 
 if [ "$LIVE_CAPTURE_STOPPED" = "1" ] && [ -n "${MATCH_ID:-}" ]; then
   say "STEP 9a: restart live capture"
@@ -2082,7 +2085,9 @@ api_status "status=rendering" "progress=1.0"
 
 restore_user_playback
 SAVED_TICK=""
-trap - EXIT
+# on_exit drives cs2 playback, which the next batch job now owns, so the
+# upload tail only drops the clip it was uploading.
+trap 'rm -f "$CLIP_OUT_FILE"' EXIT
 
 # Batch mode: cs2/demo work is done — signal the batch loop so the next
 # job can start capturing while this job's thumbnail+upload tail
