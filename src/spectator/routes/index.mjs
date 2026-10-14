@@ -1,6 +1,6 @@
 import process from "node:process";
 
-import { readJsonBody, sendJson } from "../util/http.mjs";
+import { readJsonBody, sendBodyError, sendJson } from "../util/http.mjs";
 
 import { healthHandler } from "./health.mjs";
 import { demoStateHandler } from "./demo-state.mjs";
@@ -124,8 +124,8 @@ export async function dispatch(req, res) {
     let body = {};
     if (method !== "GET") {
       try { body = await readJsonBody(req); }
-      catch {
-        sendJson(res, 400, { error: "invalid json" });
+      catch (err) {
+        sendBodyError(req, res, err);
         logResponse(method, url, res);
         return;
       }
