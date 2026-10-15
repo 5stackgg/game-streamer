@@ -22,6 +22,9 @@ case "$url" in
 esac
 `;
 
+// batch-highlights.sh runs after common.sh, which is where spec_curl comes from.
+const SPEC_CURL = readFileSync(join(LIB_DIR, "common.sh"), "utf8").match(/^spec_curl\(\) \{\n[\s\S]*?^\}$/m)[0];
+
 function patchTitle(gsiName, currentTitle) {
   const dir = mkdtempSync(join(tmpdir(), "batch-highlights-"));
   writeFileSync(join(dir, "curl"), CURL_STUB);
@@ -29,7 +32,7 @@ function patchTitle(gsiName, currentTitle) {
   const titleBody = join(dir, "title.json");
   const r = spawnSync(
     "bash",
-    ["-c", '. "$LIB_DIR/batch-highlights.sh"; say() { :; }; patch_title_from_gsi job-1 token "$1" "$2"', "_", STEAM_ID, currentTitle],
+    ["-c", `${SPEC_CURL}\n. "$LIB_DIR/batch-highlights.sh"; say() { :; }; patch_title_from_gsi job-1 token "$1" "$2"`, "_", STEAM_ID, currentTitle],
     {
       encoding: "utf8",
       env: {

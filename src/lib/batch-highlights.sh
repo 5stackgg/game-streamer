@@ -15,7 +15,7 @@ patch_title_from_gsi() {
   [ -z "$current_title" ] && return 0
 
   local state
-  state=$(curl --fail --silent --show-error --max-time 5 \
+  state=$(spec_curl --fail --silent --show-error --max-time 5 \
        "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/state" \
     || true)
   [ -z "$state" ] && return 0
@@ -74,7 +74,7 @@ wait_demo_ready() {
   local demo_ready_timeout="${DEMO_READY_TIMEOUT:-300}"
   local waited=0 s ready
   while :; do
-    s=$(curl --fail --silent --show-error --max-time 5 \
+    s=$(spec_curl --fail --silent --show-error --max-time 5 \
             "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/state" \
         || true)
     if [ -n "$s" ]; then
@@ -120,7 +120,7 @@ recover_cs2_session() {
   rm -f /tmp/source_engine_*.lock
   # Without this the old cs2's demoui_hidden passes the demo-ready wait at once and
   # the new cs2's demo bar is never hidden.
-  curl --fail --silent --show-error --max-time 5 \
+  spec_curl --fail --silent --show-error --max-time 5 \
        --header "content-type: application/json" --data '{}' --output /dev/null \
        "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/reset-session" \
     || say "  WARN spec-server session reset failed"

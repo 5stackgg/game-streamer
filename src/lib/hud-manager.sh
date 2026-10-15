@@ -149,7 +149,7 @@ install_custom_hud() {
        --arg slug "$HUD_SLUG" \
        --arg bundleUrl "$HUD_BUNDLE_URL" \
        '{hudId: $hudId, variant: $variant, slug: $slug, bundleUrl: $bundleUrl}' \
-     | curl -fsS -m 180 -X POST -o /dev/null \
+     | spec_curl -fsS -m 180 -X POST -o /dev/null \
          -H 'content-type: application/json' \
          --data @- \
          "$SPEC_BASE/spec/hud-mode"; then
@@ -159,7 +159,7 @@ install_custom_hud() {
 }
 
 reload_hud_overlay() {
-  curl -fsS -m 5 -X POST -o /dev/null "$SPEC_BASE/spec/hud-reload" \
+  spec_curl -fsS -m 5 -X POST -o /dev/null "$SPEC_BASE/spec/hud-reload" \
     || warn "/spec/hud-reload failed"
 }
 
@@ -240,6 +240,8 @@ position_hud_overlay() {
 # 10s pulse. The value goes into the cfg via the heredoc below; the explanation
 # stays HERE, because a '#' comment inside a Valve KeyValues file is a parse
 # error ("got } in key") that makes cs2 reject the whole GSI config.
+# cs2 posts the auth token back in every body, and that is how the spec-server
+# tells its GSI from a post by anything else on the node.
 write_gsi_cfg() {
   local cfg_dir="$CS2_DIR/game/csgo/cfg"
   mkdir -p "$cfg_dir"
@@ -257,7 +259,7 @@ write_gsi_cfg() {
   "buffer" "0.0"
   "throttle" "0.1"
   "heartbeat" "${GSI_HEARTBEAT:-1.0}"
-  "auth" { "token" "5stack-spec" }
+  "auth" { "token" "${SPEC_SERVER_TOKEN:-5stack-spec}" }
   "data"
   {
     "provider"               "1"
