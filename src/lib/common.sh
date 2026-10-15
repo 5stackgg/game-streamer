@@ -85,6 +85,12 @@ die()  {
   exit 1
 }
 
+# The spec-server refuses any call without this pod's SPEC_SERVER_TOKEN, so
+# every in-pod call to it goes through here rather than a bare curl.
+spec_curl() {
+  curl --header "Authorization: Bearer ${SPEC_SERVER_TOKEN:-}" "$@"
+}
+
 # Detect cs2's GetClassBaseline replay crash (issue #3429): cs2 halts the demo
 # but stays alive, so a render would capture frozen frames. The sentinel tells
 # the batch to relaunch cs2 before the next job.

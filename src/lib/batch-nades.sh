@@ -191,7 +191,7 @@ reap_oldest_nade_tail() {
 # GSI reading, say), which is exactly when an unguarded re-press does damage.
 nade_join_team() {
   local self health
-  self=$(curl --fail --silent --max-time 5 \
+  self=$(spec_curl --fail --silent --max-time 5 \
     "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
   if [ -n "$self" ]; then
     IFS='|' read -r _age _sid _team health _rest <<<"$self"
@@ -200,7 +200,7 @@ nade_join_team() {
       *) [ "$health" -gt 0 ] && return 0 ;;
     esac
   fi
-  curl --fail --silent --max-time 5 \
+  spec_curl --fail --silent --max-time 5 \
        --header "content-type: application/json" \
        --data "{\"cmd\": \"jointeam ${NADE_BATCH_JOIN_TEAM:-3}\"}" \
        --output /dev/null \
@@ -215,7 +215,7 @@ nade_join_team() {
 # health check of the whole chain, not just a connection report.
 NADE_GATE_LOG_OFFSET=0
 nade_gate_probe() {
-  curl --fail --silent --max-time 5 \
+  spec_curl --fail --silent --max-time 5 \
        --header "content-type: application/json" \
        --data '{"cmd": "status"}' \
        --output /dev/null \
@@ -238,7 +238,7 @@ nade_gate_probe() {
   # And the other half of the gate's condition, so a log reads "in the map
   # per console, no GSI per spec-server" without anyone having to correlate.
   local self
-  self=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || echo "unreachable")
+  self=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || echo "unreachable")
   say "  gsi self  (age|steam|team|health|activity|pos|fwd): ${self}"
 }
 
@@ -258,13 +258,13 @@ nade_reconnect() {
   [ -n "${CS2_CONNECT_ADDR:-}" ] || return 0
   [ "$NADE_RECONNECT_ATTEMPTS" -ge "${NADE_RECONNECT_MAX:-2}" ] && return 0
   local line age
-  line=$(curl --fail --silent --max-time 5 \
+  line=$(spec_curl --fail --silent --max-time 5 \
     "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
   IFS='|' read -r age _rest <<<"$line"
   [ "${age:-'-1'}" = "-1" ] || return 0
   NADE_RECONNECT_ATTEMPTS=$((NADE_RECONNECT_ATTEMPTS + 1))
   say "  no GSI yet — re-issuing connect to ${CS2_CONNECT_ADDR} (attempt ${NADE_RECONNECT_ATTEMPTS}/${NADE_RECONNECT_MAX:-2})"
-  curl --fail --silent --max-time 5 \
+  spec_curl --fail --silent --max-time 5 \
        --header "content-type: application/json" \
        --data "{\"cmd\": \"password \\\"${CS2_CONNECT_PASSWORD:-}\\\"; connect ${CS2_CONNECT_ADDR}\"}" \
        --output /dev/null \
@@ -295,7 +295,7 @@ nade_reconnect_if_dropped() {
   fi
   NADE_DROP_RECONNECTS=$((NADE_DROP_RECONNECTS + 1))
   say "  dropped by the server (${reason}) — reconnecting (${NADE_DROP_RECONNECTS}/${NADE_DROP_RECONNECT_MAX:-2})"
-  curl --fail --silent --max-time 5 \
+  spec_curl --fail --silent --max-time 5 \
        --header "content-type: application/json" \
        --data "{\"cmd\": \"password \\\"${CS2_CONNECT_PASSWORD:-}\\\"; connect ${CS2_CONNECT_ADDR}\"}" \
        --output /dev/null \
@@ -319,7 +319,7 @@ nade_batch_join_team() {
 }
 
 nade_gsi_map() {
-  curl --fail --silent --max-time 5 \
+  spec_curl --fail --silent --max-time 5 \
       "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/state" \
     | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s)?.gsi?.map_name??"")}catch{}})' \
     || true
@@ -350,7 +350,7 @@ nade_follow_map() {
   NADE_DROP_RECONNECTS=0
   NADE_DROP_MARK=$(wc -l <"$log" 2>/dev/null || echo 0)
   while :; do
-    line=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
+    line=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
     if [ -n "$line" ]; then
       IFS='|' read -r age _sid _team health _rest <<<"$line"
       case "$age" in
@@ -502,7 +502,7 @@ wait_for_nade_session() {
   say "waiting for the practice server (GSI + spawned player)"
   say "  joining team ${NADE_BATCH_JOIN_TEAM} (nothing else does)"
   while :; do
-    line=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
+    line=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/self" || true)
     if [ -n "$line" ]; then
       IFS='|' read -r age _sid _team health _rest <<<"$line"
       case "$age" in

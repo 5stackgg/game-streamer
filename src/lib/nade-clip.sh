@@ -144,7 +144,7 @@ die_skipped() {
 spec_post() {
   local path="$1" body="${2:-{\}}" http_code
   http_code=$(printf '%s' "$body" \
-    | curl --silent --show-error --max-time 5 \
+    | spec_curl --silent --show-error --max-time 5 \
         --header "content-type: application/json" \
         --data-binary @- \
         --write-out "%{http_code}" \
@@ -300,7 +300,7 @@ cs2_exec "exec nade_view"
 join_if_not_spawned() {
   [ -n "$NADE_CMD_JOIN" ] || return 0
   local self health
-  self=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/nade/self" || true)
+  self=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/nade/self" || true)
   [ -n "$self" ] || return 0
   IFS='|' read -r _age _sid _team health _rest <<<"$self"
   case "${health:-0}" in

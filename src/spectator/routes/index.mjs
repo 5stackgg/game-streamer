@@ -1,5 +1,7 @@
 import process from "node:process";
 
+import { SPEC_SERVER_TOKEN } from "../env.mjs";
+import { bearerToken, fromLoopback, tokenMatches } from "../util/auth.mjs";
 import { readJsonBody, sendBodyError, sendJson } from "../util/http.mjs";
 
 import { healthHandler } from "./health.mjs";
@@ -47,6 +49,34 @@ import { skipShadersHandler } from "./skip-shaders.mjs";
 import { cameraStateHandler, cameraWhepHandler } from "./camera.mjs";
 
 const HEALTH_GET_URLS = new Set(["/", "/health", "/spec/health"]);
+
+const WHEP_PATH = /^\/camera\/\d{17}\/whep$/;
+
+// The HUD overlay is a browser page that third-party HUD code shares, so it is
+// never handed the token; its camera calls are taken from loopback alone.
+// Loopback still reaches every hostNetwork pod on the node, game servers
+// included, so nothing else may be exempt.
+const LOOPBACK_ROUTES = new Set(["GET /camera/state", "POST /camera/whep"]);
+
+// cs2 cannot set a header on its GSI posts; the token rides in the body's
+// auth block instead, from the gamestate_integration cfg.
+const GSI_ROUTE = "POST /gsi";
+
+function refusal(req, route) {
+  if (!SPEC_SERVER_TOKEN || route === GSI_ROUTE) {
+    return null;
+  }
+  if (LOOPBACK_ROUTES.has(route)) {
+    return fromLoopback(req) ? null : { status: 403, error: "loopback only" };
+  }
+  return tokenMatches(SPEC_SERVER_TOKEN, bearerToken(req))
+    ? null
+    : { status: 401, error: "unauthorized" };
+}
+
+function gsiRefused(body) {
+  return SPEC_SERVER_TOKEN !== null && !tokenMatches(SPEC_SERVER_TOKEN, body.auth?.token);
+}
 
 const ROUTES = new Map([
   ["GET /spec/focus", specFocusHandler],
@@ -96,25 +126,34 @@ export async function dispatch(req, res) {
   try {
     if (method === "OPTIONS") { sendJson(res, 204, {}); return; }
 
+    // Route on the path only — /demo/capture-fields carries a query string.
+    const qIdx = url.indexOf("?");
+    const path = qIdx >= 0 ? url.slice(0, qIdx) : url;
+    const whep = method === "POST" && WHEP_PATH.test(path);
+    const route = whep ? "POST /camera/whep" : `${method} ${path}`;
+
+    const refused = refusal(req, route);
+    if (refused) {
+      sendJson(res, refused.status, { error: refused.error });
+      logResponse(method, path, res);
+      return;
+    }
+
     if (method === "GET" && HEALTH_GET_URLS.has(url)) {
       await healthHandler(req, res, {});
       logResponse(method, url, res);
       return;
     }
 
-    // Route on the path only — /demo/capture-fields carries a query string.
-    const qIdx = url.indexOf("?");
-    const path = qIdx >= 0 ? url.slice(0, qIdx) : url;
-
     // Handled ahead of the table: the steam id is a path segment, and the body
     // is application/sdp rather than the JSON every other route expects.
-    if (method === "POST" && /^\/camera\/\d{17}\/whep$/.test(path)) {
+    if (whep) {
       await cameraWhepHandler(req, res);
       logResponse(method, path, res);
       return;
     }
 
-    const handler = ROUTES.get(`${method} ${path}`);
+    const handler = ROUTES.get(route);
     if (!handler) {
       sendJson(res, 404, { error: "not found" });
       logResponse(method, path, res);
@@ -129,6 +168,10 @@ export async function dispatch(req, res) {
         logResponse(method, url, res);
         return;
       }
+    }
+    if (route === GSI_ROUTE && gsiRefused(body)) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
     }
     await handler(req, res, body);
     logResponse(method, path, res);

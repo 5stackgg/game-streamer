@@ -12,6 +12,7 @@ const STEAM_ID = "76561198000000001";
 let apiServer;
 let specServer;
 let specBase;
+let dispatch;
 
 function listen(server) {
   return new Promise((resolve) => {
@@ -47,13 +48,14 @@ before(async () => {
     });
   });
   const apiBase = await listen(apiServer);
+  delete process.env.SPEC_SERVER_TOKEN;
   Object.assign(process.env, {
     LOG_DIR: mkdtempSync(join(tmpdir(), "spec-routes-")),
     MATCH_ID: "match-1",
     MATCH_PASSWORD: "secret",
     STATUS_API_BASE: apiBase,
   });
-  const { dispatch } = await import("./index.mjs");
+  ({ dispatch } = await import("./index.mjs"));
   specServer = createServer((req, res) => { void dispatch(req, res); });
   specBase = await listen(specServer);
 });
@@ -87,4 +89,25 @@ test("a normal WHEP offer is still proxied", async () => {
   const r = await post(`/camera/${STEAM_ID}/whep`, "a=candidate:1 1 udp 2113937151 10.0.0.2 50000 typ host\r\n".repeat(80));
   assert.equal(r.status, 200);
   assert.equal(r.body, "v=0\r\n");
+});
+
+// A pod started by an api that predates SPEC_SERVER_TOKEN keeps working as before.
+test("with no SPEC_SERVER_TOKEN a call without a token still reaches its handler", async () => {
+  const r = await post("/demo/exec", "{}");
+  assert.equal(r.status, 400);
+  assert.deepEqual(JSON.parse(r.body), { error: "cmd (string) required" });
+});
+
+test("with no SPEC_SERVER_TOKEN the camera calls are still served off loopback", async () => {
+  const res = {
+    writeHead(status) { this.statusCode = status; },
+    end() {},
+  };
+  await dispatch({ method: "GET", url: "/camera/state", headers: {}, socket: { remoteAddress: "10.42.0.7" } }, res);
+  assert.equal(res.statusCode, 200);
+});
+
+test("with no SPEC_SERVER_TOKEN a GSI post with the old fixed token is accepted", async () => {
+  const r = await post("/gsi", JSON.stringify({ auth: { token: "5stack-spec" }, provider: {} }));
+  assert.equal(r.status, 200);
 });

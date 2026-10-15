@@ -145,7 +145,7 @@ parse_upload_progress() {
 }
 
 spec_get_state() {
-  curl --fail --silent --show-error --max-time 5 \
+  spec_curl --fail --silent --show-error --max-time 5 \
        "${SPEC_SERVER_URL}/demo/state"
 }
 
@@ -154,7 +154,7 @@ spec_post() {
   local body="${1:-{\}}"
   local http_code
   http_code=$(printf '%s' "$body" \
-    | curl --silent --show-error --max-time 5 \
+    | spec_curl --silent --show-error --max-time 5 \
         --header "content-type: application/json" \
         --data-binary @- \
         --write-out "%{http_code}" \
@@ -205,8 +205,8 @@ fail_on_cs2_fatal() {
 playback_diag() {
   local paused seek focus j
   paused=$(spec_get_state 2>/dev/null | node "$CLIP_HELPERS" state-paused 2>/dev/null)
-  seek=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || true)
-  j=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/spec/focus" || true)
+  seek=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || true)
+  j=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/spec/focus" || true)
   case "$j" in
     *'"cs2_has_focus":true'*) focus=cs2 ;;
     *'"cs2_has_focus":false'*)
@@ -410,7 +410,7 @@ fi
 # pipeline per STEP 7 poll. A stale spec-server (dev-pod rsync without a
 # restart) 404s — fall back to the node parser and warn.
 CAPTURE_FIELDS_FAST=0
-CF_PROBE=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+CF_PROBE=$(spec_curl --silent --output /dev/null --write-out '%{http_code}' \
   --max-time 5 "${SPEC_SERVER_URL}/demo/capture-fields?pov=0" || echo 000)
 if [ "$CF_PROBE" = "200" ]; then
   CAPTURE_FIELDS_FAST=1
@@ -418,7 +418,7 @@ else
   say "WARN /demo/capture-fields probe -> ${CF_PROBE} — spec-server predates it; using node fallback (restart spec-server)"
 fi
 POV_STATE_FAST=0
-PS_PROBE=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+PS_PROBE=$(spec_curl --silent --output /dev/null --write-out '%{http_code}' \
   --max-time 5 "${SPEC_SERVER_URL}/demo/pov-state?pov=0" || echo 000)
 if [ "$PS_PROBE" = "200" ]; then
   POV_STATE_FAST=1
@@ -427,7 +427,7 @@ else
 fi
 
 SEEK_STATE_FAST=0
-SS_PROBE=$(curl --silent --output /dev/null --write-out '%{http_code}' \
+SS_PROBE=$(spec_curl --silent --output /dev/null --write-out '%{http_code}' \
   --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || echo 000)
 if [ "$SS_PROBE" = "200" ]; then
   SEEK_STATE_FAST=1
@@ -437,7 +437,7 @@ fi
 
 # "spectated_steam_id|pov_slot|slots_count|tick" from the fast endpoint.
 spec_pov_state() {
-  curl --fail --silent --max-time 5 \
+  spec_curl --fail --silent --max-time 5 \
     "${SPEC_SERVER_URL}/demo/pov-state?pov=${1:-}" || true
 }
 
@@ -446,7 +446,7 @@ spec_pov_state() {
 seek_in_progress() {
   local line
   if [ "$SEEK_STATE_FAST" = "1" ]; then
-    line=$(curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || true)
+    line=$(spec_curl --fail --silent --max-time 5 "${SPEC_SERVER_URL}/demo/seek-state" || true)
     printf '%s' "${line%%|*}"
     return
   fi
@@ -488,7 +488,7 @@ wait_seek_settled() {
 # "phase|phase_ends|motion|gsi_age|map_phase|round|pov_kills"; empty on failure.
 capture_fields_line() {
   if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
-    curl --fail --silent --max-time 5 \
+    spec_curl --fail --silent --max-time 5 \
       "${SPEC_SERVER_URL}/demo/capture-fields?pov=${1:-}" || true
   else
     spec_get_state | node "$CLIP_HELPERS" capture-fields "${1:-}" || true
@@ -572,7 +572,7 @@ wait_preroll() {
 # Log whether cs2's demo bar is on screen right now; echoes 1 when it is.
 demoui_probe() {
   local line
-  line=$(curl --fail --silent --max-time 8 "${SPEC_SERVER_URL}/demo/demoui-score" || echo "?|?|?")
+  line=$(spec_curl --fail --silent --max-time 8 "${SPEC_SERVER_URL}/demo/demoui-score" || echo "?|?|?")
   say "DEMOUI [$1]: visible|score|brightness = ${line}"
   printf '%s' "${line%%|*}"
 }
@@ -1558,7 +1558,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     # spec-server. Fallback (stale server): the old curl+node pipeline.
     # A failed fetch yields an empty line -> all fields empty, same as before.
     if [ "$CAPTURE_FIELDS_FAST" = "1" ]; then
-      FS_LINE=$(curl --fail --silent --max-time 5 \
+      FS_LINE=$(spec_curl --fail --silent --max-time 5 \
         "${SPEC_SERVER_URL}/demo/capture-fields?pov=${SEG_POV_STEAMID:-}" || true)
     else
       FS_LINE=$(spec_get_state | node "$CLIP_HELPERS" capture-fields "${SEG_POV_STEAMID:-}" || true)
