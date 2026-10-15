@@ -79,7 +79,7 @@ RUN npm run build && npx electron-builder --linux --dir \
 
 # Stage the unpacked binary at a stable path. The default HUD bundle
 # lives inside resources/app.asar (under /resources/default-hud) and is
-# served by the app itself at http://localhost:1349/huds/default/...
+# served by the app itself at http://127.0.0.1:1349/huds/default/...
 # — we don't extract it. The gamestate_integration cfg is no longer
 # shipped as a file in v5.x (it's a const string in src/main/ipc.ts);
 # game-streamer's lib/hud-manager.sh:write_hud_gsi_cfg writes a

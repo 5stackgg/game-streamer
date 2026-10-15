@@ -159,7 +159,7 @@ test("a WHEP call for a player the broadcast is not on is refused before the api
   gsiState.spectatedSteamId = SPECTATED;
   whepPaths.length = 0;
   const r = await call("POST", `/camera/${OTHER_PLAYER}/whep`, { body: "v=0\r\n" });
-  assert.equal(r.status, 403);
+  assert.equal(r.status, 409);
   assert.deepEqual(whepPaths, []);
 });
 
@@ -167,7 +167,7 @@ test("with nobody spectated, no camera is handed out", async () => {
   gsiState.spectatedSteamId = null;
   whepPaths.length = 0;
   const r = await call("POST", `/camera/${SPECTATED}/whep`, { body: "v=0\r\n" });
-  assert.equal(r.status, 403);
+  assert.equal(r.status, 409);
   assert.deepEqual(whepPaths, []);
 });
 

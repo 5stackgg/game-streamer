@@ -42,3 +42,13 @@ test("nothing the patch adds listens beyond loopback", () => {
     assert.match(line, LOOPBACK_LISTEN);
   }
 });
+
+// ::1 is left unbound, so a URL naming localhost could reach whatever else on
+// the node takes it.
+test("the overlay loads its HUD from 127.0.0.1, not localhost", () => {
+  const urls = PATCH.split("\n").filter((l) => /^\+(?!\+\+)/.test(l) && /hudUrl = `/.test(l));
+  assert.equal(urls.length, 2, urls.join("\n"));
+  for (const line of urls) {
+    assert.match(line, /hudUrl = `http:\/\/127\.0\.0\.1:\$\{/);
+  }
+});
