@@ -8,7 +8,11 @@ import { join } from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { gsiState } from "../state/gsi.mjs";
+
 const TOKEN = "pod-token-0123456789abcdefghijklmnopqrstuv";
+const SPECTATED = "76561198000000001";
+const OTHER_PLAYER = "76561198000000002";
 
 let apiServer;
 let hudServer;
@@ -16,6 +20,7 @@ let specServer;
 let specBase;
 let dispatch;
 const hudBodies = [];
+const whepPaths = [];
 
 function listen(server) {
   return new Promise((resolve) => {
@@ -53,6 +58,7 @@ async function callFrom(remoteAddress, method, path, headers = {}) {
 
 before(async () => {
   apiServer = createServer((req, res) => {
+    whepPaths.push(req.url);
     req.resume();
     req.on("end", () => {
       res.writeHead(201, { "Content-Type": "application/sdp" });
@@ -143,9 +149,34 @@ test("the HUD is forwarded GSI without the token", async () => {
 });
 
 test("the HUD overlay's camera calls need no token from loopback", async () => {
+  gsiState.spectatedSteamId = SPECTATED;
   assert.equal((await call("GET", "/camera/state")).status, 200);
-  const whep = await call("POST", "/camera/76561198000000001/whep", { body: "v=0\r\n" });
+  const whep = await call("POST", `/camera/${SPECTATED}/whep`, { body: "v=0\r\n" });
   assert.equal(whep.status, 200);
+});
+
+test("a WHEP call for a player the broadcast is not on is refused before the api is asked", async () => {
+  gsiState.spectatedSteamId = SPECTATED;
+  whepPaths.length = 0;
+  const r = await call("POST", `/camera/${OTHER_PLAYER}/whep`, { body: "v=0\r\n" });
+  assert.equal(r.status, 403);
+  assert.deepEqual(whepPaths, []);
+});
+
+test("with nobody spectated, no camera is handed out", async () => {
+  gsiState.spectatedSteamId = null;
+  whepPaths.length = 0;
+  const r = await call("POST", `/camera/${SPECTATED}/whep`, { body: "v=0\r\n" });
+  assert.equal(r.status, 403);
+  assert.deepEqual(whepPaths, []);
+});
+
+test("the spectated player's camera is proxied for that player", async () => {
+  gsiState.spectatedSteamId = SPECTATED;
+  whepPaths.length = 0;
+  const r = await call("POST", `/camera/${SPECTATED}/whep`, { body: "v=0\r\n" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(whepPaths, [`/matches/camera/broadcast/match-1/${SPECTATED}/whep`]);
 });
 
 test("the camera calls are refused from any other address", async () => {

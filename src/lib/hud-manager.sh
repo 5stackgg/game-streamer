@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # JTs Hud Manager (CS2 spectator HUD; upstream JohnTimmermann/JTs-Hud-Manager).
 # Electron app exposing HUD_PORT (admin + socket.io) and HUD_GSI_PORT (cs2
-# gamestate POSTs). Our auto-overlay.patch adds POST /api/overlay/start and
+# gamestate POSTs), both on 127.0.0.1 only, so HUD_HOST has to stay
+# loopback. Our auto-overlay.patch adds POST /api/overlay/start and
 # auto-opens a fullscreen transparent BrowserWindow on the same Xorg-dummy
 # as cs2 so ximagesrc captures both composited.
 

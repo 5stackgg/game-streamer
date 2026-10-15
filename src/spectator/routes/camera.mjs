@@ -54,6 +54,13 @@ export async function cameraWhepHandler(req, res) {
     return;
   }
 
+  // This route is open to loopback, which is every hostNetwork process on the
+  // node, so it hands out only the camera the broadcast is already showing.
+  if (steamId !== gsiState.spectatedSteamId) {
+    sendJson(res, 403, { error: "not the spectated player" });
+    return;
+  }
+
   let sdp;
   try {
     sdp = await readBody(req, SDP_BODY_LIMIT);

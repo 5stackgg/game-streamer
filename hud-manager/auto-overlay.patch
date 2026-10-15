@@ -271,3 +271,18 @@ index d835180..e8ca509 100644
  setupSockets(io)
 
  // Setup GSI Listener Server (Port 23415)
+@@ -84,9 +124,12 @@ export function startServers(): void {
+     }
+   })
+-  httpServer.listen(HUD_PORT, () => {
++  // 5stack: loopback only. The streamer pod shares the node's network, and the
++  // socket feed re-emits every player's position, a live radar of the match.
++  // Every client of both servers is inside the pod.
++  httpServer.listen(Number(HUD_PORT), '127.0.0.1', () => {
+     console.log(`HUD Server and WebSockets listening on port ${HUD_PORT}`)
+   })
+ 
+-  const gsiServer = gsiApp.listen(GSI_PORT, () => {
++  const gsiServer = gsiApp.listen(Number(GSI_PORT), '127.0.0.1', () => {
+     console.log(`CS2 GSI Listener running on port ${GSI_PORT}`)
+   })

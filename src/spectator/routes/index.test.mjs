@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 
+import { gsiState } from "../state/gsi.mjs";
+
 const STEAM_ID = "76561198000000001";
 
 let apiServer;
@@ -56,6 +58,7 @@ before(async () => {
     STATUS_API_BASE: apiBase,
   });
   ({ dispatch } = await import("./index.mjs"));
+  gsiState.spectatedSteamId = STEAM_ID;
   specServer = createServer((req, res) => { void dispatch(req, res); });
   specBase = await listen(specServer);
 });
