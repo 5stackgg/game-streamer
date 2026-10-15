@@ -27,6 +27,9 @@
   // A player with no camera fails every attempt; back off rather than
   // renegotiating a doomed peer connection every couple of seconds.
   const RETRY_BACKOFF_MS = 15000;
+  // The spec-server's answer when the director cut away mid-negotiation. The
+  // camera is fine, so the next poll follows the director instead.
+  const NOT_SPECTATED = 409;
   // The 140x140 box the HUD floats above the spectated player's bar. Present in
   // both hud variants -- `.observed` is not scoped to `.layout-*`.
   const AVATAR_SELECTOR = ".observed .avatar_container .avatar";
@@ -208,7 +211,9 @@
     });
 
     if (!response.ok) {
-      throw new Error(String(response.status));
+      const error = new Error(String(response.status));
+      error.status = response.status;
+      throw error;
     }
 
     await peer.setRemoteDescription({
@@ -242,8 +247,10 @@
       try {
         await connect(steamId);
         failedUntil.delete(steamId);
-      } catch {
-        failedUntil.set(steamId, Date.now() + RETRY_BACKOFF_MS);
+      } catch (error) {
+        if (error?.status !== NOT_SPECTATED) {
+          failedUntil.set(steamId, Date.now() + RETRY_BACKOFF_MS);
+        }
         teardown();
       }
     } catch {

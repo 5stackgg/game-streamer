@@ -54,6 +54,15 @@ export async function cameraWhepHandler(req, res) {
     return;
   }
 
+  // This route is open to loopback, which is every hostNetwork process on the
+  // node, so it hands out only the camera the broadcast is already showing.
+  // 409, not 403: the director can cut away while the overlay is still
+  // gathering ICE, and the overlay backs off from any other refusal.
+  if (steamId !== gsiState.spectatedSteamId) {
+    sendJson(res, 409, { error: "not the spectated player" });
+    return;
+  }
+
   let sdp;
   try {
     sdp = await readBody(req, SDP_BODY_LIMIT);
