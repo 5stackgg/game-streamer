@@ -5,10 +5,24 @@ on:
     branches:
       - "main"
   workflow_dispatch:
+    inputs:
+      mesa_version:
+        description: "Test only: MESA_VERSION build-arg (a run with it set pushes nothing)"
+        required: false
+        default: ""
+        type: string
+      target:
+        description: "Test only: Dockerfile target stage (a run with it set pushes nothing)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   build-push-and-release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
@@ -22,26 +36,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Lowercase owner
+        run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
       - name: Build and Push Docker image
         uses: docker/build-push-action@v6
         with:
-          push: true
+          # Fork-only test inputs (S3-I1): a run with mesa_version or target set
+          # builds without pushing and writes no cache, so it moves no tag.
+          push: ${{ inputs.mesa_version == '' && inputs.target == '' }}
+          target: ${{ inputs.target }}
+          build-args: ${{ inputs.mesa_version != '' && format('MESA_VERSION={0}', inputs.mesa_version) || '' }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/game-streamer:latest
-            ghcr.io/${{ github.repository_owner }}/game-streamer:${{ github.sha }}
+            ghcr.io/${{ env.OWNER }}/game-streamer:latest
+            ghcr.io/${{ env.OWNER }}/game-streamer:${{ github.sha }}
           # Registry-backed cache: a dedicated :buildcache tag on ghcr stores
           # the layer cache across runs (no 10GB GHA-cache ceiling, survives
           # branch/PR boundaries). First build is a full rebuild; every
           # subsequent build reuses unchanged apt/steamcmd/CS2 layers.
           cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache
-          cache-to: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache,mode=max
-
-      - name: Delete Package Versions
-        uses: actions/delete-package-versions@v5
-        with:
-          package-name: game-streamer
-          package-type: container
-          min-versions-to-keep: 8
-          ignore-versions: '^buildcache-*'
+            type=registry,ref=ghcr.io/${{ env.OWNER }}/game-streamer:buildcache
+          cache-to: ${{ (inputs.mesa_version == '' && inputs.target == '') && format('type=registry,ref=ghcr.io/{0}/game-streamer:buildcache,mode=max', env.OWNER) || '' }}
