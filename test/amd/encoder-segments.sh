@@ -8,6 +8,12 @@ segment_script() {
 set -uo pipefail
 . "$GS_REPO/src/lib/common.sh"
 die_failed() { echo "DIE $*" >&2; exit 31; }
+awk '
+  /^_inline_normalize_concat_inputs\(\)/ { on=1 }
+  on { print }
+  on && /^}/ { exit }
+' "$GS_REPO/src/lib/inline-clip-render.sh" > "$T_TMP/normalize.sh"
+. "$T_TMP/normalize.sh"
 awk -v start="$SEGMENT_FN() {" '
   $0 == start { n++; on=1 }
   on { print }
@@ -72,6 +78,7 @@ printf 'argc=%s\nfirst=%s\nsecond=%s\ngraph=%s\n' "${#CONCAT_INPUTS[@]}" "${CONC
 GRAPH_CASE
 )"
 assert_eq 0 "$T_RC" 'actual graph builder completes'
+assert_empty "$T_STDERR" 'graph builder has no missing helper or other shell error'
 assert_contains "$T_STDOUT" 'argc=4' 'two independent input argv pairs'
 assert_contains "$T_STDOUT" "first=$T_TMP/one clip.mp4" 'path with a space stays one input'
 assert_contains "$T_STDOUT" "second=$T_TMP/two.mp4" 'valid segment order'
