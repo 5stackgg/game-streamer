@@ -265,7 +265,11 @@ _start_capture_once() {
     # (BGRA) or it paints opaque over cs2 — verify this on-node first. The software
     # compositor stays: LIVE-DIAG measured the capture at ~1.1 of its 2 cores, so the
     # blend is NOT CPU-bound and GPU compositing would buy nothing here.
-    local cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
+    # The consumer pushes without waiting for appsrc's enough-data signal.
+    # Bound both live input queues and keep the newest frames when the compositor
+    # falls behind; otherwise raw frames accumulate until the worker is OOM-killed.
+    # Clip capture uses its own lossless pipeline and is intentionally unchanged.
+    local cs2_src="appsrc name=vksrc max-buffers=2 max-bytes=0 max-time=0 leaky-type=downstream ! queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
     # leaky=downstream: a slow/blocked HUD grab drops its own frames instead of
     # back-pressuring the compositor (which would stall the cs2 leg too).
     local hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"

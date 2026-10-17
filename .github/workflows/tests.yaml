@@ -54,3 +54,15 @@ jobs:
 
       - name: Preserve upstream log wording
         run: bash test/amd/host/wording-scan.sh
+
+  live-capture-queue:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the CPU-only GStreamer test runtime
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 gstreamer1.0-plugins-base
+      - name: Live capture queues stay bounded under backpressure
+        run: python3 src/lib/stream-queue.test.py
