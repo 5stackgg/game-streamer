@@ -159,7 +159,9 @@ fi
 rm -f "$LOG_DIR/match-cfgs-prepared" \
       "$LOG_DIR/match-cfgs-failed" \
       "$LOG_DIR/match-cfgs-skipped"
-if [ -n "${MATCH_ID:-}" ] && [ -n "${API_BASE:-}" ]; then
+# A bake carries the node ID in MATCH_ID and deliberately has no HUD manager.
+# It has no match to fetch or overlay to reload while Steam is starting.
+if [ -z "${BAKE_NODE_ID:-}" ] && [ -n "${MATCH_ID:-}" ] && [ -n "${API_BASE:-}" ]; then
   (
     set -euo pipefail
     SCRIPT_TAG=cfg-prep
