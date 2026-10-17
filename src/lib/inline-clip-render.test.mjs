@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -95,4 +95,97 @@ test("a failed upload removes the rendered clip", () => {
   const r = runBash(tail(), job, { CURL_RC: "7" });
   assert.equal(r.status, 1, r.stderr);
   assert.deepEqual(leftovers(job), []);
+});
+
+function montage(t) {
+  const job = scratch();
+  const root = join(job.files.segDir, "..");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  return job;
+}
+
+for (const [label, log, expected] of [
+  ["keeps uniform GPU segments eligible", "normal encode warning", "1"],
+  ["rejects mixed segments after a successful CPU retry", "WARN final encode: h264_nvenc failed, retrying libx264", "0"],
+]) {
+  test(`polish reaping ${label}`, (t) => {
+    const job = montage(t);
+    const r = runBash(`
+COPY_ELIGIBLE=1
+POLISH_BG_IDX=0
+POLISH_BG_LOG="$SEG_DIR/polish.log"
+printf '%s\\n' '${log}' > "$POLISH_BG_LOG"
+( exit 0 ) & POLISH_BG_PID=$!
+${fn("reap_polish_bg")}
+reap_polish_bg
+printf '%s|%s|%s' "$COPY_ELIGIBLE" "$POLISH_BG_PID" "$POLISH_BG_LOG"
+`, job);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, `${expected}||`);
+    assert.equal(existsSync(join(job.files.segDir, "polish.log")), false);
+  });
+}
+
+test("a failed background polish still fails the render", (t) => {
+  const job = montage(t);
+  const r = runBash(`
+POLISH_BG_IDX=0
+POLISH_BG_LOG="$SEG_DIR/polish.log"
+: > "$POLISH_BG_LOG"
+( exit 7 ) & POLISH_BG_PID=$!
+${fn("reap_polish_bg")}
+reap_polish_bg
+`, job);
+  assert.equal(r.status, 1, r.stderr);
+  assert.equal(existsSync(join(job.files.segDir, "polish.log")), false);
+});
+
+function runConcat(t, mode, cached = false) {
+  const job = montage(t);
+  const r = runBash(`
+OUTRO_FILE="$SEG_DIR/outro.mp4"
+OUTRO_CACHE_DIR="$SEG_DIR/cache"
+mkdir -p "$OUTRO_CACHE_DIR"
+printf 'outro' > "$OUTRO_FILE"
+printf "file '%s'\\nfile '%s'\\n" "$SEG_DIR/seg-000.mp4" "$OUTRO_FILE" > "$SEG_DIR/concat.txt"
+WILL_FUSE_POLISH_OUTRO=0
+COPY_ELIGIBLE=1
+FFMPEG_VENC_ARGS=(-c:v h264_nvenc)
+matched_outro_cache_path() { printf '%s/matched.mp4' "$OUTRO_CACHE_DIR"; }
+has_audio_stream() { return 0; }
+ffmpeg_venc() {
+  printf 'call\\n' >> "$SEG_DIR/transcode.calls"
+  printf 'transcoded' > "\${!#}"
+  ${mode === "retry" ? "FFMPEG_VENC_ARGS=(-c:v libx264)" : ":"}
+  ${mode === "failed" ? "return 1" : "return 0"}
+}
+ffmpeg() { printf 'copy\\n' >> "$SEG_DIR/copy.calls"; printf 'clip' > "\${!#}"; }
+ffprobe() { if [ "\${!#}" = "$CLIP_OUT_FILE" ]; then echo 2; else echo 1; fi; }
+${cached ? "printf cached > \"$(matched_outro_cache_path)\"" : ":"}
+${fn("try_concat_copy")}
+rc=0; try_concat_copy || rc=$?
+cache=0; [ ! -s "$(matched_outro_cache_path)" ] || cache=1
+copy=0; [ ! -f "$SEG_DIR/copy.calls" ] || copy=1
+transcode=0; [ ! -f "$SEG_DIR/transcode.calls" ] || transcode=1
+staging=0; for f in "$OUTRO_CACHE_DIR"/*.tmp; do [ ! -f "$f" ] || staging=1; done
+printf '%s|%s|%s|%s|%s' "$rc" "$cache" "$copy" "$transcode" "$staging"
+`, job);
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout;
+}
+
+test("a normal GPU outro is cached and stream-copied", (t) => {
+  assert.equal(runConcat(t, "gpu"), "0|1|1|1|0");
+});
+
+test("a CPU retry of the outro neither caches nor stream-copies it", (t) => {
+  assert.equal(runConcat(t, "retry"), "1|0|0|1|0");
+});
+
+test("a failed outro transcode removes its staging file", (t) => {
+  assert.equal(runConcat(t, "failed"), "1|0|0|1|0");
+});
+
+test("a previously matched outro keeps the cache fast path", (t) => {
+  assert.equal(runConcat(t, "gpu", true), "0|1|1|0|0");
 });
