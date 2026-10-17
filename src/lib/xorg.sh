@@ -760,7 +760,11 @@ _tier_c_selftest() {
   local disp="$_GS_TIER_DISPLAY" file="$LOG_DIR/xwayland.${_GS_TIER_DISPLAY#:}.log"
   local out="" root="" mode="" vk="" selected="" rc=0 line=""
   _tier_c_servers_alive || return 1
-  line=$(awk '/Failed to initialize glamor|Failed to initialize dri3|Refusing to try glamor on llvmpipe|wl_drm.*not supported|Missing Wayland requirements/{bad=$0} END{print bad}' "$file")
+  # EGLStream probing can fail before the working GBM backend is selected.
+  # Its informational "Missing Wayland requirements" line does not mean
+  # glamor or DRI3 failed; the live extension and render-fd checks below
+  # establish those requirements independently.
+  line=$(awk '/Failed to initialize glamor|Failed to initialize dri3|Refusing to try glamor on llvmpipe|wl_drm.*not supported/{bad=$0} END{print bad}' "$file")
   if [ -n "$line" ]; then _tier_c_fail no-dri3 "$line" "$file"; return 1; fi
   out=$(timeout 5 xdpyinfo -display "$disp" -queryExtensions 2>/dev/null) || out=""
   _tier_c_servers_alive || return 1

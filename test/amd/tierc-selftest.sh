@@ -50,6 +50,7 @@ case "${SELF_MODE:-}" in
   address) export GS_GPU_PCI_ADDRESS=0000:c7:00.0 ;;
   vendor) echo 0x10de > "$GS_SYSFS_ROOT/bus/pci/devices/0000:c6:00.0/vendor" ;;
   glamor) echo "Failed to initialize glamor" > "$LOG_DIR/xwayland.20.log" ;;
+  eglstream) printf "%s\n" "(II) Missing Wayland requirements for glamor EGLStream backend" "(II) glamor: Using GBM backend" > "$LOG_DIR/xwayland.20.log" ;;
   weston-dead) kill "$_GS_TIER_WESTON"; wait "$_GS_TIER_WESTON" 2>/dev/null || true ;;
   xw-dead) kill "$_GS_TIER_XW"; wait "$_GS_TIER_XW" 2>/dev/null || true ;;
 esac
@@ -58,7 +59,7 @@ _tier_c_selftest || rc=$?
 printf "rc=%s reason=%s detail=%s\n" "$rc" "$_GS_TIER_REASON" "$_GS_TIER_DETAIL"'
 }
 
-for spec in 'good ok' 'duplicate ok' 'glamor no-dri3' 'no-dri3 no-dri3' \
+for spec in 'good ok' 'duplicate ok' 'eglstream ok' 'glamor no-dri3' 'no-dri3 no-dri3' \
             'different device-check' 'two device-check' 'address device-check' \
             'vendor device-check' 'no-fd device-check' 'unreadable device-check' \
             'root root-size' 'mode root-size' 'vk-fail vkcube-failed' 'vk-cpu vkcube-failed' \
