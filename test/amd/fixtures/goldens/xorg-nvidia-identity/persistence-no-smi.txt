@@ -1,0 +1,10 @@
+rc=0
+--- calls
+
+--- spawned
+
+--- stdout
+rc=0
+--- stderr
+[setup-steam] WARN: nvidia-smi not found @EMDASH@ skipping persistence mode
+--- display

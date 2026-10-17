@@ -1,0 +1,6 @@
+rc=0
+== stdout
+
+== stderr
+[enc] WARN: BUG: CUDA encoder fed non-CUDA memory @EMDASH@ pick_scale_convert must precede the encoder (convert='videoscale ! videoconvert ! video/x-raw,format=NV12')
+== calls

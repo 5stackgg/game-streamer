@@ -1,0 +1,12 @@
+stdout:
+[game-streamer] autotune: gpu='NVIDIA GeForce GTX 980' tier=low cores=8 GS_GPU_SCALE=0 (threads=engine auto-detect)
+[game-streamer] autotune: 'low' tier @EMDASH@ if it can't hold 60fps, prefer FPS=30 (smooth 30 beats stuttery 60) and/or a lower CS2_DISPLAY_RES.
+[game-streamer] gpu clock lock: pinned graphics clock to 2100MHz (prevents downclock / P-state oscillation stutter)
+after: GS_GPU_SCALE=0 CS2_FPS_MAX=120
+stderr:
+
+nvidia-smi:
+--query-gpu=name --format=csv\,noheader
+--query-gpu=clocks.max.gr --format=csv\,noheader\,nounits
+-pm 1
+-lgc 2100\,2100

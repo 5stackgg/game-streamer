@@ -1,0 +1,10 @@
+--- stdout
+[game-streamer]   clip capture: encode chain isn't CUDA (no cudaupload) @EMDASH@ host-map copy, no zero-copy
+[game-streamer]   clip capture: @TMP@/clip/seg-001.mp4 (vkcapture/present-hook -> 1920x1080@60fps, 16000kbps, audio=1, codec=h264)
+rc=0 ready=@TMP@/clip/seg-001.mp4.ready go=@TMP@/clip/seg-001.mp4.go
+--- stderr
+[game-streamer] WARN: CLIP_VIDEO_CODEC=av1 unrecognized @EMDASH@ using h264
+[game-streamer]   encoder: x264enc (software fallback)
+[game-streamer]   scaler: CPU videoscale+videoconvert
+--- spawned
+vkcapture-consumer appsrc\ name=vksrc\ \!\ queue\ \!\ videorate\ \!\ capsfilter\ name=vkcaps\ caps=\"video/x-raw\,framerate=60/1\"\ \!\ videoscale\ \!\ video/x-raw\,width=1920\,height=1080\,framerate=60/1\ \!\ videoconvert\ \!\ video/x-raw\,format=NV12\ \!\ x264enc\ tune=zerolatency\ speed-preset=veryfast\ bitrate=16000\ key-int-max=120\ \!\ h264parse\ config-interval=1\ \!\ queue\ \!\ mux.\ pulsesrc\ device=cs2.monitor\ buffer-time=2000000\ provide-clock=false\ \!\ audio/x-raw\,rate=48000\,channels=2\ \!\ audioconvert\ \!\ audioresample\ \!\ avenc_aac\ bitrate=192000\ \!\ aacparse\ \!\ queue\ max-size-time=2000000000\ max-size-buffers=0\ max-size-bytes=0\ \!\ mux.\ qtmux\ faststart=true\ name=mux\ \!\ filesink\ location=@TMP@/clip/seg-001.mp4

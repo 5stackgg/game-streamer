@@ -1,0 +1,133 @@
+rc=1
+--- calls
+pgrep -x Xorg
+pgrep -x Xorg
+nvidia-smi -pm 1
+xdpyinfo -display :0
+xdpyinfo -display :0
+kill -0 PID
+xdpyinfo -display :1
+xdpyinfo -display :1
+kill -0 PID
+xdpyinfo -display :2
+xdpyinfo -display :2
+kill -0 PID
+xdpyinfo -display :3
+xdpyinfo -display :3
+kill -0 PID
+xdpyinfo -display :4
+xdpyinfo -display :4
+kill -0 PID
+xdpyinfo -display :5
+xdpyinfo -display :5
+kill -0 PID
+xdpyinfo -display :6
+xdpyinfo -display :6
+kill -0 PID
+xdpyinfo -display :7
+xdpyinfo -display :7
+kill -0 PID
+xdpyinfo -display :8
+xdpyinfo -display :8
+kill -0 PID
+xdpyinfo -display :9
+xdpyinfo -display :9
+kill -0 PID
+rm -f /var/log/Xorg.*.log
+xdpyinfo -display :0
+xdpyinfo -display :0
+kill -0 PID
+xdpyinfo -display :1
+xdpyinfo -display :1
+kill -0 PID
+xdpyinfo -display :2
+xdpyinfo -display :2
+kill -0 PID
+xdpyinfo -display :3
+xdpyinfo -display :3
+kill -0 PID
+xdpyinfo -display :4
+xdpyinfo -display :4
+kill -0 PID
+xdpyinfo -display :5
+xdpyinfo -display :5
+kill -0 PID
+xdpyinfo -display :6
+xdpyinfo -display :6
+kill -0 PID
+xdpyinfo -display :7
+xdpyinfo -display :7
+kill -0 PID
+xdpyinfo -display :8
+xdpyinfo -display :8
+kill -0 PID
+xdpyinfo -display :9
+xdpyinfo -display :9
+kill -0 PID
+--- spawned
+Xorg :0 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :0 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :1 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :1 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :2 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :2 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :3 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :3 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :4 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :4 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :5 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :5 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :6 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :6 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :7 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :7 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :8 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :8 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :9 -config xorg-coexist-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :9 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+--- stdout
+[setup-steam] nvidia persistence mode enabled (-pm 1)
+[setup-steam] starting Xorg on :0
+[setup-steam] xorg: :0 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :1
+[setup-steam] xorg: :1 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :2
+[setup-steam] xorg: :2 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :3
+[setup-steam] xorg: :3 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :4
+[setup-steam] xorg: :4 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :5
+[setup-steam] xorg: :5 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :6
+[setup-steam] xorg: :6 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :7
+[setup-steam] xorg: :7 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :8
+[setup-steam] xorg: :8 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :9
+[setup-steam] xorg: :9 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] no screens found on every display @EMDASH@ GPU scanout unavailable (owned by a host desktop, or the GPU has none); retrying with offscreen dummy X (xorg-coexist-1080p.conf). cs2 renders via the shared GPU render node and vkcapture still captures, provided the node has hardware Vulkan (see preflight_gpu)
+[setup-steam] starting Xorg on :0
+[setup-steam] xorg: :0 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :1
+[setup-steam] xorg: :1 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :2
+[setup-steam] xorg: :2 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :3
+[setup-steam] xorg: :3 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :4
+[setup-steam] xorg: :4 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :5
+[setup-steam] xorg: :5 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :6
+[setup-steam] xorg: :6 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :7
+[setup-steam] xorg: :7 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :8
+[setup-steam] xorg: :8 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+[setup-steam] starting Xorg on :9
+[setup-steam] xorg: :9 bind failed ('no screens found' @EMDASH@ display owned elsewhere, or this GPU has no scanout)
+--- stderr
+[setup-steam] ERROR: Xorg can't get the GPU on this node @EMDASH@ :0 is held ('server already running') and the GPU is already bound ('no screens found'), and the offscreen dummy-X fallback also failed. Free the GPU on the node (systemctl set-default multi-user.target && systemctl disable --now display-manager.service && systemctl isolate multi-user.target) or check GS_DUMMY_FALLBACK / the xorg-coexist configs.
+--- display

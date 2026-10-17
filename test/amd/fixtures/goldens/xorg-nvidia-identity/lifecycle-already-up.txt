@@ -1,0 +1,31 @@
+rc=0
+--- calls
+pgrep -x Xorg
+xdpyinfo -display :0
+pgrep -x openbox
+sleep 1
+pgrep -x openbox
+xhost +local:
+xhost +SI:localuser:root
+xprop -root -f _GS_STREAMER 8s -set _GS_STREAMER gs-u13
+pgrep -x Xorg
+xdpyinfo -display :0
+pkill -x openbox
+pkill -x Xorg
+pgrep -x Xorg
+sleep 1
+pkill -x openbox
+pkill -x Xorg
+pgrep -x Xorg
+--- spawned
+openbox
+--- stdout
+[setup-steam] xorg already up on :0
+rc start_xorg=0
+rc xorg_running=0
+rc stop_xorg=0
+rc shutdown_display=0
+--- stderr
+
+--- display
+:0

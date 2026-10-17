@@ -1,0 +1,27 @@
+rc=0
+== stdout
+
+=== Hardware auto-tune ===
+[capture-info] gpu='unknown' tier=mid cores=8
+[capture-info] autotune: gpu='unknown' tier=mid cores=8 GS_GPU_SCALE=auto (threads=engine auto-detect)
+
+=== Inputs ===
+[capture-info] codec=h265 out=1920x1080 fps=60 gop=60 kbps=12000
+[capture-info] GS_GPU_SCALE=auto GS_NVENC_ELEMENT=auto GS_NVENC_H265_ELEMENT=auto
+
+=== Encoder selection (runs the same gst-inspect probes as a real stream) ===
+[capture-info] no NVENC HEVC on this pod -> live would fall back to h264
+[capture-info] encoder fragment : x264enc tune=zerolatency speed-preset=veryfast bitrate=12000 key-int-max=60
+
+=== Scale/convert selection ===
+[capture-info] scaler fragment  : videoscale ! video/x-raw,width=1920,height=1080,framerate=60/1 ! videoconvert ! video/x-raw,format=NV12
+
+=== Verdict ===
+[capture-info] CPU scale+convert @EMDASH@ encoder is not CUDA-based, or GS_GPU_SCALE disables it.
+[capture-info]   Encoder picked:   (legacy nvenc/x264 -> no GPU scale).
+== stderr
+[capture-info] WARN: autotune: nvidia-smi unavailable @EMDASH@ assuming 'mid' tier
+[capture-info]   encoder: no NVENC HEVC encoder available @EMDASH@ caller will fall back to h264
+[capture-info]   encoder: x264enc (software fallback)
+[capture-info]   scaler: CPU videoscale+videoconvert
+== nvidia-smi calls

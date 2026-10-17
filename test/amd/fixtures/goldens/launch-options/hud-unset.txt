@@ -1,0 +1,5 @@
+stdout:
+[game-streamer] starting hud-manager
+[game-streamer] hud-manager: GPU drawing on (HUD_GPU=1)
+spawn: @TMP@/bin/hud-bin --no-sandbox --disable-gpu-sandbox --mute-audio
+stderr:

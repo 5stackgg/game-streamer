@@ -1,0 +1,2 @@
+status=live
+stream_url=srt://mediamtx.test:8890?streamid=publish:match-0

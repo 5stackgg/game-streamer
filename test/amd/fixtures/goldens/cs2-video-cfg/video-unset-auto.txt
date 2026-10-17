@@ -1,0 +1,3 @@
+stdout:
+[game-streamer]   cs2_video.txt: auto mode (no overrides; cs2 will generate)
+stderr:

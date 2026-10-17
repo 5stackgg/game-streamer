@@ -1,0 +1,10 @@
+rc=0
+--- calls
+nvidia-smi -pm 1
+--- spawned
+
+--- stdout
+rc=0
+--- stderr
+[setup-steam] WARN: could not enable nvidia persistence mode (-pm 1) @EMDASH@ continuing
+--- display

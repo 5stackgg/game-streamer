@@ -1,0 +1,3 @@
+report_status status=launching_cs2
+export_cs2_shader_cache_env
+spawn_logged cs2-launch @TMP@/steam/ubuntu12_32/steam -applaunch 730 -windowed -noborder -width 1920 -height 1080 -novid -nojoy -high -console -threads 4 -disable_loadingplaque +cl_disablehtmlmotd 1

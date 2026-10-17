@@ -1,0 +1,29 @@
+rc=0
+== stdout
+
+=== Hardware auto-tune ===
+[capture-info] gpu='NVIDIA GeForce RTX 3060' tier=high cores=8
+[capture-info] autotune: gpu='NVIDIA GeForce RTX 3060' tier=high cores=8 GS_GPU_SCALE=auto (threads=engine auto-detect)
+[capture-info] gpu clock lock: pinned graphics clock to 2100MHz (prevents downclock / P-state oscillation stutter)
+
+=== Inputs ===
+[capture-info] codec=h264 out=1920x1080 fps=60 gop=60 kbps=12000
+[capture-info] GS_GPU_SCALE=auto GS_NVENC_ELEMENT=auto GS_NVENC_H265_ELEMENT=auto
+
+=== Encoder selection (runs the same gst-inspect probes as a real stream) ===
+[capture-info] encoder fragment : nvcudah264enc preset=p4 tune=low-latency rate-control=cbr gop-size=60 bitrate=12000 spatial-aq=true
+
+=== Scale/convert selection ===
+[capture-info] scaler fragment  : cudaupload ! cudaconvertscale ! video/x-raw(memory:CUDAMemory),format=NV12,width=1920,height=1080,framerate=60/1
+
+=== Verdict ===
+[capture-info] GPU scale+convert ACTIVE @EMDASH@ videoscale/videoconvert are OFF the CPU.
+== stderr
+[capture-info]   encoder: nvcudah264enc (GPU, modern API)
+[capture-info]   scaler: cudaconvertscale (GPU scale+convert)
+== nvidia-smi calls
+--query-gpu=name --format=csv\,noheader
+--query-gpu=name --format=csv\,noheader
+--query-gpu=clocks.max.gr --format=csv\,noheader\,nounits
+-pm 1
+-lgc 2100\,2100

@@ -1,0 +1,99 @@
+rc=1
+--- calls
+pgrep -x Xorg
+pgrep -x Xorg
+nvidia-smi -pm 1
+xdpyinfo -display :0
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+xdpyinfo -display :0
+kill -0 PID
+sleep 0.5
+kill PID
+kill -0 PID
+sleep 0.5
+kill -0 PID
+sleep 0.5
+kill -0 PID
+sleep 0.5
+kill -0 PID
+sleep 0.5
+kill -0 PID
+sleep 0.5
+kill -0 PID
+sleep 0.5
+kill -0 PID
+sleep 0.5
+kill -0 PID
+sleep 0.5
+kill -0 PID
+sleep 0.5
+kill -0 PID
+sleep 0.5
+kill -9 PID
+sleep 2
+kill -0 PID
+--- spawned
+Xorg :0 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+--- stdout
+[setup-steam] nvidia persistence mode enabled (-pm 1)
+[setup-steam] starting Xorg on :0
+[setup-steam] xorg: :0 never accepted clients within 10s @EMDASH@ killing
+--- stderr
+[setup-steam] ERROR: Xorg on :0 hung during startup and survived SIGKILL @EMDASH@ GPU display engine is wedged (check the node's dmesg for 'nvidia-modeset ... waiting for GPU progress'); the node likely needs a reboot.
+--- display

@@ -1,0 +1,5 @@
+stdout:
+pid=empty
+stderr:
+
+nvidia-smi:

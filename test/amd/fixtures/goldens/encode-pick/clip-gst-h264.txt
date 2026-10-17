@@ -1,0 +1,8 @@
+--- stdout
+[game-streamer]   clip capture: @TMP@/clip/seg-001.mp4 (1920x1080@60fps, 16000kbps, audio=0, codec=h264)
+rc=0 ready= go=
+--- stderr
+[game-streamer]   encoder: nvcudah264enc (GPU, modern API)
+[game-streamer]   scaler: cudaconvertscale (GPU scale+convert)
+--- spawned
+gst-launch-1.0 -e ximagesrc display-name=:0 use-damage=0 show-pointer=false \! video/x-raw\,framerate=60/1 \! cudaupload \! cudaconvertscale \! video/x-raw\(memory:CUDAMemory\)\,format=NV12\,width=1920\,height=1080\,framerate=60/1 \! nvcudah264enc preset=p5 tune=high-quality rate-control=cbr gop-size=120 bitrate=16000 spatial-aq=true temporal-aq=true \! h264parse config-interval=1 \! qtmux faststart=true \! filesink location=@TMP@/clip/seg-001.mp4

@@ -1,0 +1,6 @@
+stdout:
+DIAG: nvidia-smi missing @EMDASH@ skipping
+pid=empty
+stderr:
+
+nvidia-smi:

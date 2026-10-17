@@ -1,0 +1,13 @@
+--- stdout
+[game-streamer] starting capture 'a1b2c3d4e5f6' (1920x1080@60fps kbps=8000 audio=1) -> srt://mediamtx.5stack.svc.cluster.local:8890?streamid=publish:a1b2c3d4e5f6
+[game-streamer]   SRT latency 200ms (SRT_LATENCY_MS)
+[game-streamer]   codec: h264
+[game-streamer]   composite unavailable (cs2 not running) @EMDASH@ ximagesrc grab, no pacing
+[game-streamer] WATCH (HLS): https://hls.5stack.gg/a1b2c3d4e5f6/index.m3u8
+rc=0
+--- stderr
+[game-streamer] WARN: LIVE_VIDEO_CODEC=av1 unrecognized @EMDASH@ using h264
+[game-streamer]   encoder: nvcudah264enc (GPU, modern API)
+[game-streamer]   scaler: cudaconvertscale (GPU scale+convert)
+--- spawned
+gst-launch-1.0 -e ximagesrc display-name=:0 use-damage=0 show-pointer=true \! video/x-raw\,framerate=60/1 \! queue leaky=downstream max-size-buffers=3 max-size-bytes=0 max-size-time=0 \! cudaupload \! cudaconvertscale \! video/x-raw\(memory:CUDAMemory\)\,format=NV12\,width=1920\,height=1080\,framerate=60/1 \! nvcudah264enc preset=p4 tune=low-latency rate-control=cbr gop-size=60 bitrate=8000 spatial-aq=true \! h264parse config-interval=1 \! queue \! mux. pulsesrc device=cs2.monitor buffer-time=400000 provide-clock=false \! audio/x-raw\,rate=48000\,channels=2 \! audioconvert \! audioresample \! opusenc bitrate=128000 \! opusparse \! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 \! mux. mpegtsmux name=mux alignment=7 \! srtsink uri=srt://mediamtx.5stack.svc.cluster.local:8890\?streamid=publish:a1b2c3d4e5f6 latency=200 auto-reconnect=false

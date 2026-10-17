@@ -1,0 +1,71 @@
+rc=1
+--- calls
+pgrep -x Xorg
+pgrep -x Xorg
+nvidia-smi -pm 1
+xdpyinfo -display :0
+xdpyinfo -display :0
+kill -0 PID
+xdpyinfo -display :1
+xdpyinfo -display :1
+kill -0 PID
+xdpyinfo -display :2
+xdpyinfo -display :2
+kill -0 PID
+xdpyinfo -display :3
+xdpyinfo -display :3
+kill -0 PID
+xdpyinfo -display :4
+xdpyinfo -display :4
+kill -0 PID
+xdpyinfo -display :5
+xdpyinfo -display :5
+kill -0 PID
+xdpyinfo -display :6
+xdpyinfo -display :6
+kill -0 PID
+xdpyinfo -display :7
+xdpyinfo -display :7
+kill -0 PID
+xdpyinfo -display :8
+xdpyinfo -display :8
+kill -0 PID
+xdpyinfo -display :9
+xdpyinfo -display :9
+kill -0 PID
+--- spawned
+Xorg :0 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :1 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :2 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :3 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :4 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :5 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :6 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :7 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :8 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+Xorg :9 -config xorg-dummy-1080p.conf -noreset -nolisten tcp -listen unix vt7
+--- stdout
+[setup-steam] nvidia persistence mode enabled (-pm 1)
+[setup-steam] starting Xorg on :0
+[setup-steam] xorg: :0 bind failed (foreign X in another ns)
+[setup-steam] starting Xorg on :1
+[setup-steam] xorg: :1 bind failed (foreign X in another ns)
+[setup-steam] starting Xorg on :2
+[setup-steam] xorg: :2 bind failed (foreign X in another ns)
+[setup-steam] starting Xorg on :3
+[setup-steam] xorg: :3 bind failed (foreign X in another ns)
+[setup-steam] starting Xorg on :4
+[setup-steam] xorg: :4 bind failed (foreign X in another ns)
+[setup-steam] starting Xorg on :5
+[setup-steam] xorg: :5 bind failed (foreign X in another ns)
+[setup-steam] starting Xorg on :6
+[setup-steam] xorg: :6 bind failed (foreign X in another ns)
+[setup-steam] starting Xorg on :7
+[setup-steam] xorg: :7 bind failed (foreign X in another ns)
+[setup-steam] starting Xorg on :8
+[setup-steam] xorg: :8 bind failed (foreign X in another ns)
+[setup-steam] starting Xorg on :9
+[setup-steam] xorg: :9 bind failed (foreign X in another ns)
+--- stderr
+[setup-steam] ERROR: Xorg failed to start on any display in :0..:9
+--- display

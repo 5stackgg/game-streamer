@@ -1,0 +1,12 @@
+rc=1
+--- calls
+pgrep -x Xorg
+xdpyinfo -display :0
+pgrep -x Xorg
+--- spawned
+
+--- stdout
+
+--- stderr
+[setup-steam] ERROR: Xorg on :0 is present but unresponsive (>5s) @EMDASH@ GPU/DRM modeset wedge; the node is likely poisoned until reboot. Failing so the pod reschedules.
+--- display

@@ -1,0 +1,9 @@
+--- stderr
+[clip a1b2c3d4] final encode: libx264 veryfast crf 22 (h264_nvenc unavailable or CLIP_FINAL_ENCODER=x264)
+--- stdout
+codec=h264
+venc=-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2
+h264=-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2
+final_encoder=x264
+h265_ok=gst:(unset) ffmpeg:(unset)
+--- ffmpeg

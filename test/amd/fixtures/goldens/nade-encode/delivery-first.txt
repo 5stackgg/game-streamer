@@ -1,0 +1,23 @@
+rc=0
+== delivery argv
+-y -hide_banner -loglevel error -i @TMP@/nade/0123abcd-1111-2222-3333-444455556666.mp4 -c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr -b:v 9M -maxrate 14M -bufsize 18M -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -pix_fmt yuv420p -profile:v high -level 4.2 -b_ref_mode middle -c:a copy -movflags +faststart @TMP@/nade/0123abcd-1111-2222-3333-444455556666.delivery.mp4
+== delivery log
+[nade 0123abcd] delivery encode: 3072B
+== uploads
+stance bytes=2048
+stance_eyes bytes=2048
+aim bytes=2048
+aim_pin bytes=2048
+aim_close bytes=2048
+landing bytes=2048
+thumbnail bytes=2048
+upload bytes=3072
+== status
+{"status":"rendering","progress":"0.02"}
+{"status":"rendering","progress":"0.15"}
+{"status":"rendering","progress":"0.3"}
+{"status":"rendering","progress":"0.6"}
+{"status":"rendering","progress":"0.75"}
+{"status":"rendering","progress":"0.9"}
+{"status":"uploading","progress":"0.0"}
+{"status":"done","progress":"1.0","duration_ms":"2000"}

@@ -1,0 +1,35 @@
+rc=0
+== stdout
+
+=== Targets ===
+[profile-capture] gst capture pid : self/root@TMP@/proc-gst
+[profile-capture]   scaler in use : videoscale/videoconvert (CPU)
+[profile-capture] host            : 8 logical cores, CLK_TCK=100
+
+=== Sampling 1s @ 1s ===
+t      gst%cpu  cs2%cpu  GPU g/m%   hot cores (>=85%)
+1s          0%       -%         -   none
+
+=== gst threads (busiest; %cpu is lifetime avg @EMDASH@ stable on a steady stream) ===
+    TID %CPU COMMAND
+   4242 55.0 gst-launch-1.0
+   4243 12.5 videoconvert0:sr
+
+=== GPU sm/mem/enc/dec % ===
+
+=== How to read this ===
+- gst%cpu near/over 100 (one core saturated) and rising with resolution
+    => the ximagesrc readback is the bottleneck. A zero-copy GPU capture
+       (gamescope-nested on this stack; NVFBC is GeForce-locked) removes it.
+- a core stuck >=85% ('hot cores') while cs2 wants more CPU
+    => contention; freeing capture cores would lift cs2's fps.
+- gst%cpu modest (<60%) and no hot cores
+    => capture is NOT your bottleneck. Zero-copy buys latency/headroom but
+       little fps @EMDASH@ not worth the rearchitect yet.
+- GPU g% pinned ~100
+    => you're GPU-bound; moving more work to the GPU could cost a little.
+       Check enc% above @EMDASH@ NVENC is a separate block from the render cores.
+== stderr
+[profile-capture] WARN: no cs2 process found
+[profile-capture] WARN: nvidia-smi unavailable
+== nvidia-smi calls

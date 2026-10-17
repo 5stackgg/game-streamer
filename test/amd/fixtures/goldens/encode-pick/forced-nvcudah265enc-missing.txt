@@ -1,0 +1,8 @@
+rc=1
+== stdout
+
+== stderr
+[enc] WARN: GS_NVENC_H265_ELEMENT=nvcudah265enc forced but unavailable @EMDASH@ falling through
+[enc]   encoder: no NVENC HEVC encoder available @EMDASH@ caller will fall back to h264
+== calls
+gst-inspect-1.0 nvcudah265enc

@@ -1,0 +1,7 @@
+stdout:
+DIAG +0s: gpu(util,memio,vramMiB,vramTot,clkMHz,tempC)=100,87,24000,24564,2805,83 | cs2cpu=0% gstcpu=0%
+pid=set
+stderr:
+
+nvidia-smi:
+--query-gpu=utilization.gpu\,utilization.memory\,memory.used\,memory.total\,clocks.gr\,temperature.gpu --format=csv\,noheader\,nounits

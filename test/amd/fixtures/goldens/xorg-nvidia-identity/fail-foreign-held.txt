@@ -1,0 +1,12 @@
+rc=1
+--- calls
+pgrep -x Xorg
+pgrep -x Xorg
+xdpyinfo -display :0
+--- spawned
+
+--- stdout
+
+--- stderr
+[setup-steam] ERROR: X server on :0 is bound but not answering after 0s @EMDASH@ a previous streamer pod on this node never released the GPU display (still running, or its Xorg is wedged in nvidia-modeset). Not starting a second GPU Xorg against it. If no other streamer pod is running on the node, it needs a reboot.
+--- display

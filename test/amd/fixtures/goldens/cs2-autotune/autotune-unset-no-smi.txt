@@ -1,0 +1,6 @@
+stdout:
+[game-streamer] autotune: gpu='unknown' tier=mid cores=8 GS_GPU_SCALE=auto (threads=engine auto-detect)
+after: GS_GPU_SCALE=auto CS2_FPS_MAX=120
+stderr:
+[game-streamer] WARN: autotune: nvidia-smi unavailable @EMDASH@ assuming 'mid' tier
+nvidia-smi:
