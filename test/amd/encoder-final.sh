@@ -107,13 +107,13 @@ for vendor in nvidia amd; do
       final_sh 'before=$(grep -Ec "^(gst-inspect-1.0|gst-launch-1.0|vainfo) " "$T_CALLS" || true)
 args=(-y "${FFMPEG_HW_ARGS[@]}" -i capture.mp4)
 if [ "$GS_GPU_VENDOR" = amd ]; then
-  VA_VF_ARGS=(-vf format=nv12,hwupload)
-  VA_UPLOAD=format=nv12,hwupload
+  VA_VF_ARGS=(-vf crop=1920:1080:0:0,format=nv12,hwupload)
+  VA_UPLOAD=crop=1920:1080:0:0,format=nv12,hwupload
   VA_VMAP="[vhw]"
   case "$FINAL_SHAPE" in
     simple) args+=("${VA_VF_ARGS[@]}") ;;
-    overlay) args+=(-i chip.mov -filter_complex "[0:v][1:v]overlay=0:0:eof_action=pass:format=auto,format=nv12,hwupload[vout]" -map "[vout]") ;;
-    join) args+=(-filter_complex "[0:v]null[v];[v]format=nv12,hwupload[vhw]" -map "[vhw]") ;;
+    overlay) args+=(-i chip.mov -filter_complex "[0:v][1:v]overlay=0:0:eof_action=pass:format=auto,crop=1920:1080:0:0,format=nv12,hwupload[vout]" -map "[vout]") ;;
+    join) args+=(-filter_complex "[0:v]null[v];[v]crop=1920:1080:0:0,format=nv12,hwupload[vhw]" -map "[vhw]") ;;
   esac
 fi
 args+=("${FFMPEG_VENC_ARGS[@]}" out.mp4)

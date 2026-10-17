@@ -633,7 +633,7 @@ elif [ "${GS_GPU_VENDOR:-}" = amd ]; then
     NADE_DELIVERY_REASON="$VA_TRIAL_REASON"
   else
     NADE_DELIVERY_PRE=("${FFMPEG_HW_ARGS[@]}")
-    if nade_delivery_encode -vf format=nv12,hwupload "${NADE_VA_ARGS[@]}"; then
+    if nade_delivery_encode -vf "crop=${GS_ENC_DIMS/x/:}:0:0,format=nv12,hwupload" "${NADE_VA_ARGS[@]}"; then
       NADE_DELIVERY_ENC=h264_vaapi
       say "delivery encode: encoder=$NADE_DELIVERY_ENC"
     else

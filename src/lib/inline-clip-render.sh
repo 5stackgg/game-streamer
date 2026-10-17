@@ -909,8 +909,8 @@ _ffmpeg_venc_cpu_args() {
     elif _venc_run_at "$i" "${FFMPEG_VENC_ARGS[@]}"; then
       out+=("${H264_X264_ARGS[@]}"); i=$((i + ${#FFMPEG_VENC_ARGS[@]} - 1))
     else
-      a="${args[i]//",format=nv12,hwupload[vout]"/"[vout]"}"
-      a="${a//";[v]format=nv12,hwupload[vhw]"/}"
+      a="${args[i]//",${VA_UPLOAD}[vout]"/"[vout]"}"
+      a="${a//";[v]${VA_UPLOAD}[vhw]"/}"
       out+=("${a//"[vhw]"/"[v]"}")
     fi
   done
@@ -956,8 +956,8 @@ ffmpeg_venc() {
       elif _venc_run_at "$i" "${FFMPEG_VENC_ARGS[@]}"; then
         out+=("${H264_X264_ARGS[@]}"); i=$((i + ${#FFMPEG_VENC_ARGS[@]} - 1))
       else
-        a="${args[i]//",format=nv12,hwupload[vout]"/"[vout]"}"
-        a="${a//";[v]format=nv12,hwupload[vhw]"/}"
+        a="${args[i]//",${VA_UPLOAD}[vout]"/"[vout]"}"
+        a="${a//";[v]${VA_UPLOAD}[vhw]"/}"
         out+=("${a//"[vhw]"/"[v]"}")
       fi
     done
@@ -1066,8 +1066,10 @@ export CLIP_VIDEO_CODEC
 # site. The ENCODER-CAPS line then names the encoder and, for a fallback, the reason.
 case "${FFMPEG_VENC_ARGS[1]:-}" in
   h264_vaapi | hevc_vaapi)
-    VA_UPLOAD='format=nv12,hwupload'
-    VA_VF_ARGS=(-vf "format=nv12,hwupload")
+    # HEVC decoders can expose padded 1088-row frames for a 1080p stream.
+    # Crop to the requested picture before upload; iw/ih includes that padding.
+    VA_UPLOAD="crop=${GS_ENC_DIMS/x/:}:0:0,format=nv12,hwupload"
+    VA_VF_ARGS=(-vf "$VA_UPLOAD")
     VA_VMAP='[vhw]'
     ;;
   *) FFMPEG_HW_ARGS=() ;;
@@ -1081,6 +1083,24 @@ else
 fi
 gs_encoder_status inline "$CLIP_CODEC_REQ" "$CLIP_VIDEO_CODEC" "${FFMPEG_VENC_ARGS[1]:-}" "" "$_reason"
 unset _reason
+
+# Normalize each decoded video before concat, including an H.264 outro beside
+# padded HEVC takes. Keep this on AMD even after CPU fallback mixes codecs.
+# NVIDIA's graphs and arguments remain unchanged.
+_inline_normalize_concat_inputs() {
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 0
+  local i prefix="" marker alias
+  for ((i=0; i<${#CONCAT_INPUTS[@]}/2; i++)); do
+    marker="[${i}:v:0]"
+    alias="[gs_crop_${i}]"
+    if [[ "$FC" == *"$marker"* || "$FC" == *"[${i}:v]"* ]]; then
+      FC="${FC//"$marker"/"$alias"}"
+      FC="${FC//"[${i}:v]"/"$alias"}"
+      prefix+="${marker}crop=${GS_ENC_DIMS/x/:}:0:0${alias};"
+    fi
+  done
+  FC="$prefix$FC"
+}
 
 # Parse segments + compute total duration for progress weighting.
 SEG_COUNT=$(printf '%s' "$CLIP_SEGMENTS" | node "$CLIP_HELPERS" segs-count)
@@ -1428,6 +1448,7 @@ _inline_mixed_concat_graph() {
   for ((i=0; i<SEG_COUNT; i++)); do FC+="[${i}:v:0][${i}:a:0]"; done
   FC+="concat=n=${SEG_COUNT}:v=1:a=1[v][a]"
   FC+="${VA_UPLOAD:+;[v]${VA_UPLOAD}[vhw]}"
+  _inline_normalize_concat_inputs
 }
 
 POLISH_BG_PID=""
@@ -2340,6 +2361,7 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
   fi
   # AMD: a VA encoder takes the concat output through hwupload (VA_UPLOAD).
   FC+="${VA_UPLOAD:+;[v]${VA_UPLOAD}[vhw]}"
+  _inline_normalize_concat_inputs
 
   if ! ffmpeg_venc -y -hide_banner -loglevel warning \
        "${FFMPEG_HW_ARGS[@]}" \

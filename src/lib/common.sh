@@ -1427,7 +1427,7 @@ gs_va_ffmpeg_trial() {
     rc=0
     timeout -k 5 20 ffmpeg -hide_banner -loglevel error "${FFMPEG_HW_ARGS[@]}" \
       -f lavfi -i "testsrc2=size=${CLIP_OUTPUT_DIMS:-1920x1080}:rate=${CLIP_OUTPUT_FPS:-60}" \
-      -frames:v 1 -vf format=nv12,hwupload "$@" -f null - \
+      -frames:v 1 -vf "crop=${GS_ENC_DIMS/x/:}:0:0,format=nv12,hwupload" "$@" -f null - \
       >>"${LOG_DIR:-/tmp/game-streamer}/encoder_trials.log" 2>&1 || rc=$?
     case "$rc" in 0 | 124 | 137) break ;; esac
   done

@@ -110,7 +110,7 @@ assert_eq h264_vaapi "$(nade_encoders)" 'one VA delivery'
 assert_eq 1 "$(nade_calls trial | grep -c .)" 'one ffmpeg trial'
 assert_eq ok "$(nade_caps trial.ffmpeg.h264_vaapi.1920x1080)" 'per-pod dimension key'
 assert_contains "$(nade_calls delivery)" '-init_hw_device vaapi=gsva:/dev/dri/renderD128 -filter_hw_device gsva -i ' 'device opens before input'
-assert_contains "$(nade_calls delivery)" '-vf format=nv12\,hwupload -c:v h264_vaapi -rc_mode VBR -b:v 9M -maxrate 14M -bufsize 18M -compression_level 5 -bf 0 -g 120 -profile:v high -level 4.2' 'VA upload and fixed defaults'
+assert_contains "$(nade_calls delivery)" '-vf crop=1920:1080:0:0\,format=nv12\,hwupload -c:v h264_vaapi -rc_mode VBR -b:v 9M -maxrate 14M -bufsize 18M -compression_level 5 -bf 0 -g 120 -profile:v high -level 4.2' 'VA picture crop, upload and fixed defaults'
 assert_contains "$NADE_LOG" 'delivery encode: encoder=h264_vaapi' 'VA selection is named'
 assert_contains "$(nade_uploads)" 'upload bytes=3072' 'VA delivery uploads'
 trial_order=$(while IFS= read -r line; do
@@ -177,5 +177,6 @@ nade_amd_render NADE_OUTPUT_DIMS=1280x720 NADE_OUTPUT_FPS=30 \
   NADE_FINAL_BITRATE=5M NADE_FINAL_MAXRATE=7M NADE_FINAL_BUFSIZE=10M GS_VA_FFMPEG_LEVEL=6
 assert_eq ok "$(nade_caps trial.ffmpeg.h264_vaapi.1280x720)" 'global GS_ENC_DIMS matches nade output'
 assert_contains "$(nade_calls trial)" 'testsrc2=size=1280x720:rate=30' 'trial uses the nade dimensions and rate'
+assert_contains "$(nade_calls delivery)" '-vf crop=1280:720:0:0\,format=nv12\,hwupload' 'delivery uses the selected picture dimensions'
 assert_contains "$(nade_calls delivery)" '-b:v 5M -maxrate 7M -bufsize 10M -compression_level 6 -bf 0 -g 60' 'explicit bitrate and GOP settings'
 t_done

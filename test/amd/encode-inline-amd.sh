@@ -39,7 +39,7 @@ HW="-init_hw_device vaapi=gsva:$NODE -filter_hw_device gsva"
 VA_H264="-c:v h264_vaapi -rc_mode VBR -b:v 9M -maxrate 14M -bufsize 18M -compression_level 5 -bf 0 -g 120 -profile:v high -level 4.2"
 VA_HEVC="-c:v hevc_vaapi -rc_mode CQP -qp 24 -compression_level 5 -bf 0 -g 120 -profile:v main -tag:v hvc1"
 X264="-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2"
-TRIAL="-hide_banner -loglevel error $HW -f lavfi -i testsrc2=size=1920x1080:rate=60 -frames:v 1 -vf format=nv12,hwupload"
+TRIAL="-hide_banner -loglevel error $HW -f lavfi -i testsrc2=size=1920x1080:rate=60 -frames:v 1 -vf crop=1920:1080:0:0,format=nv12,hwupload"
 KEY_H264=trial.ffmpeg.h264_vaapi.1920x1080
 KEY_HEVC=trial.ffmpeg.hevc_vaapi.1920x1080
 WARN_RETRY="WARN final encode: h264_vaapi failed, retrying with libx264"
@@ -94,15 +94,15 @@ check_va() {
   case "$site" in
     1)
       assert_contains "$call" \
-        "overlay=0:0:eof_action=pass:format=auto,format=nv12,hwupload[vout] -map [vout] -map 0:a -c:a aac -b:a 192k $enc " \
+        "overlay=0:0:eof_action=pass:format=auto,crop=1920:1080:0:0,format=nv12,hwupload[vout] -map [vout] -map 0:a -c:a aac -b:a 192k $enc " \
         "site 1: hwupload ends the graph, encoder args"
       ;;
     3)
-      assert_contains "$call" "[v][a];[v]format=nv12,hwupload[vhw] -map [vhw] -map [a] $enc " \
+      assert_contains "$call" "[v][a];[v]crop=1920:1080:0:0,format=nv12,hwupload[vhw] -map [vhw] -map [a] $enc " \
         "site 3: hwupload ends the graph, [vhw] mapped, encoder args"
       ;;
     *)
-      assert_contains "$call" " -vf format=nv12,hwupload $enc " \
+      assert_contains "$call" " -vf crop=1920:1080:0:0,format=nv12,hwupload $enc " \
         "site $site: hwupload is the only video filter, encoder args"
       ;;
   esac
