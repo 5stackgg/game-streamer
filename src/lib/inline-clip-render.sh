@@ -1199,6 +1199,12 @@ reap_polish_bg() {
   if [ -n "$log" ] && [ -s "$log" ]; then
     sed "s/^/  polish[$idx]: /" "$log" >&2
   fi
+  # A libx264 retry in the polish pass (ffmpeg_venc) leaves this segment encoded by
+  # another encoder than the outro transcode would use: keep the montage off the
+  # stream-copy fast path, so the filter-graph concat re-encodes it.
+  if [ -n "$log" ] && grep -q 'WARN final encode: [^ ]* failed' "$log" 2>/dev/null; then
+    COPY_ELIGIBLE=0
+  fi
   rm -f "$log"
   if [ "$rc" -ne 0 ]; then
     die_failed "ffmpeg polish pass failed (segment $idx)"
@@ -1946,6 +1952,7 @@ try_concat_copy() {
     # Transcode to a scratch file and rename in — a killed render must never
     # leave a truncated outro behind for the next clip to concat.
     local staging="${outro_matched}.$$.tmp"
+    local venc_before="${FFMPEG_VENC_ARGS[1]:-}"
     if ! ffmpeg_venc -y -hide_banner -loglevel warning \
          "${in_args[@]}" \
          "${map_args[@]}" \
@@ -1956,6 +1963,13 @@ try_concat_copy() {
          "$staging"; then
       say "  concat: outro transcode failed — falling back to re-encode"
       rm -f "$staging"
+      return 1
+    fi
+    # ffmpeg_venc retried with libx264: the outro now matches neither its cache key nor
+    # the polished segments, so cache nothing and re-encode the montage instead.
+    if [ "${FFMPEG_VENC_ARGS[1]:-}" != "$venc_before" ]; then
+      rm -f "$staging"
+      say "  concat: outro transcode retried with libx264, falling back to re-encode"
       return 1
     fi
     mv -f "$staging" "$outro_matched" || { rm -f "$staging"; return 1; }
