@@ -1,0 +1,15 @@
+== ffmpeg
+-hide_banner -loglevel error -f lavfi -i color=c=gray:s=320x240:r=60 -frames:v 8 -c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr -b:v 9M -maxrate 14M -bufsize 18M -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -b_ref_mode middle -pix_fmt yuv420p -profile:v high -level 4.2 -f null -
+-hide_banner -encoders
+-y -hide_banner -loglevel warning -i /tmp/gs-inline-test/clips/0123abcd-0000-4000-8000-000000000001.segs/seg-000.mp4 -i /tmp/gs-inline-test/clips/0123abcd-0000-4000-8000-000000000001-chip.mov -filter_complex \[0:v\]\[1:v\]overlay=0:0:eof_action=pass:format=auto\[vout\] -map \[vout\] -map 0:a -c:a aac -b:a 192k -c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr -b:v 9M -maxrate 14M -bufsize 18M -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -b_ref_mode middle -pix_fmt yuv420p -profile:v high -level 4.2 -r 60 -movflags +faststart /tmp/gs-inline-test/clips/0123abcd-0000-4000-8000-000000000001.segs/seg-000.mp4.polish.mp4
+-y -hide_banner -loglevel warning -i /tmp/gs-inline-test/outro/outro_1920x1080_60.mp4 -map 0:v -map 0:a -c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr -b:v 9M -maxrate 14M -bufsize 18M -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -b_ref_mode middle -pix_fmt yuv420p -profile:v high -level 4.2 -r 60 -c:a aac -b:a 192k -ar 48000 -ac 2 -movflags +faststart /tmp/gs-inline-test/outro-cache/outro-f3ed1f92e79f.mp4.@PID@.tmp
+-y -hide_banner -loglevel warning -f concat -safe 0 -i /tmp/gs-inline-test/clips/0123abcd-0000-4000-8000-000000000001.segs/concat-copy.txt -c copy -movflags +faststart /tmp/gs-inline-test/clips/0123abcd-0000-4000-8000-000000000001.mp4
+-y -hide_banner -loglevel warning -ss 0.500 -i /tmp/gs-inline-test/clips/0123abcd-0000-4000-8000-000000000001.mp4 -frames:v 1 -q:v 3 /tmp/gs-inline-test/clips/0123abcd-0000-4000-8000-000000000001.jpg
+== log
+[clip 0123abcd] final encode: h264_nvenc p6/hq 9M (max 14M)
+[clip 0123abcd] h265 probe: gstreamer NVENC HEVC OK (pick=nvcudah265enc)
+[clip 0123abcd] h265 probe: ffmpeg hevc_nvenc NOT FOUND in 'ffmpeg -encoders' (this build was compiled without NVENC HEVC)
+[clip 0123abcd] h265 requested but unavailable (gst_ok=1 ffmpeg_ok=0) @EMDASH@ using h264 for this render
+[clip 0123abcd] OUTRO: appending /tmp/gs-inline-test/outro/outro_1920x1080_60.mp4
+[clip 0123abcd] STEP 9: concat fast path @EMDASH@ transcoding outro to match polished segments (cached for later clips)
+[clip 0123abcd]   concat: stream-copy OK (1.00s, expected 2.00s) @EMDASH@ montage re-encode skipped

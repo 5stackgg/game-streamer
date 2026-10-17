@@ -43,9 +43,61 @@ srt_latency_for_rtt() {
   awk -v rtt="$1" 'BEGIN { ms = int(rtt * 4 + 0.999); print (ms < 120 ? 120 : ms) }'
 }
 
+# live_diag_line <stream-id> <gpu> <cs2cpu> <capcpu> <composite> <audio-diag> [encoder]
+# Prints the text of one LIVE-DIAG line of start_capture's sampler. NVIDIA: gpu is the
+# nvidia-smi CSV and the text is unchanged. AMD: gpu is the gs_gpu_sample text, and the
+# line ends with enc= and the first word of the encoder string in use.
+live_diag_line() {
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    local enc="${7:-}"
+    printf '%s\n' "  LIVE-DIAG ${1:0:8}: gpu ${2} | cs2cpu=${3}% capcpu=${4}% (composite=${5})${6} | enc=${enc%% *}"
+    return 0
+  fi
+  printf '%s\n' "  LIVE-DIAG ${1:0:8}: gpu(util,vramMiB,clkMHz,tempC)=${2} | cs2cpu=${3}% capcpu=${4}% (composite=${5})${6}"
+}
 # start_capture <stream-id> [fps] [video-kbps] [show-pointer] [audio]
 #   audio: 1 to include PulseAudio leg (default), 0 video-only
 start_capture() {
+  local rc=0 enc
+  _start_capture_once "$@" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    gs_record_live_encoder
+    return 0
+  fi
+  if [ "$rc" -eq 1 ]; then
+    case "$(gs_video_encoder_mode)" in
+      gpu)
+        warn "video_encoder=gpu: capture failed to start, CPU retry is forbidden"
+        return 1
+        ;;
+      cpu-fallback)
+        rm -f "$LOG_DIR/cpu-fallback"
+        unset GS_NVENC_PICK GS_NVENC_PICK_H265
+        return 1
+        ;;
+    esac
+  fi
+  enc="${GS_LAST_CAPTURE_ENC:-}"
+  enc="${enc%% *}"
+  if [ "$rc" -ne 1 ] || [ "$(gs_video_encoder_mode)" != auto ] \
+     || [ -z "$enc" ] || [ "$enc" = x264enc ]; then
+    return "$rc"
+  fi
+  warn "capture: $enc failed to start, retrying on the CPU (video_encoder=auto)"
+  mkdir -p "$LOG_DIR" && : > "$LOG_DIR/cpu-fallback" || return 1
+  stop_capture "$1" || true
+  unset GS_NVENC_PICK GS_NVENC_PICK_H265
+  if _start_capture_once "$@"; then
+    gs_record_live_encoder
+    return 0
+  fi
+  rm -f "$LOG_DIR/cpu-fallback"
+  unset GS_NVENC_PICK GS_NVENC_PICK_H265
+  return 1
+}
+
+_start_capture_once() {
+  GS_LAST_CAPTURE_ENC=""
   local stream_id="${1:?stream-id required}"
   local fps="${2:-30}"
   local kbps="${3:-4000}"
@@ -69,6 +121,9 @@ start_capture() {
   local out_h="${live_out#*x}"
   [ -z "$out_w" ] && out_w=1920
   [ -z "$out_h" ] && out_h=1080
+  # The size the VA-API checks judge the encoder at (AMD only; unused on NVIDIA). A
+  # local, so it shadows a caller's global GS_ENC_DIMS during restart_capture.
+  local GS_ENC_DIMS="${out_w}x${out_h}"
 
   if stream_running "$stream_id"; then
     return 0
@@ -89,13 +144,27 @@ start_capture() {
   fi
 
   # LIVE_VIDEO_CODEC=h265|h264. Default h264 — falls back to h264 if no NVENC HEVC.
+  # On AMD the HEVC encoder is VA-API's, and it must be usable at GS_ENC_DIMS.
   # Note: HEVC-over-WebRTC is Safari 17+ only; non-HEVC browsers fall back to HLS.
   local codec="${LIVE_VIDEO_CODEC:-h264}"
+  # The requested codec as ENCODER-CAPS names it: h265 for h265 or hevc, else h264.
+  local codec_req=h264
+  case "$codec" in h265|hevc) codec_req=h265 ;; esac
   local enc="" parse=""
   case "$codec" in
     h265|hevc)
+      local encoder_mode
+      encoder_mode=$(gs_video_encoder_mode)
+      case "$encoder_mode" in
+        cpu|cpu-fallback)
+          warn "video_encoder=$encoder_mode: encoding on the CPU (x264enc), HEVC becomes H.264"
+          ;;
+      esac
       if enc=$(pick_h265_pipeline "$gop" "$kbps" live); then
         parse="h265parse config-interval=1"
+      elif [ "${GS_GPU_VENDOR:-}" = amd ]; then
+        warn "LIVE_VIDEO_CODEC=$codec but no VA-API HEVC encoder is usable at ${GS_ENC_DIMS}, falling back to h264 (see ENCODER-CAPS)"
+        codec="h264"
       else
         warn "LIVE_VIDEO_CODEC=$codec but no NVENC HEVC encoder available — falling back to h264"
         codec="h264"
@@ -112,13 +181,17 @@ start_capture() {
       || { warn "no H.264 encoder resolved — not starting capture"; return 1; }
     parse="h264parse config-interval=1"
   fi
+  GS_LAST_CAPTURE_ENC="$enc"
   log "  codec: $codec"
 
-  # Scale + colorspace convert. Runs on the GPU (cudaconvertscale) when the
-  # encoder is CUDA-based, off-loading it from the CPU that cs2 needs.
+  # Scale + colorspace convert. Runs on the GPU when the encoder is CUDA-based
+  # (cudaconvertscale) or VA-API (vapostproc), off-loading it from the CPU that
+  # cs2 needs.
   local convert
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
   _assert_cuda_chain "$convert" "$enc"
+  # ENCODER-CAPS says h265 where codec keeps the hevc spelling (LIVE_VIDEO_CODEC=hevc).
+  gs_encoder_status live "$codec_req" "${codec/hevc/h265}" "$enc" "$convert"
 
   # Persist args so restart_capture can re-invoke us identically.
   local args_dir="${LOG_DIR:-/tmp/game-streamer}"
@@ -192,14 +265,22 @@ start_capture() {
     # (BGRA) or it paints opaque over cs2 — verify this on-node first. The software
     # compositor stays: LIVE-DIAG measured the capture at ~1.1 of its 2 cores, so the
     # blend is NOT CPU-bound and GPU compositing would buy nothing here.
-    local cs2_src="appsrc name=vksrc ! queue ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
+    # The consumer pushes without waiting for appsrc's enough-data signal.
+    # Bound both live input queues and keep the newest frames when the compositor
+    # falls behind; otherwise raw frames accumulate until the worker is OOM-killed.
+    # Clip capture uses its own lossless pipeline and is intentionally unchanged.
+    local cs2_src="appsrc name=vksrc max-buffers=2 max-bytes=0 max-time=0 leaky-type=downstream ! queue leaky=downstream max-size-buffers=2 max-size-bytes=0 max-size-time=0 ! videorate ! video/x-raw,framerate=$fps/1 ! comp.sink_0"
     # leaky=downstream: a slow/blocked HUD grab drops its own frames instead of
     # back-pressuring the compositor (which would stall the cs2 leg too).
     local hud_src="ximagesrc xid=$hud_xid use-damage=0 show-pointer=false ! video/x-raw,framerate=$hud_fps/1 ! videoconvert ! video/x-raw,format=BGRA ! queue leaky=downstream max-size-buffers=2 ! comp.sink_1"
     # queue after the compositor = a thread boundary so the software blend and the
     # upload/encode run on separate cores (else they serialize on one). Bounded by
     # buffer count — raw frames are big, so the default byte cap would throttle.
-    local outchain="compositor name=comp background=black ! queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
+    # vapostproc (AMD): pin the blend to BGRA, the HUD leg's format, or the compositor
+    # may take NV12 from vapostproc's sink caps and blend and convert on the CPU.
+    local comp_caps=""
+    case "$convert" in *vapostproc*) comp_caps="video/x-raw,format=BGRA ! " ;; esac
+    local outchain="compositor name=comp background=black ! ${comp_caps}queue max-size-buffers=8 max-size-bytes=0 max-size-time=0 ! $convert ! $enc ! $parse"
     local pipeline
     # Audio queue leaks like the video leg so it can't fall permanently behind.
     if [ "$audio" = 1 ]; then
@@ -233,6 +314,7 @@ $hud_src"
     # never share a core. CAPTURE_CPUS overrides the list (empty = no pin);
     # CAPTURE_CORES sets the count (2 is the floor — capture needs ~1.7 cores).
     local capture_pin=()
+    gs_cpu_split_for_encoder "$enc"
     compute_cpu_split
     if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
       capture_pin=(taskset -c "$GS_CAPTURE_CPUS")
@@ -267,7 +349,8 @@ $hud_src"
   # ximagesrc fallback — grabs the composited X display (cs2 + HUD via picom). Used
   # when the composite is unavailable (no vkcapture / no cs2 / no HUD window, e.g.
   # the DEBUG_STREAM boot watch) or its consumer died. leaky=downstream decouples
-  # the grab from convert+NVENC so a downstream hitch can't back-pressure the grab.
+  # the grab from convert + the GPU encoder (NVENC or VA-API) so a downstream hitch
+  # can't back-pressure the grab.
   if [ "$used_composite" = 0 ]; then
     if [ "$audio" = 1 ]; then
       # Opus: mediamtx forwards straight to WebRTC without per-viewer transcode.
@@ -302,6 +385,7 @@ $hud_src"
   fi
 
   # Liveness check — must survive pulse / NVENC init / srt handshake.
+  # On AMD the encoder init is VA-API's, not NVENC's.
   local pid=$SPAWNED_PID
   local i
   for i in 1 2 3; do
@@ -319,7 +403,8 @@ $hud_src"
   # and GPU compositing is the fix; if cs2cpu/gpu dip with capcpu low it's cs2-side.
   # Slow cadence so a multi-hour stream doesn't spam; GS_LIVE_DIAG=0 mutes. Detaches
   # and self-exits when the capture pid dies.
-  if [ "${GS_LIVE_DIAG:-1}" = "1" ] && command -v nvidia-smi >/dev/null 2>&1; then
+  # AMD reads amdgpu sysfs through gs_gpu_sample, so it needs no nvidia-smi.
+  if [ "${GS_LIVE_DIAG:-1}" = "1" ] && { [ "${GS_GPU_VENDOR:-}" = amd ] || command -v nvidia-smi >/dev/null 2>&1; }; then
     (
       cap_pid="$pid" comp="$used_composite"
       cs2_pid=$(pgrep -f '/linuxsteamrt64/cs2' | head -1)
@@ -353,14 +438,18 @@ $hud_src"
         sleep "$interval"
         kill -0 "$cap_pid" 2>/dev/null || break
         now_ms=$(date +%s%3N 2>/dev/null || echo 0); dt=$(( now_ms - pms )); [ "$dt" -le 0 ] && dt=$((interval * 1000))
-        g=$(nvidia-smi --query-gpu=utilization.gpu,memory.used,clocks.gr,temperature.gpu \
-              --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+        if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+          g=$(gs_gpu_sample)
+        else
+          g=$(nvidia-smi --query-gpu=utilization.gpu,memory.used,clocks.gr,temperature.gpu \
+                --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+        fi
         ccs2=$(jif "$cs2_pid"); ccap=$(jif "$cap_pid")
         cs2cpu=$(awk -v a="${pcs2:-}" -v b="${ccs2:-}" -v dt="$dt" -v hz="$hz" 'BEGIN{if(a==""||b==""){print "?"}else printf "%.0f",(b-a)*1000.0/hz/dt*100}')
         capcpu=$(awk -v a="${pcap:-}" -v b="${ccap:-}" -v dt="$dt" -v hz="$hz" 'BEGIN{if(a==""||b==""){print "?"}else printf "%.0f",(b-a)*1000.0/hz/dt*100}')
         adiag=""
         [ "$audio" = 1 ] && adiag=" | audio $(audio_lat)"
-        log "  LIVE-DIAG ${stream_id:0:8}: gpu(util,vramMiB,clkMHz,tempC)=${g} | cs2cpu=${cs2cpu}% capcpu=${capcpu}% (composite=${comp})${adiag}"
+        log "$(live_diag_line "$stream_id" "$g" "$cs2cpu" "$capcpu" "$comp" "$adiag" "$enc")"
         # One-shot raw dump so the parser can be validated against this pactl's
         # output format straight from the log if the numbers look off.
         if [ "$audio" = 1 ] && [ -z "${raw_dumped:-}" ]; then

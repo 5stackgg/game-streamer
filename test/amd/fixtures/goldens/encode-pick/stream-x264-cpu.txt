@@ -1,0 +1,12 @@
+--- stdout
+[game-streamer] starting capture 'a1b2c3d4e5f6' (1920x1080@60fps kbps=8000 audio=1) -> srt://mediamtx.5stack.svc.cluster.local:8890?streamid=publish:a1b2c3d4e5f6
+[game-streamer]   SRT latency 200ms (SRT_LATENCY_MS)
+[game-streamer]   codec: h264
+[game-streamer]   composite: cs2 present-hook + HUD overlay (xid=0x3a00004, hud=60fps)
+[game-streamer] WATCH (HLS): https://hls.5stack.gg/a1b2c3d4e5f6/index.m3u8
+rc=0
+--- stderr
+[game-streamer]   encoder: x264enc (software fallback)
+[game-streamer]   scaler: CPU videoscale+videoconvert
+--- spawned
+vkcapture-consumer compositor\ name=comp\ background=black\ \!\ queue\ max-size-buffers=8\ max-size-bytes=0\ max-size-time=0\ \!\ videoscale\ \!\ video/x-raw\,width=1920\,height=1080\,framerate=60/1\ \!\ videoconvert\ \!\ video/x-raw\,format=NV12\ \!\ x264enc\ tune=zerolatency\ speed-preset=veryfast\ bitrate=8000\ key-int-max=60\ \!\ h264parse\ config-interval=1\ \!\ queue\ \!\ mux.\ appsrc\ name=vksrc\ max-buffers=2\ max-bytes=0\ max-time=0\ leaky-type=downstream\ \!\ queue\ leaky=downstream\ max-size-buffers=2\ max-size-bytes=0\ max-size-time=0\ \!\ videorate\ \!\ video/x-raw\,framerate=60/1\ \!\ comp.sink_0\ ximagesrc\ xid=0x3a00004\ use-damage=0\ show-pointer=false\ \!\ video/x-raw\,framerate=60/1\ \!\ videoconvert\ \!\ video/x-raw\,format=BGRA\ \!\ queue\ leaky=downstream\ max-size-buffers=2\ \!\ comp.sink_1\ pulsesrc\ device=cs2.monitor\ buffer-time=400000\ provide-clock=false\ \!\ audio/x-raw\,rate=48000\,channels=2\ \!\ audioconvert\ \!\ audioresample\ \!\ opusenc\ bitrate=128000\ \!\ opusparse\ \!\ queue\ leaky=downstream\ max-size-time=500000000\ max-size-buffers=0\ max-size-bytes=0\ \!\ mux.\ mpegtsmux\ name=mux\ alignment=7\ \!\ srtsink\ uri=srt://mediamtx.5stack.svc.cluster.local:8890\?streamid=publish:a1b2c3d4e5f6\ latency=200\ auto-reconnect=false

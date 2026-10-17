@@ -1,0 +1,6 @@
+rc=1
+== stdout
+
+== stderr
+[enc] WARN: GS_NVENC_PICK_H265='bogus' unrecognized @EMDASH@ treating as no NVENC HEVC
+== calls

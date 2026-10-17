@@ -1,0 +1,8 @@
+rc=0
+== stdout
+videoscale ! video/x-raw,width=1920,height=1080,framerate=60/1 ! videoconvert ! video/x-raw,format=NV12
+== stderr
+[enc]   scaler: CPU videoscale+videoconvert
+== calls
+gst-inspect-1.0 nvcudah265enc
+gst-inspect-1.0 nvh265enc

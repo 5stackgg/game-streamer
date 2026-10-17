@@ -1014,6 +1014,45 @@ print(f"  {cfg_path}: synthesized apps/{appid}/LaunchOptions under Steam block")
 PY
 }
 
+# AMD launch options (S3-D7). Steam strips exported env before -applaunch, so the Vulkan
+# device pins reach cs2 only as launch words: the loader and device-select pins from
+# gs_gpu_env, MESA_VK_WSI_DEBUG when set (tier A under sw WSI), and the X11 pins for SDL3
+# (SDL_VIDEO_DRIVER) and SDL2 (SDL_VIDEODRIVER) on both display tiers (S3-D30). Then
+# OBS_VKCAPTURE=1 for the vkcapture clip path unless the override sets OBS_VKCAPTURE=,
+# then the operator's CS2_LAUNCH_OPTIONS, last, where a later assignment wins. AMD drops
+# __GL_SHADER_DISK_CACHE=1, an NVIDIA driver flag. Prints the value.
+cs2_amd_launch_options() {
+  local over="${CS2_LAUNCH_OPTIONS:-}" words=() var
+  for var in VK_LOADER_DRIVERS_SELECT MESA_VK_DEVICE_SELECT MESA_VK_WSI_DEBUG; do
+    if [ -n "${!var:-}" ]; then
+      words+=("$var=${!var}")
+    fi
+  done
+  words+=(SDL_VIDEO_DRIVER=x11 SDL_VIDEODRIVER=x11)
+  case "${CLIP_CAPTURE_METHOD:-vkcapture}" in
+    vkcapture)
+      case "$over" in
+        *OBS_VKCAPTURE=*) ;;
+        *) words+=(OBS_VKCAPTURE=1) ;;
+      esac
+      ;;
+  esac
+  # The pins only hold in the final string, so on tier C an override that sets one of
+  # them wins over the pin: keep it and say so once.
+  if [ -n "$over" ] && [ "$(gs_display_tier)" = C ]; then
+    case "$over" in
+      *MESA_VK_WSI_DEBUG=*|*SDL_VIDEO_DRIVER=*|*SDL_VIDEODRIVER=*)
+        warn "set_cs2_launch_options: CS2_LAUNCH_OPTIONS sets MESA_VK_WSI_DEBUG or an SDL video driver on display tier C; kept, and it wins over the pin"
+        ;;
+    esac
+  fi
+  case "$over" in
+    '') words+=(%command%) ;;
+    *%command%*) words+=("$over") ;;
+    *) words+=(%command% "$over") ;;
+  esac
+  printf '%s\n' "${words[*]}"
+}
 # Force `__GL_SHADER_DISK_CACHE=1` onto the cs2 process via its Steam launch
 # options. WHY: cs2 uses Vulkan; the NVIDIA driver DISABLES the writable shader
 # disk cache when running as root unless that env var is set, so runtime-
@@ -1041,6 +1080,10 @@ set_cs2_launch_options() {
   # dir (steamapps/shadercache/730), which Fossilize pre-warms. Overriding the path
   # pointed cs2 at an empty cache — map load went 8s -> 2.5min and every clip compiled cold.
   local launch_opts="${CS2_LAUNCH_OPTIONS:-__GL_SHADER_DISK_CACHE=1 ${cap_env}%command%}"
+  # AMD composes its own value (S3-D7); NVIDIA and unset keep the line above.
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    launch_opts="$(cs2_amd_launch_options)"
+  fi
   local roots=("$STEAM_HOME/userdata" "$HOME/.steam/steam/userdata")
   local seen=() root user_dir steamid edited=0
   for root in "${roots[@]}"; do

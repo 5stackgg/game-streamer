@@ -1,0 +1,9 @@
+[game-streamer] cs2 shader cache: steam=@TMP@/steamlib/steamapps/shadercache/730 (what cs2 uses) nvcache=1.5G/3 files
+-- added or changed
+__GL_SHADER_DISK_CACHE=1
+__GL_SHADER_DISK_CACHE_PATH=@TMP@/steamlib/nvcache
+__GL_SHADER_DISK_CACHE_SIZE=10737418240
+__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
+-- calls
+find @TMP@/steamlib/nvcache -type f
+du -sh @TMP@/steamlib/nvcache

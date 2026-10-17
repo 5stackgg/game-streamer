@@ -6,9 +6,10 @@
 ARG HUD_IMAGE=ghcr.io/5stackgg/hud-manager:latest
 FROM ${HUD_IMAGE} AS hud
 
-FROM nvidia/cuda:12.6.3-base-ubuntu24.04
+FROM nvidia/cuda:12.6.3-base-ubuntu24.04 AS streamer
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG MESA_VERSION=25.2.8-0ubuntu0.24.04.2
 
 ENV NVIDIA_DRIVER_CAPABILITIES=all
 ENV NVIDIA_VISIBLE_DEVICES=all
@@ -36,6 +37,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && add-apt-repository -y universe \
     && dpkg --add-architecture i386 \
     && apt-get update
+
+# Pin both architectures in one transaction before the X stack.
+COPY resources/assert-mesa-pin.sh /usr/local/sbin/assert-mesa-pin
+RUN apt-get update \
+    && dpkg --validate-version "$MESA_VERSION" \
+    && if dpkg --compare-versions "$MESA_VERSION" ge 26.2~; then \
+         echo "Mesa $MESA_VERSION is blocked by csgo-osx-linux #4624 (26.2~ or newer)" >&2; exit 1; \
+       fi \
+    && printf 'Package: src:mesa:any\nPin: version %s\nPin-Priority: 1001\n' "$MESA_VERSION" \
+         > /etc/apt/preferences.d/5stack-mesa \
+    && apt-get install -y --no-install-recommends \
+         "libegl-mesa0=${MESA_VERSION}" "libgbm1=${MESA_VERSION}" \
+         "libgl1-mesa-dri=${MESA_VERSION}" "libglx-mesa0=${MESA_VERSION}" \
+         "mesa-libgallium=${MESA_VERSION}" "mesa-vulkan-drivers=${MESA_VERSION}" \
+         "mesa-va-drivers=${MESA_VERSION}" \
+         "libegl-mesa0:i386=${MESA_VERSION}" "libgbm1:i386=${MESA_VERSION}" \
+         "libgl1-mesa-dri:i386=${MESA_VERSION}" "libglx-mesa0:i386=${MESA_VERSION}" \
+         "mesa-libgallium:i386=${MESA_VERSION}" \
+         vainfo weston xwayland \
+    && chmod +x /usr/local/sbin/assert-mesa-pin \
+    && /usr/local/sbin/assert-mesa-pin \
+    && rm -rf /var/lib/apt/lists/*
 
 # X server + WM + dbus.
 #   xdotool   — used to dismiss Steam CEF modals during launch (and, when
@@ -274,6 +297,23 @@ RUN cd /opt/game-streamer/motion \
  && cp out/outro_*.mp4 /opt/game-streamer/resources/video/ \
  && rm -rf out
 
+RUN /usr/local/sbin/assert-mesa-pin
+
 WORKDIR /opt/game-streamer
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/game-streamer/src/game-streamer.sh"]
+
+# BuildKit-only negative targets: the final default stage skips these failures.
+FROM streamer AS mesa-test-no-va
+RUN apt-get purge -y mesa-va-drivers:amd64 \
+    && /usr/local/sbin/assert-mesa-pin
+
+FROM streamer AS mesa-test-xwayland-floor
+RUN sed -i 's/^XWAYLAND_MIN=.*/XWAYLAND_MIN=2:99/' /usr/local/sbin/assert-mesa-pin \
+    && /usr/local/sbin/assert-mesa-pin
+
+FROM streamer AS mesa-test-no-kiosk
+RUN dpkg-query -L weston | grep '/kiosk-shell\.so$' | xargs -r rm -f \
+    && /usr/local/sbin/assert-mesa-pin
+
+FROM streamer

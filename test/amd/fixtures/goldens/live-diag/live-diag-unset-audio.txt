@@ -1,0 +1,1 @@
+  LIVE-DIAG 8f14e45f: gpu(util,vramMiB,clkMHz,tempC)=45,1234,1800,60 | cs2cpu=85% capcpu=43% (composite=1) | audio srcout=12ms sinkin=8ms

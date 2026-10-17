@@ -1,0 +1,9 @@
+rc=0
+== stdout
+nvh265enc preset=low-latency-hq rc-mode=cbr gop-size=60 bitrate=8400
+== stderr
+[enc]   encoder: nvh265enc preset=low-latency-hq (GPU, legacy API)
+== calls
+gst-inspect-1.0 nvcudah265enc
+gst-inspect-1.0 nvh265enc
+gst-launch-1.0 -q videotestsrc num-buffers=1 \! video/x-raw\,format=NV12\,width=320\,height=240\,framerate=30/1 \! nvh265enc preset=low-latency-hq \! fakesink sync=false

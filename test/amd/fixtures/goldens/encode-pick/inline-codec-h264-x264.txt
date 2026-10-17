@@ -1,0 +1,11 @@
+--- stderr
+[clip a1b2c3d4] final encode: libx264 veryfast crf 22 (h264_nvenc unavailable or CLIP_FINAL_ENCODER=x264)
+--- stdout
+codec=h264
+venc=-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2
+h264=-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2
+final_encoder=(unset)
+h265_ok=gst:(unset) ffmpeg:(unset)
+--- ffmpeg
+-hide_banner -loglevel error -f lavfi -i color=c=gray:s=320x240:r=60 -frames:v 8 -c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr -b:v 9M -maxrate 14M -bufsize 18M -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -b_ref_mode middle -pix_fmt yuv420p -profile:v high -level 4.2 -f null -
+-hide_banner -loglevel error -f lavfi -i color=c=gray:s=320x240:r=60 -frames:v 8 -c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr -b:v 9M -maxrate 14M -bufsize 18M -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -pix_fmt yuv420p -profile:v high -level 4.2 -f null -

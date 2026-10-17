@@ -70,10 +70,29 @@ lock_gpu_clocks() {
 # Safe to call once per flow after FPS is resolved.
 cs2_autotune() {
   local gpu tier cores
-  gpu="$(detect_gpu_name)"
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    # AMD: detect_gpu_name needs nvidia-smi, so take the name preflight_vulkan
+    # wrote to gpu_identity (S3-D14).
+    local k v
+    gpu=""
+    if [ -r "$LOG_DIR/gpu_identity" ]; then
+      while IFS='=' read -r k v; do
+        if [ "$k" = name ]; then gpu="$v"; fi
+      done < "$LOG_DIR/gpu_identity"
+    fi
+  else
+    gpu="$(detect_gpu_name)"
+  fi
   cores="$(nproc 2>/dev/null || echo 4)"
 
-  if [ -n "$gpu" ]; then
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    # No AMD tier rules yet (no performance data), so mid: GS_GPU_SCALE stays
+    # auto (S3-D14).
+    tier="mid"
+    if [ -z "$gpu" ]; then
+      log "autotune: $LOG_DIR/gpu_identity has no GPU name; assuming '$tier' tier"
+    fi
+  elif [ -n "$gpu" ]; then
     tier="$(classify_gpu_tier "$gpu")"
   else
     tier="mid"
@@ -104,5 +123,21 @@ cs2_autotune() {
   fi
 
   # Pin clocks so the GPU doesn't downclock-then-stutter under bursty load.
-  lock_gpu_clocks
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    # Pods write no DPM or clock files, so AMD runs unpinned (S3-D14).
+    log "autotune: AMD GPU, clock lock skipped (pods write no DPM or clock files)"
+    # The sw WSI blits every present, so the frame cap goes through
+    # gs_sw_fps_clamp (S3-D9 (4)). Clip and nade batches keep a positive cap:
+    # their launch paths size it for grid pacing, which bounds each capture.
+    local cap="${CS2_FPS_MAX:-}"
+    if { [ "${CLIP_BATCH_MODE:-0}" != 1 ] && [ "${NADE_BATCH_MODE:-0}" != 1 ]; } || ! [ "${cap:-0}" -gt 0 ] 2>/dev/null; then
+      cap="$(gs_sw_fps_clamp "$cap")"
+    fi
+    if [ "$cap" != "${CS2_FPS_MAX:-}" ]; then
+      log "autotune: sw WSI frame cap: fps_max ${CS2_FPS_MAX:-unset} -> $cap (GS_SW_WSI_FPS_MAX)"
+      CS2_FPS_MAX="$cap"
+    fi
+  else
+    lock_gpu_clocks
+  fi
 }

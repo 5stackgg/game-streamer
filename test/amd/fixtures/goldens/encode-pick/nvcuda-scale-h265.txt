@@ -1,0 +1,11 @@
+rc=0
+== stdout
+cudaupload ! cudaconvertscale ! video/x-raw(memory:CUDAMemory),format=NV12,width=1920,height=1080,framerate=60/1
+== stderr
+[enc]   scaler: cudaconvertscale (GPU scale+convert)
+== calls
+gst-inspect-1.0 nvcudah265enc
+gst-inspect-1.0 cudaupload
+gst-launch-1.0 -q videotestsrc num-buffers=1 \! video/x-raw\,format=NV12\,width=320\,height=240\,framerate=30/1 \! cudaupload \! nvcudah265enc preset=p4 tune=low-latency rate-control=cbr gop-size=60 bitrate=2000 \! fakesink sync=false
+gst-inspect-1.0 cudaupload
+gst-inspect-1.0 cudaconvertscale

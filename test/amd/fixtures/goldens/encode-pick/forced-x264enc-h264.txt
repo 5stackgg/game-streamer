@@ -1,0 +1,6 @@
+rc=0
+== stdout
+x264enc tune=zerolatency speed-preset=veryfast bitrate=12000 key-int-max=60
+== stderr
+[enc]   encoder: x264enc (software fallback)
+== calls

@@ -1,0 +1,8 @@
+rc=1
+== stdout
+
+== stderr
+[enc]   encoder: no NVENC HEVC encoder available @EMDASH@ caller will fall back to h264
+== calls
+gst-inspect-1.0 nvcudah265enc
+gst-inspect-1.0 nvh265enc

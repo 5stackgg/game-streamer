@@ -1,0 +1,6 @@
+stdout:
+[game-streamer] set_cs2_launch_options: SteamID 76561198000000001 -> '__GL_SHADER_DISK_CACHE=1 %command%'
+stderr:
+
+python3:
+- @TMP@/steam/userdata/76561198000000001//config/localconfig.vdf 730 __GL_SHADER_DISK_CACHE=1\ %command%

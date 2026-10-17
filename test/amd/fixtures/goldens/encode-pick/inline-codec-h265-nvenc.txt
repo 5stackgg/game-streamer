@@ -1,0 +1,15 @@
+--- stderr
+[clip a1b2c3d4] final encode: h264_nvenc p6/hq 9M (max 14M)
+[inline-clip]   encoder: nvcudah265enc (GPU, modern API)
+[clip a1b2c3d4] h265 probe: gstreamer NVENC HEVC OK (pick=nvcudah265enc)
+[clip a1b2c3d4] h265 probe: ffmpeg hevc_nvenc OK (V....D hevc_nvenc NVIDIA NVENC hevc encoder (codec hevc))
+[clip a1b2c3d4] h265 selected for this render
+--- stdout
+codec=h265
+venc=-c:v hevc_nvenc -preset p5 -rc vbr -cq 24 -tag:v hvc1
+h264=-c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr -b:v 9M -maxrate 14M -bufsize 18M -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -b_ref_mode middle -pix_fmt yuv420p -profile:v high -level 4.2
+final_encoder=(unset)
+h265_ok=gst:1 ffmpeg:1
+--- ffmpeg
+-hide_banner -loglevel error -f lavfi -i color=c=gray:s=320x240:r=60 -frames:v 8 -c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr -b:v 9M -maxrate 14M -bufsize 18M -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3 -b_ref_mode middle -pix_fmt yuv420p -profile:v high -level 4.2 -f null -
+-hide_banner -encoders

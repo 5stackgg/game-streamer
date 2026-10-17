@@ -1,0 +1,1 @@
+  LIVE-DIAG demo-7: gpu(util,vramMiB,clkMHz,tempC)=100,24564,2805,83 | cs2cpu=312% capcpu=0% (composite=0) | audio srcout=?ms sinkin=?ms

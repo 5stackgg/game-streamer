@@ -1,0 +1,10 @@
+rc=0
+== stdout
+nvcudah264enc preset=p4 tune=low-latency rate-control=cbr gop-size=60 bitrate=12000 spatial-aq=true
+== stderr
+[enc]   encoder: nvcudah264enc (GPU, modern API)
+== calls
+gst-inspect-1.0 nvcudah264enc
+gst-inspect-1.0 cudaupload
+gst-launch-1.0 -q videotestsrc num-buffers=1 \! video/x-raw\,format=NV12\,width=320\,height=240\,framerate=30/1 \! cudaupload \! nvcudah264enc preset=p4 tune=low-latency rate-control=cbr gop-size=60 bitrate=2000 \! fakesink sync=false
+gst-inspect-1.0 nvcudah264enc

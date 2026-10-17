@@ -7,6 +7,7 @@
 // and offers it over a unix socket. This program binds that socket, mmaps the
 // shared image, and feeds frames into our GStreamer NVENC pipeline — nothing
 // touches the X server, so it can't stall cs2's render.
+// On AMD that pipeline encodes with VA-API instead, always from the host map.
 //
 // PROTOCOL (vendored in capture.h, from nowrep/obs-vkcapture, GPLv2):
 //   - We are the SERVER: bind abstract socket "\0/com/obsproject/vkcapture",
@@ -120,6 +121,9 @@ struct state {
     // layer, a driver that can't export it, the import fails) we ask for the
     // host-mapped image instead and upload each frame from it: same caps, just the
     // old copy cost. Off (default): the host-mapped wc_copy path below.
+    // On AMD the host map is the only path: live exports VKCAP_ZEROCOPY=0, clips set
+    // it to 0 on AMD whatever CLIP_ZEROCOPY says, and a non-zero value from elsewhere
+    // finds no CUDA there, so cuda_init fails and the consumer keeps the host map.
     bool        zerocopy;          // output CUDA memory (appsrc caps memory:CUDAMemory)
     bool        cuda_import;       // ask for / use the OPAQUE_FD import (else host map + upload)
     GstCudaContext *cuda_ctx;
@@ -298,6 +302,9 @@ static bool geometry_ok(const struct capture_texture_data *td, int nfd)
 // an OPAQUE_FD export, so the shared image stays DEVICE-LOCAL and CUDA imports it.
 // Still LINEAR + no modifiers, so it maps as a plain pitched buffer. (device_uuid
 // left zero — single GPU; the layer allocates on its own device.)
+// On AMD this always sends the default request (map_host=1, want_opaque_fd=0), and
+// device_uuid stays zero until the VA DMA_DRM import lands; that needs a GStreamer
+// with MR 12260, which the image's 1.24.2 lacks.
 static void send_control(int fd, bool capturing)
 {
     struct capture_control_data c = {0};

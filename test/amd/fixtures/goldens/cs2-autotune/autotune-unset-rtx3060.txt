@@ -1,0 +1,11 @@
+stdout:
+[game-streamer] autotune: gpu='NVIDIA GeForce RTX 3060' tier=high cores=8 GS_GPU_SCALE=auto (threads=engine auto-detect)
+[game-streamer] gpu clock lock: pinned graphics clock to 2100MHz (prevents downclock / P-state oscillation stutter)
+after: GS_GPU_SCALE=auto CS2_FPS_MAX=120
+stderr:
+
+nvidia-smi:
+--query-gpu=name --format=csv\,noheader
+--query-gpu=clocks.max.gr --format=csv\,noheader\,nounits
+-pm 1
+-lgc 2100\,2100

@@ -51,6 +51,8 @@ rm -f "${LOG_DIR}/status.boot.epoch" "${LOG_DIR}/status.last" \
 export MATCH_ID MATCH_PASSWORD
 start_status_reporter
 STREAM_ID="${OLD_MATCH_ID:-$MATCH_ID}"
-report_status status=live "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${STREAM_ID}"
+gs_encoder_marker
+report_status status=live "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${STREAM_ID}" \
+  "${GS_ENCODER_MARKER[@]}"
 
 log "switch-match flow done"

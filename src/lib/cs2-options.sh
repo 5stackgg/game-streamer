@@ -87,6 +87,12 @@ write_cs2_video_cfg() {
   done < <(echo "$overrides" | jq -r 'to_entries[] | "\(.key)\t\(.value)"')
   rm -f "${dst}.bak"
 
+  # AMD: CS2 checks VendorID against the GPU, so write AMD's 4098 (0x1002) in place of
+  # the template's NVIDIA 4318 (S3-D13). No DeviceID: the template has none.
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    sed -i -E 's/("VendorID"[[:space:]]+)"4318"/\1"4098"/' "$dst"
+  fi
+
   # CS2's auto-config pass rewrites cs2_video.txt on launch if the file
   # doesn't match its detected hardware (Version/VendorID/DeviceID etc).
   # Mark the file read-only so any rewrite attempt EACCES's and our

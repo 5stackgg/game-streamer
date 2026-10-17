@@ -1,0 +1,7 @@
+[warm-shaders] background compile settled after 7s
+[warm-shaders] shaders warmed on this node (@TMP@/steamlib/steamapps/common/Counter-Strike Global Offensive/.../steamapps/shadercache/730)
+-- exit status 0
+-- cache files
+@TMP@/steamlib/steamapps/shadercache/730/fozpipelinesv6/steam_pipeline_cache.foz
+-- calls
+pkill -9 -f /linuxsteamrt64/cs2

@@ -9,6 +9,10 @@
 # probe is `timeout`-guarded so a wedge reads as "not answering" in 5s instead
 # of hanging the whole boot before a single log line is emitted.
 xorg_running() {
+  if [ "${GS_GPU_VENDOR:-}" = amd ] && [ "$(gs_display_tier)" = C ]; then
+    _tier_c_running
+    return $?
+  fi
   pgrep -x Xorg >/dev/null 2>&1 && timeout 5 xdpyinfo -display "$DISPLAY" >/dev/null 2>&1
 }
 
@@ -74,6 +78,10 @@ _try_start_xorg_on() {
   # on the GPU). Every further Xorg blocks behind it, so walking on just stacks
   # more stuck servers onto the same GPU.
   if kill -0 "$xpid" 2>/dev/null; then
+    # S3-D12: AMD gets its own text, without the nvidia-modeset advice of the die below.
+    if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+      die "AMD GPU ${GS_GPU_PCI_ADDRESS:-(no address)}: Xorg on $disp (X config $XORG_CONFIG) hung during startup and survived SIGKILL, so it is stuck in the kernel and the walk over :${DISPLAY#:}..:$(( ${DISPLAY#:} + 9 )) stops at $disp. Read /var/log/Xorg.${n}.log and the node's dmesg; the node likely needs a reboot."
+    fi
     die "Xorg on $disp hung during startup and survived SIGKILL — GPU display engine is wedged (check the node's dmesg for 'nvidia-modeset ... waiting for GPU progress'); the node likely needs a reboot."
   fi
   return 1
@@ -109,6 +117,11 @@ _wait_for_foreign_streamer_x() {
     done
     [ -z "$held" ] && return 0
     if [ "$SECONDS" -ge "$deadline" ]; then
+      # S3-D12, S3-D23: on AMD the holder is another GPU Job on this node, and the
+      # nvidia-modeset advice of the die below does not apply.
+      if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+        die "AMD GPU ${GS_GPU_PCI_ADDRESS:-(no address)}: another GPU Job on this node (a stream, demo, render or bake) still holds $held: its X server is $how after ${max}s. One GPU Job per node is the limit, so this pod does not start a second X server. Wait for that Job to end. If no GPU Job runs on this node, an X server outside the streamer pods holds $held: set GS_X_DISPLAY_BASE to move the scanned range :$start_n..:$((start_n + 9))."
+      fi
       die "X server on $held is $how after ${max}s — a previous streamer pod on this node never released the GPU display (still running, or its Xorg is wedged in nvidia-modeset). Not starting a second GPU Xorg against it. If no other streamer pod is running on the node, it needs a reboot."
     fi
     if [ "$announced" -eq 0 ]; then
@@ -127,6 +140,9 @@ _wait_for_foreign_streamer_x() {
 # write must never block boot, so warn + continue. Idempotent (persists at the
 # driver level until reboot), so running it every boot is harmless.
 enable_gpu_persistence() {
+  # S3-D12: AMD has no persistence mode. On AMD this returns at once and says nothing,
+  # whether or not the image has nvidia-smi.
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then return 0; fi
   command -v nvidia-smi >/dev/null 2>&1 || { warn "nvidia-smi not found — skipping persistence mode"; return 0; }
   if timeout 15 nvidia-smi -pm 1 >/dev/null 2>&1; then
     log "nvidia persistence mode enabled (-pm 1)"
@@ -155,24 +171,201 @@ preflight_gpu() {
   command -v vulkaninfo >/dev/null 2>&1 \
     || { warn "gpu preflight: vulkaninfo not installed — skipping Vulkan checks"; return 0; }
 
-  local out; out=$(timeout 30 vulkaninfo 2>/dev/null) || true
+  # The Vulkan checks need a running X server: preflight_vulkan runs them after
+  # start_xorg (setup-steam.sh).
+}
+
+# preflight_vulkan: the Vulkan half of the GPU preflight (S3-D11). setup-steam.sh calls it
+# right after start_xorg: vulkaninfo 1.3.275 exits 1 without an X display, so these checks
+# never ran while they sat in preflight_gpu. One timeout 30 vulkaninfo run, with its stderr
+# in $LOG_DIR/vulkaninfo.err, feeds every check and $LOG_DIR/gpu_identity. On AMD a failed
+# check dies with a message that names the GPU address. On NVIDIA and with no vendor set,
+# each finding only WARNs, with today's text, until the NVIDIA hardware pass (S3-T19).
+# GS_SKIP_GPU_PREFLIGHT=1 skips the checks, the dies and vkcube; on AMD it still writes
+# gpu_identity, best effort. The output is matched with here-strings and never piped into
+# grep -q (S3-D31): past the 64 KB pipe buffer such a pipe can read a present pattern as
+# missing.
+preflight_vulkan() {
+  local out="" addr="${GS_GPU_PCI_ADDRESS:-}"
+  case "${GS_SKIP_GPU_PREFLIGHT:-0}" in
+    1|on|true|yes)
+      if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+        out=$(timeout 30 vulkaninfo 2>"$LOG_DIR/vulkaninfo.err") || true
+        _gs_vk_identity "$out"
+      fi
+      return 0
+      ;;
+  esac
+  case "${GS_GPU_VENDOR:-}" in
+    ''|amd|nvidia) ;;
+    *) warn "gpu preflight: GS_GPU_VENDOR='$GS_GPU_VENDOR' is neither amd nor nvidia; running the NVIDIA path" ;;
+  esac
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    if ! _gs_pci_check "$addr"; then
+      if [ -z "$addr" ]; then _GS_PCI_FAIL="presence (GS_GPU_PCI_ADDRESS is empty or unset)"; fi
+      die "AMD GPU address '$addr' (GS_GPU_PCI_ADDRESS) failed the ${_GS_PCI_FAIL} check, so this pod has no usable GPU. Compare it with 'lspci -D' on the node."
+    fi
+  elif ! command -v vulkaninfo >/dev/null 2>&1; then
+    return 0
+  fi
+  out=$(timeout 30 vulkaninfo 2>"$LOG_DIR/vulkaninfo.err") || true
+  _gs_vk_identity "$out"
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    _preflight_vulkan_checks "$out"
+  else
+    # Until S3-T19 passes, a failed check WARNs with today's text instead of dying. A
+    # separate commit after T19 calls _preflight_vulkan_checks directly (S3-D11).
+    ( die() { warn "$*"; exit 1; }; _preflight_vulkan_checks "$out" ) || true
+  fi
+}
+
+# _gs_vk_identity OUT: parses the vulkaninfo text OUT with one awk over a here-string. It
+# sets _GS_VK_N to the number of devices, and _GS_VK_NAME, _GS_VK_VID, _GS_VK_DID,
+# _GS_VK_INFO and _GS_VK_UUID (lowercase hex without hyphens) for the first device that is
+# not a CPU device, or for the first device when all are. When OUT lists a device it writes
+# $LOG_DIR/gpu_identity, one key=value per line; on AMD the last key is display_tier (A
+# until start_xorg writes $LOG_DIR/display_tier). Always returns 0.
+_gs_vk_identity() {
+  local kv k v wsi="" tier=""
+  _GS_VK_N=0 _GS_VK_NAME="" _GS_VK_VID="" _GS_VK_DID="" _GS_VK_INFO="" _GS_VK_UUID=""
+  kv=$(awk '
+    /^GPU[0-9]+:$/ { n++; next }
+    n == 0 { next }
+    { key = $1; v = $0; sub(/^[^=]*=[ \t]*/, "", v) }
+    key == "vendorID" && !(n in vid) { vid[n] = v }
+    key == "deviceID" && !(n in did) { did[n] = v }
+    key == "deviceType" && !(n in typ) { typ[n] = v }
+    key == "deviceName" && !(n in name) { name[n] = v }
+    key == "driverInfo" && !(n in info) { info[n] = v }
+    key == "pipelineCacheUUID" && !(n in uid) { gsub(/-/, "", v); uid[n] = tolower(v) }
+    END {
+      s = 0
+      for (i = 1; i <= n; i++) if (typ[i] != "PHYSICAL_DEVICE_TYPE_CPU") { s = i; break }
+      if (s == 0 && n > 0) s = 1
+      printf "n=%d\nname=%s\nvid=%s\ndid=%s\ninfo=%s\nuuid=%s\n", n, name[s], vid[s], did[s], info[s], uid[s]
+    }' <<<"$1") || kv=""
+  while IFS='=' read -r k v; do
+    case "$k" in
+      n) _GS_VK_N="$v" ;;
+      name) _GS_VK_NAME="$v" ;;
+      vid) _GS_VK_VID="$v" ;;
+      did) _GS_VK_DID="$v" ;;
+      info) _GS_VK_INFO="$v" ;;
+      uuid) _GS_VK_UUID="$v" ;;
+    esac
+  done <<<"$kv"
+  [ "${_GS_VK_N:-0}" -gt 0 ] 2>/dev/null || return 0
+  { read -r wsi < "$LOG_DIR/wsi_mode" || :; } 2>/dev/null
+  {
+    printf '%s\n' "name=$_GS_VK_NAME" "vendor_id=$_GS_VK_VID" "device_id=$_GS_VK_DID" \
+      "driver_info=$_GS_VK_INFO" "pipeline_cache_uuid=$_GS_VK_UUID" \
+      "pci_address=${GS_GPU_PCI_ADDRESS:-}" "render_node=${GS_RENDER_NODE:-}" \
+      "source=${GS_GPU_VENDOR_SOURCE:-}" "wsi=$wsi"
+    if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+      tier=$(gs_display_tier)
+      printf 'display_tier=%s\n' "${tier:-A}"
+    fi
+  } > "$LOG_DIR/gpu_identity"
+  return 0
+}
+
+# _preflight_vulkan_amd OUT: the AMD checks after the kept ones (S3-D11, S3-E4, S3-E5). It
+# logs the device and dies when more than one device is left after the filters or when the
+# Vulkan vendor:device differs from sysfs. It WARNs for shader_abort, for another GPU with
+# the same vendor:device, for self-detection and for a GS_RENDER_NODE hint that names
+# another node. On tier A it then runs the vkcube smoke test; on tier C the self-test in
+# start_xorg already ran vkcube on this X server.
+_preflight_vulkan_amd() {
+  local out="$1" addr="${GS_GPU_PCI_ADDRESS:-}" node="${GS_RENDER_NODE:-}"
+  local hint="${GS_RENDER_NODE_HINT:-}" vkid n dir class v d twins="" rc=0
+  vkid="${_GS_VK_VID#0x}:${_GS_VK_DID#0x}"
+  vkid="${vkid,,}"
+  log "gpu preflight: AMD GPU $addr: '$_GS_VK_NAME' ($vkid), driver '$_GS_VK_INFO', render node ${node:-none}, source ${GS_GPU_VENDOR_SOURCE:-none}"
+  if [ "$_GS_VK_N" -gt 1 ]; then
+    die "AMD GPU $addr: vulkaninfo lists $_GS_VK_N devices after the filters (MESA_VK_DEVICE_SELECT='${MESA_VK_DEVICE_SELECT:-}', VK_LOADER_DRIVERS_SELECT='${VK_LOADER_DRIVERS_SELECT:-}'), so cs2 could render on the wrong one. A MESA_VK_DEVICE_SELECT from the pod env without the trailing '!' lets the other devices through: remove it. Run 'vulkaninfo --summary' in the pod to list them."
+  fi
+  if [ "$vkid" != "$_GS_PCI_ID" ]; then
+    die "AMD GPU $addr: Vulkan reports vendor:device $vkid ('$_GS_VK_NAME') but sysfs has $_GS_PCI_ID for this address, so Vulkan is not using this pod's GPU. Check MESA_VK_DEVICE_SELECT in the pod env and $LOG_DIR/gpu_identity."
+  fi
+  n=$(grep -ci shader_abort <<<"$out") || true
+  if [ "${n:-0}" != 0 ]; then
+    warn "gpu preflight: AMD GPU $addr: vulkaninfo mentions shader_abort on $n line(s). Mesa 26.2 and later expose VK_KHR_shader_abort, and RADV turns its pipeline cache off when cs2 enables it, so every start compiles all shaders again. The image's Mesa is older, so another Mesa reached this pod: check driver_info in $LOG_DIR/gpu_identity."
+  fi
+  for dir in "${GS_SYSFS_ROOT:-/sys}"/bus/pci/devices/*; do
+    [ "${dir##*/}" != "$addr" ] || continue
+    class="" v="" d=""
+    { read -r class < "$dir/class" || :; } 2>/dev/null
+    case "$class" in 0x03????) ;; *) continue ;; esac
+    { read -r v < "$dir/vendor" || :; } 2>/dev/null
+    { read -r d < "$dir/device" || :; } 2>/dev/null
+    if [ "${v#0x}:${d#0x}" = "$_GS_PCI_ID" ]; then twins="$twins ${dir##*/}"; fi
+  done
+  if [ -n "$twins" ]; then
+    warn "gpu preflight: AMD GPU $addr: another GPU on this node has the same vendor:device $_GS_PCI_ID (${twins# }). MESA_VK_DEVICE_SELECT=$_GS_PCI_ID! cannot tell them apart, so Vulkan may use the other GPU instead of $addr."
+  fi
+  if [ "${GS_GPU_VENDOR_SOURCE:-}" = self ]; then
+    warn "gpu preflight: AMD GPU $addr was found by self-detection (GS_GPU_VENDOR_SOURCE=self), which is meant for docker run and development; Jobs from the api set GS_GPU_VENDOR and GS_GPU_PCI_ADDRESS."
+  fi
+  if [ -n "$hint" ] && [ "${hint##*/}" != "${node##*/}" ]; then
+    warn "gpu preflight: AMD GPU $addr: GS_RENDER_NODE from the pod env ($hint) differs from the render node derived from sysfs (${node:-none}), which is the one used. Render node numbers change across boots: remove GS_RENDER_NODE from the pod env."
+  fi
+  if [ "$(gs_display_tier)" != C ]; then
+    timeout 20 vkcube --c 60 > "$LOG_DIR/vkcube.log" 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      die "AMD GPU $addr: the vkcube smoke test (timeout 20 vkcube --c 60 on DISPLAY ${DISPLAY:-}) failed with exit $rc (124 means it timed out), so cs2 cannot present on this X server. See $LOG_DIR/vkcube.log: 'No DRI3 support detected' there means MESA_VK_WSI_DEBUG=sw is missing (see $LOG_DIR/wsi_mode). The device is in $LOG_DIR/gpu_identity."
+    fi
+  fi
+  return 0
+}
+
+# _preflight_vulkan_checks OUT: the checks preflight_gpu ran before the split, now over the
+# captured vulkaninfo text OUT, then the AMD ones or the vendorID check. On NVIDIA and with
+# no vendor, preflight_vulkan runs it with die turned into warn until S3-T19.
+_preflight_vulkan_checks() {
+  local out="$1"
   # No parseable output means vulkaninfo itself failed — not evidence against
   # the node, so don't fail a working pool on it.
-  if ! printf '%s\n' "$out" | grep -q 'Instance Extensions'; then
+  # On AMD, X is up by now, so no usable output is fatal, and the message carries the
+  # vulkaninfo.err tail (S3-E4).
+  if ! grep -q 'Instance Extensions' <<<"$out"; then
+    if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+      local err
+      err=$(tail -n 3 "$LOG_DIR/vulkaninfo.err" 2>/dev/null) || err=""
+      err="${err//$'\n'/ | }"
+      die "AMD GPU ${GS_GPU_PCI_ADDRESS:-}: vulkaninfo gave no usable output after X started (no 'Instance Extensions' section), so cs2 cannot use Vulkan here. The last lines of $LOG_DIR/vulkaninfo.err: ${err:-(empty)}"
+    fi
     warn "gpu preflight: vulkaninfo returned nothing usable — skipping Vulkan checks"
     return 0
   fi
 
   local ext missing=""
   for ext in VK_KHR_surface VK_KHR_xlib_surface; do
-    printf '%s\n' "$out" | grep -qE "^[[:space:]]*${ext}[[:space:]]*:" || missing="$missing $ext"
+    grep -qE "^[[:space:]]*${ext}[[:space:]]*:" <<<"$out" || missing="$missing $ext"
   done
+  if [ -n "$missing" ] && [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    die "AMD GPU ${GS_GPU_PCI_ADDRESS:-}: the Vulkan loader is missing WSI extension(s):${missing} after X started, so cs2 cannot create a swapchain and would crash on renderer init. The image's Mesa Vulkan driver and loader provide them: check the image build and $LOG_DIR/vulkaninfo.err."
+  fi
   [ -n "$missing" ] && die "Vulkan loader on this node is missing WSI extension(s):${missing}. cs2 can't create a swapchain and will segfault on renderer init (Steam logs 'BInit - Unable to initialize Vulkan'). Check the NVIDIA container runtime / ICD mounts on the node."
 
   # Only a software device (llvmpipe/lavapipe) → the ICD mount is missing; cs2
   # either crashes or renders at single-digit fps.
-  if ! printf '%s\n' "$out" | grep -qE 'PHYSICAL_DEVICE_TYPE_(DISCRETE|INTEGRATED|VIRTUAL)_GPU'; then
+  if ! grep -qE 'PHYSICAL_DEVICE_TYPE_(DISCRETE|INTEGRATED|VIRTUAL)_GPU' <<<"$out"; then
+    if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+      die "AMD GPU ${GS_GPU_PCI_ADDRESS:-}: no hardware Vulkan device after X started (only a CPU device such as llvmpipe, or none), so cs2 would crash or render at single-digit fps. Check VK_LOADER_DRIVERS_SELECT='${VK_LOADER_DRIVERS_SELECT:-}' (it must match the RADV driver), $LOG_DIR/vulkaninfo.err and $LOG_DIR/gpu_identity."
+    fi
     die "no hardware Vulkan device on this node (only software rasterizer, if any) — the NVIDIA ICD isn't reaching the pod. Check NVIDIA_DRIVER_CAPABILITIES and the container runtime."
+  fi
+
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    _preflight_vulkan_amd "$out"
+  else
+    case "${_GS_VK_VID,,}" in
+      0x10de|0x1002) ;;
+      *)
+        warn "gpu preflight: the Vulkan device '${_GS_VK_NAME}' has vendorID ${_GS_VK_VID:-none}, neither NVIDIA (0x10de) nor AMD (0x1002)"
+        return 0
+        ;;
+    esac
   fi
 
   log "gpu preflight: ok (Vulkan WSI + hardware device present)"
@@ -192,9 +385,451 @@ _xorg_try_displays() {
   return 1
 }
 
+# _xorg_wsi_probe: the Vulkan WSI path for the X server on $DISPLAY, on AMD (S3-D9, change
+# C7). start_xorg calls it once that server answers. RADV on an X server without DRI3 fails
+# with 'No DRI3 support detected' unless MESA_VK_WSI_DEBUG holds sw, so the probe writes sw
+# or hw to $LOG_DIR/wsi_mode, which gs_gpu_env reads in every later shell, and on sw it
+# exports MESA_VK_WSI_DEBUG=sw in this shell. A missing DRI3 and a failed or timed-out
+# xdpyinfo both give sw (S3-E6). The extension list is captured first and matched second
+# (S3-D31): a pipe into grep -q can read a present DRI3 as missing. On tier C
+# ($LOG_DIR/display_tier starts with C) it writes hw without asking, because the self-test
+# found DRI3 on this server moments before (S3-E27). A preset MESA_VK_WSI_DEBUG is always
+# kept; on tier A it WARNs when the preset lacks sw on a server without DRI3 (S3-E5).
+# GS_SKIP_GPU_PREFLIGHT does not skip it (S3-E9). Always returns 0.
+_xorg_wsi_probe() {
+  local ext=""
+  if [ "$(gs_display_tier)" = C ]; then
+    printf 'hw\n' > "$LOG_DIR/wsi_mode" 2>/dev/null || true
+    log "xorg: wsi_mode=hw on $DISPLAY (tier C: its self-test found DRI3)"
+    return 0
+  fi
+  ext=$(timeout 5 xdpyinfo -display "$DISPLAY" -queryExtensions 2>/dev/null) || ext=""
+  case "$ext" in
+    *DRI3*)
+      printf 'hw\n' > "$LOG_DIR/wsi_mode" 2>/dev/null || true
+      log "xorg: wsi_mode=hw on $DISPLAY (DRI3 listed)"
+      return 0
+      ;;
+  esac
+  printf 'sw\n' > "$LOG_DIR/wsi_mode" 2>/dev/null || true
+  case "${MESA_VK_WSI_DEBUG:-}" in
+    ''|*sw*) ;;
+    *) warn "xorg: MESA_VK_WSI_DEBUG='$MESA_VK_WSI_DEBUG' is preset without sw and is kept, but $DISPLAY lists no DRI3 (or xdpyinfo failed), so RADV can fail with 'No DRI3 support detected'" ;;
+  esac
+  : "${MESA_VK_WSI_DEBUG:=sw}"
+  export MESA_VK_WSI_DEBUG
+  log "xorg: wsi_mode=sw on $DISPLAY (no DRI3 listed, or xdpyinfo failed), MESA_VK_WSI_DEBUG=$MESA_VK_WSI_DEBUG"
+  return 0
+}
+
+# Tier C is opt-in. The image default remains A until a separate approved change.
+_GS_DISPLAY_TIER_DEFAULT=A
+_GS_TIER_PICK=""
+
+_resolve_display_tier() {
+  _GS_TIER_PICK=""
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 0
+  rm -f "$LOG_DIR/display_tier"
+  local requested="${GS_DISPLAY_TIER:-}"
+  case "${MESA_VK_WSI_DEBUG:-}" in
+    *sw*)
+      _GS_TIER_PICK='A forced:MESA_VK_WSI_DEBUG'
+      [ "$requested" != C ] || warn 'tier C requested with MESA_VK_WSI_DEBUG=sw; using tier A'
+      return 0
+      ;;
+  esac
+  case "$requested" in
+    A|C) _GS_TIER_PICK="$requested requested" ;;
+    '') _GS_TIER_PICK="$_GS_DISPLAY_TIER_DEFAULT default" ;;
+    *)
+      warn "invalid GS_DISPLAY_TIER='$requested'; using image default $_GS_DISPLAY_TIER_DEFAULT"
+      _GS_TIER_PICK="$_GS_DISPLAY_TIER_DEFAULT default"
+      ;;
+  esac
+  return 0
+}
+# Keep the raw server log for the self-test and a line-buffered tagged pod log.
+# nohup execs the command, so SPAWNED_PID identifies the server itself.
+_spawn_logged_to() {
+  local tag="$1" file="$2"
+  shift 2
+  nohup "$@" > >(tee -a "$file" | awk "${GS_AWK_LINES[@]}" -v t="$tag" \
+    '!/Could not resolve keysym XF86|Errors from xkbcomp are not fatal/ {print "["t"] " $0; fflush()}' >&2) 2>&1 &
+  SPAWNED_PID=$!
+}
+# Every persisted PID is paired with comm. Never signal a reused PID.
+_tier_c_alive() {
+  local pid="${1:-}" comm="${2:-}" now="" state="" proc="${GS_PROC_ROOT:-/proc}"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  IFS= read -r now < "$proc/$pid/comm" 2>/dev/null || return 1
+  [ -z "$comm" ] || [ "$now" = "$comm" ] || return 1
+  if [ -r "$proc/$pid/stat" ]; then
+    IFS= read -r state < "$proc/$pid/stat" || state=""
+    state="${state##*) }"
+    [ "${state%% *}" != Z ] || return 1
+  fi
+  return 0
+}
+
+_tier_c_read_pid() {
+  local pid="" comm=""
+  [ -r "$1" ] || return 1
+  read -r pid comm < "$1" || return 1
+  [ -n "$comm" ] && _tier_c_alive "$pid" "$comm" || return 1
+  printf '%s' "$pid"
+}
+
+_tier_c_record_pid() {
+  local pid="$1" file="$2" comm=""
+  IFS= read -r comm < "${GS_PROC_ROOT:-/proc}/$pid/comm" || return 1
+  _tier_c_alive "$pid" "$comm" || return 1
+  printf '%s %s\n' "$pid" "$comm" > "$file"
+}
+
+# Stop Xwayland first, then weston. The combined grace is at most 10+5+2 seconds.
+# Plain kill is intentional: a shell function can model a kernel SIGKILL survivor.
+_tier_c_stop() {
+  local xw="${1:-}" weston="${2:-}" proc="${GS_PROC_ROOT:-/proc}"
+  local pid name limit deadline comm="" rc=0 i state=""
+  local pids=("$xw" "$weston") names=(Xwayland weston) limits=(10 5) comms=('' '')
+  for i in 0 1; do
+    pid="${pids[$i]}" name="${names[$i]}" limit="${limits[$i]}"
+    _tier_c_alive "$pid" || continue
+    IFS= read -r comm < "$proc/$pid/comm" || continue
+    comms[i]="$comm"
+    log "tier C stop: SIGTERM to $name $pid"
+    kill -TERM "$pid" 2>/dev/null || true
+    deadline=$((SECONDS + limit))
+    while _tier_c_alive "$pid" "$comm" && [ "$SECONDS" -lt "$deadline" ]; do
+      sleep 0.5
+    done
+  done
+  for i in 0 1; do
+    pid="${pids[$i]}" comm="${comms[$i]}"
+    if [ -z "$comm" ] || ! _tier_c_alive "$pid" "$comm"; then continue; fi
+    rc=1
+    warn "tier C stop: PID $pid ignored SIGTERM, sending SIGKILL"
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+  deadline=$((SECONDS + 2))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    local live=0
+    for i in 0 1; do
+      [ -n "${comms[$i]}" ] && _tier_c_alive "${pids[$i]}" "${comms[$i]}" && live=1
+    done
+    [ "$live" = 1 ] || break
+    sleep 0.5
+  done
+  for i in 0 1; do
+    pid="${pids[$i]}" comm="${comms[$i]}"
+    [ -n "$comm" ] || continue
+    if _tier_c_alive "$pid" "$comm"; then
+      IFS= read -r state < "$proc/$pid/stat" || state='unknown'
+      state="${state##*) }"
+      warn "tier C stop: PID $pid survived SIGKILL (state ${state%% *})"
+    else
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  return "$rc"
+}
+
+_tier_c_cleanup() {
+  rm -rf /tmp/gs-weston
+  rm -f "$LOG_DIR/weston.pid" "$LOG_DIR/xwayland.pid"
+}
+# Stage helpers return through these globals; they never print a value into a caller's
+# command substitution. The coordinator writes fallback status before stopping anything.
+_GS_TIER_REASON=""
+_GS_TIER_DETAIL=""
+_GS_TIER_LOG=""
+_GS_TIER_WESTON=""
+_GS_TIER_XW=""
+
+_tier_c_fail() {
+  _GS_TIER_REASON="$1" _GS_TIER_DETAIL="$2" _GS_TIER_LOG="${3:-}"
+  return 1
+}
+
+_tier_c_exit_detail() {
+  local pid="$1" rc=0
+  wait "$pid" 2>/dev/null || rc=$?
+  if [ "$rc" -gt 128 ]; then
+    _GS_TIER_DETAIL="signal $((rc-128))"
+  else
+    _GS_TIER_DETAIL="exit $rc"
+  fi
+}
+
+_tier_c_check_weston() {
+  local file="$LOG_DIR/weston.log" renderer="" device="" deadline=$((SECONDS+5))
+  while :; do
+    if ! _tier_c_alive "$_GS_TIER_WESTON"; then
+      _tier_c_exit_detail "$_GS_TIER_WESTON"
+      _tier_c_fail weston-failed "$_GS_TIER_DETAIL" "$file"
+      return 1
+    fi
+    renderer=$(awk '/GL renderer:/{line=$0} END{print line}' "$file" 2>/dev/null) || renderer=""
+    [ -z "$renderer" ] || break
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.2
+  done
+  case "$renderer" in
+    *radeonsi*) ;;
+    *) _tier_c_fail weston-renderer "${renderer:-no GL renderer line within 5s}" "$file"; return 1 ;;
+  esac
+  if grep -qF 'warning: failed to query rendering device from EGL' "$file"; then
+    _tier_c_fail device-check 'unknown: failed to query rendering device from EGL' "$file"
+    return 1
+  fi
+  device=$(awk '/Using rendering device:/{sub(/^.*Using rendering device:[[:space:]]*/, ""); line=$0} END{print line}' "$file")
+  if [ -n "$device" ] && [ "$device" != "${GS_RENDER_NODE:-}" ]; then
+    _tier_c_fail device-check "mismatch: weston opened $device, expected ${GS_RENDER_NODE:-none}" "$file"
+    return 1
+  fi
+  return 0
+}
+
+_tier_c_start_weston() {
+  rm -rf /tmp/gs-weston
+  mkdir -m 0700 /tmp/gs-weston || { _tier_c_fail weston-failed 'cannot create private runtime directory'; return 1; }
+  : > "$LOG_DIR/weston.log"
+  _spawn_logged_to weston "$LOG_DIR/weston.log" env -u DISPLAY -u WAYLAND_DISPLAY \
+    -u WAYLAND_SOCKET XDG_RUNTIME_DIR=/tmp/gs-weston weston --backend=headless \
+    --renderer=gl --shell=kiosk --no-config --idle-time=0 --width="$CS2_WIDTH" \
+    --height="$CS2_HEIGHT" --socket=gs-weston
+  _GS_TIER_WESTON="$SPAWNED_PID"
+  local deadline=$((SECONDS+10))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if ! _tier_c_alive "$_GS_TIER_WESTON"; then
+      _tier_c_exit_detail "$_GS_TIER_WESTON"
+      _tier_c_fail weston-failed "$_GS_TIER_DETAIL" "$LOG_DIR/weston.log"
+      return 1
+    fi
+    if [ -e /tmp/gs-weston/gs-weston ]; then
+      _tier_c_check_weston
+      return $?
+    fi
+    sleep 0.2
+  done
+  _tier_c_fail weston-failed 'timeout waiting 10s for /tmp/gs-weston/gs-weston' "$LOG_DIR/weston.log"
+}
+_GS_TIER_DISPLAY=""
+
+_tier_c_bound() {
+  grep -qs "@/tmp/.X11-unix/X${1}\$" "${GS_PROC_ROOT:-/proc}/net/unix"
+}
+
+# Match the listening socket, never an accepted connection with the same address.
+_tier_c_owns() {
+  local n="$1" pid="$2" owner="" inode="" fd target="" proc="${GS_PROC_ROOT:-/proc}"
+  owner=$(awk '{print $1+0}' "/tmp/.X${n}-lock" 2>/dev/null) || return 1
+  [ "$owner" = "$pid" ] || return 1
+  inode=$(awk -v path="@/tmp/.X11-unix/X$n" \
+    '$4=="00010000" && $6=="01" && $8==path {print $7}' "$proc/net/unix" 2>/dev/null) || return 1
+  [[ "$inode" =~ ^[0-9]+$ ]] || return 1
+  for fd in "$proc/$pid/fd/"*; do
+    target=$(readlink "$fd" 2>/dev/null) || continue
+    [ "$target" != "socket:[$inode]" ] || return 0
+  done
+  return 1
+}
+
+_tier_c_listen_failure() {
+  local file="$1" i
+  # tee may not have copied the server's last line when kill -0 first fails.
+  for ((i=0;i<=5;i++)); do
+    if grep -qE 'server already running|Cannot establish any listening sockets' "$file"; then
+      return 0
+    fi
+    [ "$i" = 5 ] || sleep 0.2
+  done
+  return 1
+}
+
+_tier_c_try_displays() {
+  local start_n="${DISPLAY#:}" n owner="" file="" deadline rc=0 detail=""
+  _GS_TIER_DISPLAY=""
+  for ((n=start_n;n<start_n+10;n++)); do
+    if timeout 5 xdpyinfo -display ":$n" >/dev/null 2>&1; then continue; fi
+    if [ -e "/tmp/.X${n}-lock" ]; then
+      owner=$(awk '{print $1+0}' "/tmp/.X${n}-lock" 2>/dev/null) || owner=""
+      if [[ "$owner" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner" 2>/dev/null; then continue; fi
+      rm -f "/tmp/.X${n}-lock" "/tmp/.X11-unix/X${n}"
+    fi
+    _tier_c_bound "$n" && continue
+    file="$LOG_DIR/xwayland.$n.log"
+    : > "$file"
+    _spawn_logged_to xwayland "$file" env -u WAYLAND_SOCKET \
+      WAYLAND_DISPLAY=/tmp/gs-weston/gs-weston Xwayland ":$n" \
+      -geometry "${CS2_WIDTH}x${CS2_HEIGHT}" -noreset -nolisten tcp -listen unix \
+      -s 0 -fakescreenfps 60 -verbose 3
+    _GS_TIER_XW="$SPAWNED_PID"
+    deadline=$((SECONDS+10))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+      if ! _tier_c_alive "$_GS_TIER_XW"; then
+        rc=0
+        wait "$_GS_TIER_XW" 2>/dev/null || rc=$?
+        if _tier_c_listen_failure "$file"; then
+          _tier_c_stop "$_GS_TIER_XW" '' || true
+          _GS_TIER_XW=""
+          break
+        fi
+        detail="exit $rc"
+        [ "$rc" -le 128 ] || detail="signal $((rc-128))"
+        _tier_c_fail xwayland-failed "$detail: $(tail -n 1 "$file")" "$file"
+        return 1
+      fi
+      if timeout 5 xdpyinfo -display ":$n" >/dev/null 2>&1; then
+        if _tier_c_owns "$n" "$_GS_TIER_XW"; then
+          _GS_TIER_DISPLAY=":$n"
+          return 0
+        fi
+        log "tier C: ownership mismatch on :$n; stopping our Xwayland and trying next display"
+        _tier_c_stop "$_GS_TIER_XW" '' || true
+        _GS_TIER_XW=""
+        break
+      fi
+      sleep 0.5
+    done
+    if [ -n "$_GS_TIER_XW" ]; then
+      _tier_c_fail xwayland-failed 'timeout waiting 10s for Xwayland readiness' "$file"
+      return 1
+    fi
+  done
+  _tier_c_fail no-free-display "all displays :$start_n..:$((start_n+9)) are held or failed ownership"
+}
+# Return a de-duplicated list of render-node targets for one server, or no value
+# when the fd directory is unreadable. No GPU state is written.
+_tier_c_render_nodes() {
+  local dir="${GS_PROC_ROOT:-/proc}/$1/fd" fd target="" nodes=" "
+  [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || return 1
+  for fd in "$dir/"*; do
+    [ -L "$fd" ] || continue
+    target=$(readlink "$fd" 2>/dev/null) || return 1
+    case "$target" in
+      /dev/dri/renderD[0-9]*)
+        case "$nodes" in *" $target "*) ;; *) nodes="$nodes$target " ;; esac
+        ;;
+    esac
+  done
+  printf '%s' "${nodes# }"
+}
+
+_tier_c_check_devices() {
+  local a="" b="" node="" device="" vendor="" sys="${GS_SYSFS_ROOT:-/sys}"
+  a=$(_tier_c_render_nodes "$_GS_TIER_WESTON") || a=""
+  b=$(_tier_c_render_nodes "$_GS_TIER_XW") || b=""
+  if [ -z "$a" ] || [ -z "$b" ]; then
+    _tier_c_fail device-check "unknown: render fds weston=<$a> Xwayland=<$b>"
+    return 1
+  fi
+  if [ "$a" != "${GS_RENDER_NODE:-} " ] || [ "$b" != "$a" ]; then
+    _tier_c_fail device-check "mismatch: render fds weston=<$a> Xwayland=<$b>, expected ${GS_RENDER_NODE:-none}"
+    return 1
+  fi
+  node="${GS_RENDER_NODE##*/}"
+  device=$(readlink -f "$sys/class/drm/$node/device" 2>/dev/null) || device=""
+  if [ -z "$device" ] || ! IFS= read -r vendor < "$device/vendor"; then
+    _tier_c_fail device-check 'unknown: unreadable render-node sysfs'
+    return 1
+  fi
+  if [ "${device##*/}" != "${GS_GPU_PCI_ADDRESS:-}" ] || [ "$vendor" != 0x1002 ]; then
+    _tier_c_fail device-check "mismatch: sysfs address=${device##*/} vendor=$vendor"
+    return 1
+  fi
+  return 0
+}
+
+_tier_c_servers_alive() {
+  if ! _tier_c_alive "$_GS_TIER_WESTON"; then
+    _tier_c_exit_detail "$_GS_TIER_WESTON"
+    _tier_c_fail weston-failed "$_GS_TIER_DETAIL" "$LOG_DIR/weston.log"
+    return 1
+  fi
+  if ! _tier_c_alive "$_GS_TIER_XW"; then
+    _tier_c_exit_detail "$_GS_TIER_XW"
+    _tier_c_fail xwayland-failed "$_GS_TIER_DETAIL" "$LOG_DIR/xwayland.${_GS_TIER_DISPLAY#:}.log"
+    return 1
+  fi
+  return 0
+}
+
+_tier_c_selftest() {
+  local disp="$_GS_TIER_DISPLAY" file="$LOG_DIR/xwayland.${_GS_TIER_DISPLAY#:}.log"
+  local out="" root="" mode="" vk="" selected="" rc=0 line=""
+  _tier_c_servers_alive || return 1
+  # EGLStream probing can fail before the working GBM backend is selected.
+  # Its informational "Missing Wayland requirements" line does not mean
+  # glamor or DRI3 failed; the live extension and render-fd checks below
+  # establish those requirements independently.
+  line=$(awk '/Failed to initialize glamor|Failed to initialize dri3|Refusing to try glamor on llvmpipe|wl_drm.*not supported/{bad=$0} END{print bad}' "$file")
+  if [ -n "$line" ]; then _tier_c_fail no-dri3 "$line" "$file"; return 1; fi
+  out=$(timeout 5 xdpyinfo -display "$disp" -queryExtensions 2>/dev/null) || out=""
+  _tier_c_servers_alive || return 1
+  case "$out" in *DRI3*) ;; *) _tier_c_fail no-dri3 'DRI3 absent or xdpyinfo timed out' "$file"; return 1 ;; esac
+  _tier_c_check_devices || return 1
+  out=$(timeout 5 xdpyinfo -display "$disp" 2>/dev/null) || out=""
+  root=$(awk '/dimensions:/{value=$2} END{print value}' <<< "$out")
+  out=$(timeout 5 xrandr -display "$disp" --current 2>/dev/null) || out=""
+  mode=$(awk '/\*/{value=$1} END{print value}' <<< "$out")
+  _tier_c_servers_alive || return 1
+  if [ "$root" != "$CS2_DISPLAY_RES" ] || [ "$mode" != "$CS2_DISPLAY_RES" ]; then
+    _tier_c_fail root-size "root=${root:-unknown} mode=${mode:-unknown} expected=$CS2_DISPLAY_RES" "$file"
+    return 1
+  fi
+  vk=$(DISPLAY="$disp" env -u MESA_VK_WSI_DEBUG -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
+    timeout 20 vkcube --c 60 2>&1) || rc=$?
+  _tier_c_servers_alive || return 1
+  selected=$(awk '/Selected GPU/{line=$0} END{print line}' <<< "$vk")
+  if [ "$rc" != 0 ] || ! [[ "$selected" == *RADV* && "$selected" != *Cpu* ]]; then
+    line=$(tail -n 1 <<< "$vk")
+    _tier_c_fail vkcube-failed "exit $rc: $line" "$file"
+    return 1
+  fi
+  return 0
+}
+_start_tier_c() {
+  local old_xw="" old_weston="" last=""
+  old_xw=$(_tier_c_read_pid "$LOG_DIR/xwayland.pid") || old_xw=""
+  old_weston=$(_tier_c_read_pid "$LOG_DIR/weston.pid") || old_weston=""
+  _tier_c_stop "$old_xw" "$old_weston" || true
+  _tier_c_cleanup
+  _GS_TIER_XW="" _GS_TIER_WESTON="" _GS_TIER_REASON="" _GS_TIER_DETAIL="" _GS_TIER_LOG=""
+  if [ -z "${GS_RENDER_NODE:-}" ] || [ ! -e "$GS_RENDER_NODE" ]; then
+    _tier_c_fail no-render-node "render node ${GS_RENDER_NODE:-unset} is unavailable" || true
+  elif _tier_c_start_weston && _tier_c_try_displays && _tier_c_selftest; then
+    if _tier_c_record_pid "$_GS_TIER_WESTON" "$LOG_DIR/weston.pid" \
+      && _tier_c_record_pid "$_GS_TIER_XW" "$LOG_DIR/xwayland.pid"; then
+      printf '%s\n' "$_GS_TIER_PICK" > "$LOG_DIR/display_tier"
+      XORG_FOUND="$_GS_TIER_DISPLAY"
+      return 0
+    fi
+    _tier_c_servers_alive || true
+    if [ -z "$_GS_TIER_REASON" ]; then
+      _tier_c_fail device-check 'unknown: cannot persist server PID identity' || true
+    fi
+  fi
+  printf 'A fallback:%s\n' "${_GS_TIER_REASON:-unknown}" > "$LOG_DIR/display_tier"
+  if [ -n "$_GS_TIER_LOG" ]; then last=$(tail -n 1 "$_GS_TIER_LOG" 2>/dev/null) || last=""; fi
+  warn "tier C fallback:${_GS_TIER_REASON:-unknown}: $_GS_TIER_DETAIL${last:+; last log: $last}"
+  _tier_c_stop "$_GS_TIER_XW" "$_GS_TIER_WESTON" || true
+  _tier_c_cleanup
+  return 1
+}
+
+_tier_c_running() {
+  _tier_c_read_pid "$LOG_DIR/xwayland.pid" >/dev/null || return 1
+  _tier_c_read_pid "$LOG_DIR/weston.pid" >/dev/null || return 1
+  timeout 5 xdpyinfo -display "$DISPLAY" >/dev/null 2>&1
+}
 start_xorg() {
   if xorg_running; then
     log "xorg already up on $DISPLAY"
+  elif [ "${GS_GPU_VENDOR:-}" = amd ] && [ "$(gs_display_tier)" = C ] \
+    && _tier_c_read_pid "$LOG_DIR/xwayland.pid" >/dev/null; then
+    die "display server on $DISPLAY is present but tier C is unresponsive or incomplete; see $LOG_DIR/weston.log and $LOG_DIR/xwayland.${DISPLAY#:}.log"
   elif pgrep -x Xorg >/dev/null 2>&1; then
     # Xorg process present but it just failed xorg_running's timeout probe →
     # WEDGED (GPU/DRM modeset hang). It's unkillable (D state) and a fresh Xorg
@@ -211,8 +846,16 @@ start_xorg() {
     # bind-mount /tmp/.X11-unix into the pod — that collides with our
     # bind. Walk forward until we find a display we can actually claim,
     # then re-export DISPLAY so ximagesrc/xdotool/spectator follow.
-    local found=""
-    _xorg_try_displays && found="$XORG_FOUND"
+    local found="" tier=""
+    if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+      _resolve_display_tier
+      tier="${_GS_TIER_PICK%% *}"
+    fi
+    if [ "${tier:-}" = C ] && _start_tier_c; then
+      found="$XORG_FOUND"
+    else
+      _xorg_try_displays && found="$XORG_FOUND"
+    fi
 
     # COEXIST fallback: the nvidia walk failed with "no screens found" → the
     # GPU's display is owned by another X server (a host Ubuntu desktop on :0, or
@@ -231,13 +874,22 @@ start_xorg() {
           *)         dummy_cfg=xorg-coexist-1080p.conf ;;
         esac
       fi
+      # S3-D12: AMD gets its own line. The NVIDIA line below keeps its bytes, indent included.
+      if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+        log "xorg: AMD GPU ${GS_GPU_PCI_ADDRESS:-(no address)}: no display in :${DISPLAY#:}..:$(( ${DISPLAY#:} + 9 )) started with X config $XORG_CONFIG, and /var/log/Xorg.<n>.log reports 'no screens found' (those logs are cleared for the retry); retrying with offscreen dummy X ($dummy_cfg)"
+      else
       log "no screens found on every display — GPU scanout unavailable (owned by a host desktop, or the GPU has none); retrying with offscreen dummy X ($dummy_cfg). cs2 renders via the shared GPU render node and vkcapture still captures, provided the node has hardware Vulkan (see preflight_gpu)"
+      fi
       export XORG_CONFIG="$dummy_cfg"
       rm -f /var/log/Xorg.*.log 2>/dev/null || true   # clear so a later grep is fresh
       _xorg_try_displays && found="$XORG_FOUND"
     fi
 
     if [ -z "$found" ]; then
+      # S3-D12, S3-E7: on AMD one text replaces both dies below, without systemctl advice.
+      if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+        die "AMD GPU ${GS_GPU_PCI_ADDRESS:-(no address)}: Xorg failed to start on every display in :${DISPLAY#:}..:$(( ${DISPLAY#:} + 9 )) with X config $XORG_CONFIG. Read /var/log/Xorg.<n>.log for those displays. If other X servers hold that range, set GS_X_DISPLAY_BASE to scan another one."
+      fi
       if grep -qs 'no screens found' /var/log/Xorg.*.log; then
         die "Xorg can't get the GPU on this node — :0 is held ('server already running') and the GPU is already bound ('no screens found'), and the offscreen dummy-X fallback also failed. Free the GPU on the node (systemctl set-default multi-user.target && systemctl disable --now display-manager.service && systemctl isolate multi-user.target) or check GS_DUMMY_FALLBACK / the xorg-coexist configs."
       fi
@@ -247,6 +899,16 @@ start_xorg() {
       log "xorg: requested $DISPLAY was taken — running on $found instead"
       export DISPLAY="$found"
     fi
+  fi
+
+  if [ "${GS_GPU_VENDOR:-}" = amd ] && [ ! -e "$LOG_DIR/display_tier" ]; then
+    local line=""
+    case "${_GS_TIER_PICK:-}" in
+      A*) line=$_GS_TIER_PICK ;;
+      '') line='A default' ;;
+      *) line='A fallback:unknown'; warn 'tier C returned without a fallback line' ;;
+    esac
+    printf '%s\n' "$line" > "$LOG_DIR/display_tier"
   fi
 
   # Pin the resolved display so the next flow (run-demo / run-live, a
@@ -266,11 +928,23 @@ start_xorg() {
 
   # Mark this X as a streamer's — see _wait_for_foreign_streamer_x.
   xprop -root -f _GS_STREAMER 8s -set _GS_STREAMER "${HOSTNAME:-game-streamer}" >/dev/null 2>&1 || true
+
+  # AMD: the Vulkan WSI path for this X server, sw or hw (S3-D9).
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then _xorg_wsi_probe; fi
 }
 
 # SIGTERM and wait, so the nvidia driver releases the display in order. Leaving
 # Xorg for the container teardown means SIGKILL while it still owns the display.
 stop_xorg() {
+  if [ "${GS_GPU_VENDOR:-}" = amd ] && [ "$(gs_display_tier)" = C ]; then
+    pkill -x openbox 2>/dev/null || true
+    local xw="" weston="" rc=0
+    xw=$(_tier_c_read_pid "$LOG_DIR/xwayland.pid") || xw=""
+    weston=$(_tier_c_read_pid "$LOG_DIR/weston.pid") || weston=""
+    _tier_c_stop "$xw" "$weston" || rc=$?
+    _tier_c_cleanup
+    return "$rc"
+  fi
   pkill -x openbox 2>/dev/null || true
   pkill -x Xorg    2>/dev/null || true
   local i

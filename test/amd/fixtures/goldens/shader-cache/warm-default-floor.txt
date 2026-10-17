@@ -1,0 +1,23 @@
+mib=2
+vendor=unset GS_WARM_SHADERS=unset: warm
+vendor=unset GS_WARM_SHADERS=auto: warm
+vendor=unset GS_WARM_SHADERS=1: warm
+vendor=unset GS_WARM_SHADERS=on: warm
+vendor=unset GS_WARM_SHADERS=true: warm
+vendor=unset GS_WARM_SHADERS=yes: warm
+vendor=unset GS_WARM_SHADERS=0: skip
+vendor=unset GS_WARM_SHADERS=off: skip
+vendor=unset GS_WARM_SHADERS=false: skip
+vendor=unset GS_WARM_SHADERS=no: skip
+vendor=unset GS_WARM_SHADERS=bogus: warm
+vendor=nvidia GS_WARM_SHADERS=unset: warm
+vendor=nvidia GS_WARM_SHADERS=auto: warm
+vendor=nvidia GS_WARM_SHADERS=1: warm
+vendor=nvidia GS_WARM_SHADERS=on: warm
+vendor=nvidia GS_WARM_SHADERS=true: warm
+vendor=nvidia GS_WARM_SHADERS=yes: warm
+vendor=nvidia GS_WARM_SHADERS=0: skip
+vendor=nvidia GS_WARM_SHADERS=off: skip
+vendor=nvidia GS_WARM_SHADERS=false: skip
+vendor=nvidia GS_WARM_SHADERS=no: skip
+vendor=nvidia GS_WARM_SHADERS=bogus: warm

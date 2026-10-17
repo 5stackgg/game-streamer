@@ -6,6 +6,105 @@ LIB_DIR="$SRC_DIR/lib"
 FLOWS_DIR="$SRC_DIR/flows"
 export SRC_DIR LIB_DIR FLOWS_DIR
 
+# _gs_pci_check ADDR: 0 when ADDR names a PCI function that an AMD GPU job can use: the
+# lowercase sysfs name with the domain (0000:c6:00.0), a sysfs entry, vendor 0x1002 and a
+# drm/renderD* entry. Sets _GS_PCI_ID to <vendor>:<device> in lowercase hex without 0x and
+# _GS_PCI_RENDER to the renderD name. Otherwise it sets _GS_PCI_FAIL to the failed check
+# and returns 1. Silent: preflight_vulkan reports the failure. The hex letters are spelled
+# out so that no locale lets an uppercase name through.
+_gs_pci_check() {
+  local dir="${GS_SYSFS_ROOT:-/sys}/bus/pci/devices/$1" v="" d="" r
+  _GS_PCI_ID="" _GS_PCI_RENDER="" _GS_PCI_FAIL=""
+  if ! [[ "$1" =~ ^[0-9abcdef]{4}:[0-9abcdef]{2}:[0-9abcdef]{2}[.][0-7]$ ]]; then
+    _GS_PCI_FAIL="format (lowercase dddd:bb:dd.f with the domain)"
+    return 1
+  fi
+  if [ ! -d "$dir" ]; then
+    _GS_PCI_FAIL="sysfs entry ($dir)"
+    return 1
+  fi
+  { read -r v < "$dir/vendor" || :; } 2>/dev/null
+  { read -r d < "$dir/device" || :; } 2>/dev/null
+  if [ "$v" != 0x1002 ]; then
+    _GS_PCI_FAIL="vendor 0x1002 (sysfs vendor ${v:-unreadable})"
+    return 1
+  fi
+  for r in "$dir"/drm/renderD*; do
+    if [ -e "$r" ]; then _GS_PCI_RENDER="${r##*/}"; break; fi
+  done
+  if [ -z "$_GS_PCI_RENDER" ]; then
+    _GS_PCI_FAIL="render node (no $dir/drm/renderD*)"
+    return 1
+  fi
+  _GS_PCI_ID="${v#0x}:${d#0x}"
+}
+
+# gs_gpu_env: picks this pod's AMD GPU and exports the Vulkan selection for it. Inputs:
+# GS_GPU_VENDOR, GS_GPU_PCI_ADDRESS and the optional GS_RENDER_NODE hint. 'amd' plus a
+# valid address selects that device (source env); 'amd' with an address that fails
+# _gs_pci_check selects nothing, and preflight_vulkan dies. An address with no vendor takes
+# the vendor from sysfs (source pci). With neither set, a node with no NVIDIA driver and
+# exactly one AMD display device with a render node selects it (source self; docker run
+# and dev only). NVIDIA, and any value other than amd, export nothing. Pod env wins for
+# every export except GS_RENDER_NODE, which is always derived here because render node
+# numbers change across boots. The source and the hint are exported by the first shell
+# only, so the flows it starts keep its answer. GS_SYSFS_ROOT and GS_PROC_ROOT are test
+# prefixes. Silent: say, log and warn are defined further down.
+gs_gpu_env() {
+  local vendor="${GS_GPU_VENDOR:-}" addr="${GS_GPU_PCI_ADDRESS:-}" src="" mode=""
+  local devs="${GS_SYSFS_ROOT:-/sys}/bus/pci/devices" dir class v r found="" n=0
+  if [ "$vendor" = amd ]; then
+    src="env"
+  elif [ -n "$vendor" ]; then
+    return 0
+  elif [ -n "$addr" ]; then
+    v=""
+    { read -r v < "$devs/$addr/vendor" || :; } 2>/dev/null
+    [ "$v" = 0x1002 ] || return 0
+    src="pci"
+  else
+    [ -e "${GS_PROC_ROOT:-/proc}/driver/nvidia" ] && return 0
+    for dir in "$devs"/*; do
+      class="" v=""
+      { read -r class < "$dir/class" || :; } 2>/dev/null
+      case "$class" in 0x03????) ;; *) continue ;; esac
+      { read -r v < "$dir/vendor" || :; } 2>/dev/null
+      case "$v" in
+        0x10de) return 0 ;;
+        0x1002)
+          for r in "$dir"/drm/renderD*; do
+            if [ -e "$r" ]; then n=$((n + 1)); found="${dir##*/}"; break; fi
+          done
+          ;;
+      esac
+    done
+    [ "$n" -eq 1 ] || return 0
+    addr="$found"
+    src="self"
+    export GS_GPU_PCI_ADDRESS="$addr"
+  fi
+  export GS_GPU_VENDOR=amd
+  if [ -z "${GS_GPU_VENDOR_SOURCE+x}" ]; then
+    export GS_GPU_VENDOR_SOURCE="$src"
+    if [ -n "${GS_RENDER_NODE:-}" ]; then export GS_RENDER_NODE_HINT="$GS_RENDER_NODE"; fi
+  fi
+  : "${VK_LOADER_DRIVERS_SELECT:=*radeon*}"
+  export VK_LOADER_DRIVERS_SELECT
+  if _gs_pci_check "$addr"; then
+    : "${MESA_VK_DEVICE_SELECT:=$_GS_PCI_ID!}"
+    export MESA_VK_DEVICE_SELECT
+    export GS_RENDER_NODE="/dev/dri/$_GS_PCI_RENDER"
+  else
+    unset GS_RENDER_NODE
+  fi
+  { read -r mode < "$LOG_DIR/wsi_mode" || :; } 2>/dev/null
+  if [ "$mode" = sw ]; then
+    : "${MESA_VK_WSI_DEBUG:=sw}"
+    export MESA_VK_WSI_DEBUG
+  fi
+  return 0
+}
+
 : "${LOG_DIR:=/tmp/game-streamer}"
 # start_xorg may have to fall back off :0 when the host already runs a
 # desktop there. It records the resolved display in $LOG_DIR/display so
@@ -14,8 +113,24 @@ export SRC_DIR LIB_DIR FLOWS_DIR
 # and then forks setup-steam / execs run-demo with that stale :0 still
 # in their env — the file is the only source of truth across the
 # fork/exec boundary.
+# On AMD, until start_xorg writes that file, the block after the gs_gpu_env call below
+# moves the first display to :20 (or GS_X_DISPLAY_BASE) instead.
 if [ -r "$LOG_DIR/display" ]; then
   DISPLAY=$(cat "$LOG_DIR/display" 2>/dev/null)
+fi
+# Pick the GPU first: the defaults below that depend on the vendor read its exports.
+gs_gpu_env
+# AMD only: X starts at base display :20, or at GS_X_DISPLAY_BASE when that is a whole
+# number, and start_xorg then scans and claims :<base> to :<base+9>. The pods run on the
+# host network and see the host's X sockets, so :20 keeps clear of a host desktop (:0 and
+# :1) and of xrdp (:10 and up). The assignment is explicit because the image sets
+# ENV DISPLAY=:0: on AMD a DISPLAY from the pod env is ignored until start_xorg writes
+# $LOG_DIR/display.
+if [ ! -r "$LOG_DIR/display" ] && [ "${GS_GPU_VENDOR:-}" = amd ]; then
+  _b="${GS_X_DISPLAY_BASE:-20}"
+  case "$_b" in ''|*[!0-9]*) _b=20 ;; esac
+  DISPLAY=":$_b"
+  unset _b
 fi
 : "${DISPLAY:=:0}"
 : "${XDG_RUNTIME_DIR:=/tmp/xdg-runtime-root}"
@@ -43,6 +158,15 @@ fi
 : "${CS2_DISPLAY_RES:=1920x1080}"
 CS2_WIDTH="${CS2_DISPLAY_RES%x*}"
 CS2_HEIGHT="${CS2_DISPLAY_RES#*x}"
+# On AMD the dummy X server runs next to the host's own display server, so the default is
+# the coexist config. An explicit XORG_CONFIG still wins, then GS_DUMMY_CONFIG. The case
+# below then finds XORG_CONFIG set and keeps it; NVIDIA and unset run it unchanged.
+if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+  case "$CS2_DISPLAY_RES" in
+    2560x1440) : "${XORG_CONFIG:=${GS_DUMMY_CONFIG:-xorg-coexist-1440p.conf}}" ;;
+    *)         : "${XORG_CONFIG:=${GS_DUMMY_CONFIG:-xorg-coexist-1080p.conf}}" ;;
+  esac
+fi
 # Pick the matching Xorg dummy config. Unknown resolutions fall back
 # to 1080p — only the configs we ship work, anything else would die
 # at Xorg startup. The available set is intentionally narrow: 1080p
@@ -83,6 +207,100 @@ die()  {
     sleep "${STATUS_DIE_FLUSH_SECONDS:-3}" 2>/dev/null || true
   fi
   exit 1
+}
+
+# gs_display_tier: prints this pod's display tier, A or C: the first word of
+# $LOG_DIR/display_tier, which start_xorg writes once per pod on AMD. It prints nothing
+# unless GS_GPU_VENDOR is amd and the file exists, and always returns 0. It uses bash
+# builtins only (read -r), so it forks nothing.
+gs_display_tier() {
+  local tier=""
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 0
+  [ -e "$LOG_DIR/display_tier" ] || return 0
+  { read -r tier _ < "$LOG_DIR/display_tier" || :; } 2>/dev/null
+  if [ -n "$tier" ]; then printf '%s\n' "$tier"; fi
+  return 0
+}
+
+# _gs_num FILE DIVISOR: sets _GS_NUM to the number on the first line of FILE divided by
+# DIVISOR, rounded down, or to '?' when FILE is missing or unreadable or that line is not
+# 1 to 18 digits.
+_gs_num() {
+  local v=""
+  _GS_NUM="?"
+  { read -r v < "$1" || :; } 2>/dev/null
+  if [[ "$v" =~ ^[0-9]{1,18}$ ]]; then _GS_NUM=$((10#$v / $2)); fi
+  return 0
+}
+
+# _gs_hwmon DIR NAME: sets _GS_HWMON to DIR/hwmon/hwmon<n>/NAME for the lowest <n> whose
+# directory has NAME, or to "" when none has it. The numbers are compared as numbers, so
+# hwmon2 comes before hwmon10.
+_gs_hwmon() {
+  local h n low=""
+  _GS_HWMON=""
+  for h in "$1"/hwmon/hwmon*; do
+    n="${h##*/hwmon}"
+    [[ "$n" =~ ^[0-9]{1,9}$ ]] || continue
+    [ -e "$h/$2" ] || continue
+    if [ -z "$low" ] || [ "$((10#$n))" -lt "$((10#$low))" ]; then
+      low="$n"
+      _GS_HWMON="$h/$2"
+    fi
+  done
+  return 0
+}
+
+# gs_gpu_sample: one line of AMD GPU telemetry for the DIAG lines, read under
+# ${GS_SYSFS_ROOT:-/sys}/bus/pci/devices/$GS_GPU_PCI_ADDRESS:
+#   util=<pct> vramMiB=<n> clkMHz=<n> tempC=<n> vcn=<pct>
+# util is gpu_busy_percent, vramMiB is mem_info_vram_used in MiB, clkMHz is freq1_input
+# (Hz) in MHz and tempC is temp1_input (millidegrees) in degrees, both from the
+# lowest-numbered hwmon/hwmon* directory that has the file, and vcn is vcn_busy_percent.
+# Conversions round down. A field it cannot read, or whose file holds anything but digits,
+# prints as '?', and so does every field when the address is empty or malformed. Bash
+# builtins only: it writes nothing and always returns 0. AMD only: NVIDIA keeps nvidia-smi.
+# GS_SYSFS_ROOT is a test prefix.
+gs_gpu_sample() {
+  local addr="${GS_GPU_PCI_ADDRESS:-}" dir util="?" vram="?" clk="?" temp="?" vcn="?"
+  if [[ "$addr" =~ ^[0-9abcdef]{4}:[0-9abcdef]{2}:[0-9abcdef]{2}[.][0-7]$ ]]; then
+    dir="${GS_SYSFS_ROOT:-/sys}/bus/pci/devices/$addr"
+    _gs_num "$dir/gpu_busy_percent" 1
+    util="$_GS_NUM"
+    _gs_num "$dir/mem_info_vram_used" 1048576
+    vram="$_GS_NUM"
+    _gs_hwmon "$dir" freq1_input
+    if [ -n "$_GS_HWMON" ]; then _gs_num "$_GS_HWMON" 1000000; clk="$_GS_NUM"; fi
+    _gs_hwmon "$dir" temp1_input
+    if [ -n "$_GS_HWMON" ]; then _gs_num "$_GS_HWMON" 1000; temp="$_GS_NUM"; fi
+    _gs_num "$dir/vcn_busy_percent" 1
+    vcn="$_GS_NUM"
+  fi
+  printf 'util=%s vramMiB=%s clkMHz=%s tempC=%s vcn=%s\n' "$util" "$vram" "$clk" "$temp" "$vcn"
+  return 0
+}
+
+# gs_sw_fps_clamp VALUE: prints the cs2 frame cap to launch with. When $LOG_DIR/wsi_mode
+# holds sw (tier A on AMD, where every present is a CPU copy into X), a VALUE that is 0,
+# empty or above GS_SW_WSI_FPS_MAX (default 120) prints GS_SW_WSI_FPS_MAX. Otherwise, and
+# always without sw, it prints VALUE unchanged, so it changes nothing on tier C (hw) or on
+# NVIDIA (no wsi_mode file). A GS_SW_WSI_FPS_MAX that is not a whole number from 1 to
+# 999999999 counts as unset, and a VALUE that is not a number comes back unchanged. It
+# prints nothing else and returns 0.
+gs_sw_fps_clamp() {
+  local v="${1:-}" mode="" max="${GS_SW_WSI_FPS_MAX:-}" n
+  { read -r mode < "$LOG_DIR/wsi_mode" || :; } 2>/dev/null
+  if [ "$mode" = sw ]; then
+    [[ "$max" =~ ^[1-9][0-9]{0,8}$ ]] || max=120
+    if [ -z "$v" ]; then
+      v="$max"
+    elif [[ "$v" =~ ^[0-9]+$ ]]; then
+      n="${v#"${v%%[!0]*}"}"
+      if [ -z "$n" ] || [ "${#n}" -gt 9 ] || [ "$n" -gt "$max" ]; then v="$max"; fi
+    fi
+  fi
+  printf '%s\n' "$v"
+  return 0
 }
 
 # The spec-server refuses any call without this pod's SPEC_SERVER_TOKEN, so
@@ -147,6 +365,22 @@ spawn_logged() {
 # can't change for the life of the pod, so they're cached in a file.
 GS_PROBE_CACHE="${GS_PROBE_CACHE:-/tmp/game-streamer/gst-probes.env}"
 
+# Resolve policy on every call: the pod marker can appear after setup. Explicit
+# gpu/cpu wins; explicit auto has the same marker behavior as an absent value.
+# Stdout is only the mode, including when this function runs in $(...).
+gs_video_encoder_mode() {
+  case "${GS_VIDEO_ENCODER:-auto}" in
+    gpu|cpu) printf '%s' "$GS_VIDEO_ENCODER"; return 0 ;;
+    auto|'') ;;
+    *) warn "GS_VIDEO_ENCODER=${GS_VIDEO_ENCODER}: unrecognized, using auto" ;;
+  esac
+  if [ -e "${LOG_DIR:-/tmp/game-streamer}/cpu-fallback" ]; then
+    printf cpu-fallback
+  else
+    printf auto
+  fi
+}
+
 # Load <var> from the probe cache unless it's already set. 0 if it's set now.
 _probe_cache_load() {
   local var="$1" line
@@ -191,6 +425,12 @@ _nvenc_aq_props() {
 # with a probed preset (driver 550+ dropped legacy preset GUIDs so
 # strict validation rejects them), then x264enc. Cached in GS_NVENC_PICK
 # and the probe cache; override with GS_NVENC_ELEMENT.
+# On AMD a VA-API rung sits between nvh264enc and x264enc. Its pick is
+# va:<element> (vah264enc, or for example varenderD129h264enc on a second
+# render node): it names the element only, so it does not depend on the output
+# size. Each call checks the element at GS_ENC_DIMS with _gs_va_ok and, where it
+# is not usable at that size, warns and prints the x264enc string instead.
+# GS_NVENC_ELEMENT=va forces the rung.
 # Usage: pick_h264_pipeline <gop> <kbps> [live|clip]
 pick_h264_pipeline() {
   local gop="${1:?gop required}"
@@ -221,6 +461,28 @@ pick_h264_pipeline() {
     x264enc)
       printf 'x264enc tune=zerolatency speed-preset=veryfast bitrate=%s key-int-max=%s' \
         "$kbps" "$gop"
+      ;;
+    va:*)
+      # AMD (S4 C4): the VA element of the pick, used only where _gs_va_ok accepts it
+      # at the current output size (GS_ENC_DIMS). Where it does not, today's software
+      # string, so the encoder and pick_scale_convert, which runs the same check, fall
+      # back together (S4 error [5]).
+      local va_el="${GS_NVENC_PICK#va:}" why
+      if _gs_va_ok h264 "$va_el"; then
+        if [ "$mode" = clip ]; then
+          printf '%s rate-control=vbr target-percentage=80 bitrate=%s key-int-max=%s b-frames=0 target-usage=%s' \
+            "$va_el" "$kbps" "$gop" "${GS_VA_TARGET_USAGE:-4}"
+        else
+          printf '%s rate-control=%s target-percentage=95 bitrate=%s cpb-size=%s key-int-max=%s b-frames=0 ref-frames=1 target-usage=%s' \
+            "$va_el" "${GS_VA_RATE_CONTROL:-vbr}" "$kbps" "$kbps" "$gop" "${GS_VA_TARGET_USAGE:-4}"
+        fi
+      else
+        why="$(_gs_caps_get h264_reason)"
+        [ "$(gs_video_encoder_mode)" = gpu ] && return 1
+        warn "VA H.264 encoder not usable at ${GS_ENC_DIMS:-1920x1080} (reason=${why:-?}), using x264enc"
+        printf 'x264enc tune=zerolatency speed-preset=veryfast bitrate=%s key-int-max=%s' \
+          "$kbps" "$gop"
+      fi
       ;;
     *)
       # Nothing resolved: fail here rather than hand back an empty encoder, which
@@ -262,6 +524,34 @@ _resolve_h264_method() {
       warn "GS_NVENC_ELEMENT=nvh264enc forced but unavailable"
   fi
 
+  # AMD (S4-D3): the VA-API rung, after the NV rungs, which fail fast in an AMD pod (no
+  # NVIDIA library is injected there). It does not depend on the output size: the va:
+  # arms of the pickers and _active_encoder_is_va run _gs_va_ok at the current size.
+  # The pick goes to the probe cache here, since _ensure_nvenc_pick stores only nv*
+  # picks. A forced value other than auto or va skips the rung (reason forced-<value>).
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    local va_el va_why="forced-$force"
+    if [ "$force" = "auto" ] || [ "$force" = "va" ]; then
+      if va_el="$(gs_va_element h264enc)"; then
+        log "  encoder: $va_el (GPU, VA-API on ${GS_RENDER_NODE:-?})" >&2
+        _gs_caps_put h264 "va:$va_el"
+        local GS_NVENC_PICK="va:$va_el"
+        _probe_cache_store GS_NVENC_PICK
+        printf 'va:%s' "$va_el"
+        return 0
+      fi
+      va_why="$(_gs_caps_get element.h264enc)"
+      va_why="${va_why#none:}"
+    fi
+    [ "$(_gs_caps_get h264)" = x264enc ] || _gs_caps_put h264 x264enc
+    [ "$(_gs_caps_get h264_reason)" = "$va_why" ] || _gs_caps_put h264_reason "$va_why"
+  fi
+  [ "$force" = "va" ] && \
+    warn "GS_NVENC_ELEMENT=va forced but unavailable"
+  if [ "$(gs_video_encoder_mode)" = gpu ]; then
+    warn "video_encoder=gpu: no GPU H.264 encoder, not using x264enc"
+    return 1
+  fi
   log "  encoder: x264enc (software fallback)" >&2
   printf 'x264enc'
 }
@@ -328,6 +618,22 @@ pick_h265_pipeline() {
       printf 'nvh265enc preset=%s rc-mode=cbr gop-size=%s bitrate=%s' \
         "$preset" "$gop" "$h265_kbps"
       ;;
+    va:*)
+      # AMD (S4 C4): HEVC at GS_VA_H265_PCT percent of the H.264 rate (70 by default,
+      # the NVIDIA ratio above), used only where _gs_va_ok accepts the element at the
+      # current output size (GS_ENC_DIMS). Where it does not, return 1 so the caller
+      # falls back to H.264 (S4 error [5]).
+      local va_el="${GS_NVENC_PICK_H265#va:}"
+      _gs_va_ok h265 "$va_el" || return 1
+      h265_kbps=$((kbps * ${GS_VA_H265_PCT:-70} / 100))
+      if [ "$mode" = clip ]; then
+        printf '%s rate-control=vbr target-percentage=80 bitrate=%s key-int-max=%s b-frames=0 target-usage=%s' \
+          "$va_el" "$h265_kbps" "$gop" "${GS_VA_TARGET_USAGE:-4}"
+      else
+        printf '%s rate-control=%s target-percentage=95 bitrate=%s cpb-size=%s key-int-max=%s b-frames=0 ref-frames=1 target-usage=%s' \
+          "$va_el" "${GS_VA_RATE_CONTROL:-vbr}" "$h265_kbps" "$h265_kbps" "$gop" "${GS_VA_TARGET_USAGE:-4}"
+      fi
+      ;;
     none|"")
       return 1
       ;;
@@ -343,6 +649,9 @@ h265_available() {
   _ensure_nvenc_pick h265
   case "${GS_NVENC_PICK_H265:-none}" in
     none|"") return 1 ;;
+    # AMD (S4 C4): a va: pick counts only where _gs_va_ok accepts it at the current
+    # output size (GS_ENC_DIMS).
+    va:*)    _gs_va_ok h265 "${GS_NVENC_PICK_H265#va:}" ;;
     *)       return 0 ;;
   esac
 }
@@ -376,6 +685,28 @@ _resolve_h265_method() {
       warn "GS_NVENC_H265_ELEMENT=nvh265enc forced but unavailable — falling through"
   fi
 
+  # AMD (S4-D3): the VA-API rung for HEVC, as in _resolve_h264_method. The RDNA4 size
+  # rule and the trial run later, in _gs_va_ok. The forced va warning stays behind the
+  # vendor test here (S4 C3).
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    local va_el va_why="forced-$force"
+    if [ "$force" = "auto" ] || [ "$force" = "va" ]; then
+      if va_el="$(gs_va_element h265enc)"; then
+        log "  encoder: $va_el (GPU, VA-API on ${GS_RENDER_NODE:-?})" >&2
+        _gs_caps_put h265 "va:$va_el"
+        local GS_NVENC_PICK_H265="va:$va_el"
+        _probe_cache_store GS_NVENC_PICK_H265
+        printf 'va:%s' "$va_el"
+        return 0
+      fi
+      va_why="$(_gs_caps_get element.h265enc)"
+      va_why="${va_why#none:}"
+      [ "$force" = "va" ] && \
+        warn "GS_NVENC_H265_ELEMENT=va forced but unavailable, falling through"
+    fi
+    [ "$(_gs_caps_get h265)" = none ] || _gs_caps_put h265 none
+    [ "$(_gs_caps_get h265_reason)" = "$va_why" ] || _gs_caps_put h265_reason "$va_why"
+  fi
   log "  encoder: no NVENC HEVC encoder available — caller will fall back to h264" >&2
   printf 'none'
   return 1
@@ -420,7 +751,31 @@ _ensure_nvenc_pick() {
   case "${1:-h264}" in
     h265|hevc) var=GS_NVENC_PICK_H265 resolve=_resolve_h265_method ;;
   esac
-  _probe_cache_load "$var" && return 0
+  local mode
+  mode=$(gs_video_encoder_mode)
+  case "$mode" in
+    cpu|cpu-fallback)
+      local override=GS_NVENC_ELEMENT value=x264enc
+      if [ "$var" = GS_NVENC_PICK_H265 ]; then
+        override=GS_NVENC_H265_ELEMENT
+        value=none
+      fi
+      if [ -n "${!override:-}" ]; then
+        warn "video_encoder=$mode: $override=${!override} ignored"
+      fi
+      printf -v "$var" '%s' "$value"
+      export "${var?}"
+      return 0
+      ;;
+  esac
+  if _probe_cache_load "$var"; then
+    if [ "$mode" = gpu ] && [ "${!var:-}" = x264enc ]; then
+      warn "video_encoder=gpu: ignoring cached x264enc"
+      unset "$var"
+    else
+      return 0
+    fi
+  fi
   if [ "${2:-}" = quiet ]; then
     pick=$("$resolve" 2>/dev/null) || true
   else
@@ -436,6 +791,8 @@ _ensure_nvenc_pick() {
 # encoder (nvcuda*), which consumes CUDA memory and so must be fed an upload.
 # Self-heals a cold cache via _ensure_nvenc_pick so it's correct even when
 # called from a different subshell than the one that picked the encoder.
+# A VA-API pick (va:<element>, AMD only) is never CUDA, so this is false for it:
+# _active_encoder_is_va answers for VA-API, and pick_scale_convert asks it first.
 _active_encoder_is_cuda() {
   _ensure_nvenc_pick "${1:-h264}" quiet
   case "${1:-h264}" in
@@ -465,6 +822,341 @@ _cuda_scale_available() {
   [ "$GS_CUDASCALE_OK" = 1 ]
 }
 
+# VA-API encoder helpers (AMD). gs_va_element and the helpers after it return 1, or
+# do nothing, unless GS_GPU_VENDOR=amd, and the encoder_caps pair runs only from them
+# and from AMD branches, so NVIDIA pods define all of them and never run them. Stdout
+# rule, as for the resolvers above: a helper prints only its own result.
+# gst-inspect-1.0 and vainfo output is read into variables, trial output is appended
+# to encoder_trials.log, and logs go to stderr. Answers are kept in
+# ${LOG_DIR}/encoder_caps, append-only key=value lines where the last value for a key
+# wins: the file outlives the $(...) subshells the pickers run in, lives as long as
+# the pod, and is what capture-info.sh prints.
+
+# Print the last value written for KEY to encoder_caps and return 0, or print nothing
+# and return 1 when the key is absent.
+# Usage: _gs_caps_get KEY
+_gs_caps_get() {
+  local key="${1:-}" f="${LOG_DIR:-/tmp/game-streamer}/encoder_caps" line val="" hit=1
+  [ -n "$key" ] && [ -r "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$key="*) val="${line#"$key="}"; hit=0 ;;
+    esac
+  done < "$f"
+  [ "$hit" = 0 ] || return 1
+  printf '%s' "$val"
+}
+
+# Append KEY=VALUE to encoder_caps. Never fails its caller: a read-only or full LOG_DIR
+# loses the line and nothing else.
+# Usage: _gs_caps_put KEY VALUE
+_gs_caps_put() {
+  local key="${1:-}" val="${2-}" d="${LOG_DIR:-/tmp/game-streamer}"
+  [ -n "$key" ] || return 0
+  { mkdir -p "$d" && printf '%s=%s\n' "$key" "$val" >> "$d/encoder_caps"; } 2>/dev/null || true
+  return 0
+}
+
+# Print the VA element of <kind> that drives GS_RENDER_NODE and return 0, or print
+# nothing and return 1. Candidates in order: va<kind> (vah264enc, vah265enc,
+# vapostproc), then va<renderDNNN><kind> from the node's basename (for example
+# varenderD129h265enc), the name GStreamer gives the elements of a second device. A
+# candidate counts only when the Default of its read-only device-path property is
+# GS_RENDER_NODE. Writes element.<kind>=<element>, or none:<reason> with reason
+# no-render-node, no-element or device-mismatch, and answers later calls from it. The
+# first call also records vendor, render_node and pci.
+# Usage: gs_va_element <h264enc|h265enc|postproc>
+gs_va_element() {
+  local kind="${1:-}" node="${GS_RENDER_NODE:-}" cached el spec line dev in_prop
+  local found="" reason=no-render-node re='Default: "([^"]*)"'
+  [ "${GS_GPU_VENDOR:-}" = amd ] && [ -n "$kind" ] || return 1
+  if ! _gs_caps_get vendor >/dev/null; then
+    _gs_caps_put vendor amd
+    _gs_caps_put render_node "$node"
+    _gs_caps_put pci "${GS_GPU_PCI_ADDRESS:-}"
+  fi
+  if cached="$(_gs_caps_get "element.$kind")"; then
+    case "$cached" in
+      none:*|"") return 1 ;;
+    esac
+    printf '%s' "$cached"
+    return 0
+  fi
+  if [ -n "$node" ] && [ -c "$node" ]; then
+    reason=no-element
+    for el in "va$kind" "va${node##*/}$kind"; do
+      spec="$(gst-inspect-1.0 "$el" 2>/dev/null)" || continue
+      dev="" in_prop=0
+      while IFS= read -r line; do
+        if [ "$in_prop" = 0 ]; then
+          [[ "$line" =~ ^[[:space:]]*device-path[[:space:]]*: ]] || continue
+          in_prop=1
+        elif [[ "$line" =~ ^[[:space:]]{2}[^[:space:]] ]]; then
+          break
+        fi
+        if [[ "$line" =~ $re ]]; then
+          dev="${BASH_REMATCH[1]}"
+          break
+        fi
+      done <<< "$spec"
+      if [ "$dev" = "$node" ]; then
+        found="$el"
+        break
+      fi
+      reason=device-mismatch
+    done
+  fi
+  if [ -z "$found" ]; then
+    _gs_caps_put "element.$kind" "none:$reason"
+    return 1
+  fi
+  _gs_caps_put "element.$kind" "$found"
+  printf '%s' "$found"
+}
+
+# Run one trial pipeline: gst-launch-1.0 -q with the arguments given, under
+# timeout -k 5 20, its output appended to encoder_trials.log (dropped when that file
+# cannot be written). Retried once unless it timed out (rc 124 or 137). Caches
+# KEY=ok|fail:<rc>; 0 when it passed. The timeout ends only a user-space hang: a
+# process blocked in the kernel on a VCN fence is ended by the amdgpu job timeout and a
+# GPU reset alone (S4-D5).
+# Usage: _gs_va_launch KEY GST-ARG...
+_gs_va_launch() {
+  local key="${1:-}" tlog="${LOG_DIR:-/tmp/game-streamer}/encoder_trials.log" rc=1 n
+  shift
+  { mkdir -p "${tlog%/*}" && : >> "$tlog"; } 2>/dev/null || tlog=/dev/null
+  for n in 1 2; do
+    printf '== %s (run %s)\n' "$key" "$n" >> "$tlog" 2>/dev/null
+    timeout -k 5 20 gst-launch-1.0 -q "$@" < /dev/null >> "$tlog" 2>&1
+    rc=$?
+    case "$rc" in
+      0|124|137) break ;;
+    esac
+  done
+  if [ "$rc" = 0 ]; then
+    _gs_caps_put "$key" ok
+    return 0
+  fi
+  _gs_caps_put "$key" "fail:$rc"
+  return 1
+}
+
+# One-frame trial of a VA encoder at <WxH> (S4-D5): a videotestsrc frame through the VA
+# postproc (when one resolves) and the encoder with the fixed trial properties. Cached
+# for the pod's life as trial.<codec>.<element>.<WxH>; 0 when the frame was encoded.
+# Usage: _gs_va_trial <h264|h265> <element> <WxH>
+_gs_va_trial() {
+  local codec="${1:-}" el="${2:-}" dims="${3:-}" key cached pp parse=h264parse
+  local -a feed
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 1
+  key="trial.$codec.$el.$dims"
+  if cached="$(_gs_caps_get "$key")"; then
+    [ "$cached" = ok ]
+    return
+  fi
+  [ "$codec" = h265 ] && parse=h265parse
+  if pp="$(gs_va_element postproc)"; then
+    feed=(videotestsrc num-buffers=1
+      ! "video/x-raw,format=BGRA,width=${dims%x*},height=${dims#*x},framerate=60/1"
+      ! "$pp" ! "video/x-raw(memory:VAMemory),format=NV12")
+  else
+    feed=(videotestsrc num-buffers=1
+      ! "video/x-raw,format=NV12,width=${dims%x*},height=${dims#*x},framerate=60/1")
+  fi
+  _gs_va_launch "$key" "${feed[@]}" ! "$el" rate-control=vbr target-percentage=95 \
+    bitrate=8000 cpb-size=8000 key-int-max=120 b-frames=0 ref-frames=1 \
+    "target-usage=${GS_VA_TARGET_USAGE:-4}" ! "$parse" ! fakesink sync=false
+}
+
+# Print the GPU's family token, lowercased (gfx1151, navi31, polaris10 and so on): the
+# word after '(radeonsi, ' in vainfo's driver string unless it is a compiler name (llvm,
+# aco), else the word after '(RADV ' in the name field of gpu_identity. Prints nothing
+# when neither has one. Caches gfx, and device_id from gpu_identity.
+# Usage: _gs_va_gfx
+_gs_va_gfx() {
+  local gfx="" out="" line name="" did="" id="${LOG_DIR:-/tmp/game-streamer}/gpu_identity"
+  local re_si='\(radeonsi, ([^,)]*)' re_radv='\(radv ([^)]*)\)'
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 1
+  if gfx="$(_gs_caps_get gfx)"; then
+    printf '%s' "$gfx"
+    return 0
+  fi
+  gfx=""
+  if [ -n "${GS_RENDER_NODE:-}" ]; then
+    case "$(gs_video_encoder_mode)" in
+      cpu|cpu-fallback) ;;
+      *) out="$(vainfo --display drm --device "$GS_RENDER_NODE" 2>/dev/null)" || true ;;
+    esac
+  fi
+  out="${out,,}"
+  if [[ "$out" =~ $re_si ]]; then
+    gfx="${BASH_REMATCH[1]// /}"
+    case "$gfx" in
+      llvm*|aco) gfx="" ;;
+    esac
+  fi
+  if [ -r "$id" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        name=*) name="${line#name=}" ;;
+        device_id=*) did="${line#device_id=}" ;;
+      esac
+    done < "$id"
+  fi
+  name="${name,,}"
+  if [ -z "$gfx" ] && [[ "$name" =~ $re_radv ]]; then
+    gfx="${BASH_REMATCH[1]// /}"
+  fi
+  _gs_caps_put gfx "$gfx"
+  _gs_caps_put device_id "$did"
+  printf '%s' "$gfx"
+}
+
+# HEVC size rule (S4-D14): RDNA4 VCN hangs on sizes whose 16-aligned width or height is
+# not a multiple of 64. For such a size, prints the reason and returns 1 when the family
+# token is gfx12* (rdna4-dpb-size) or unknown (gfx-unknown-dpb-size); else 0.
+# Usage: _gs_va_rdna4_size_ok <WxH>
+_gs_va_rdna4_size_ok() {
+  local dims="${1:-1920x1080}" aw ah
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 1
+  [[ "$dims" =~ ^[0-9]+x[0-9]+$ ]] || dims=1920x1080
+  aw=$(( (${dims%x*} + 15) / 16 * 16 ))
+  ah=$(( (${dims#*x} + 15) / 16 * 16 ))
+  [ $(( aw % 64 )) = 0 ] && [ $(( ah % 64 )) = 0 ] && return 0
+  case "$(_gs_va_gfx)" in
+    gfx12*) printf 'rdna4-dpb-size'; return 1 ;;
+    "") printf 'gfx-unknown-dpb-size'; return 1 ;;
+  esac
+  return 0
+}
+
+# The one gate for using a VA element at the current output size (GS_ENC_DIMS, unset
+# means 1920x1080), in order: a pre-VCN family token refuses both codecs with no trial
+# (pre-vcn-unsoaked); for HEVC the RDNA4 size rule; then the one-frame trial at the size
+# raised to at least 640x480. Writes h264_reason or h265_reason (ok, or why not) when it
+# changes. 0 when the element may be used.
+# Usage: _gs_va_ok <h264|h265> <element>
+_gs_va_ok() {
+  local codec="${1:-}" el="${2:-}" dims="${GS_ENC_DIMS:-1920x1080}" w h reason=ok
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 1
+  [[ "$dims" =~ ^[1-9][0-9]*x[1-9][0-9]*$ ]] || dims=1920x1080
+  case "$(_gs_va_gfx)" in
+    tahiti|pitcairn|verde|oland|hainan|bonaire|kaveri|kabini|hawaii|tonga|iceland \
+      |carrizo|fiji|stoney|polaris10|polaris11|polaris12|vegam|vega10|vega12|vega20)
+      reason=pre-vcn-unsoaked ;;
+  esac
+  if [ "$reason" = ok ] && [ "$codec" = h265 ]; then
+    if reason="$(_gs_va_rdna4_size_ok "$dims")"; then reason=ok; fi
+  fi
+  if [ "$reason" = ok ]; then
+    w="${dims%x*}" h="${dims#*x}"
+    [ "$w" -lt 640 ] && w=640
+    [ "$h" -lt 480 ] && h=480
+    if ! _gs_va_trial "$codec" "$el" "${w}x$h"; then
+      case "$(_gs_caps_get "trial.$codec.$el.${w}x$h")" in
+        fail:124|fail:137) reason=trial-timeout ;;
+        *) reason=trial-fail ;;
+      esac
+    fi
+  fi
+  [ "$(_gs_caps_get "${codec}_reason")" = "$reason" ] || _gs_caps_put "${codec}_reason" "$reason"
+  if [ "$reason" != ok ] && [ "$(gs_video_encoder_mode)" = gpu ]; then
+    warn "video_encoder=gpu: VA $codec encoder not usable at $dims (reason=$reason)"
+  fi
+  [ "$reason" = ok ]
+}
+
+# Scale trial (S4 interface [3]), for a capture size that differs from the output size:
+# two BGRA frames at <srcWxH> through the VA postproc, scaled to <outWxH> NV12, into the
+# encoder with the trial properties. The timeout, log, retry and cache rules of the
+# one-frame trial, cached as scale.<element>.<src>.<out>. 0 when the frames were
+# encoded; 1 with no trial when no VA postproc resolves.
+# Usage: _gs_va_scale_ok <h264|h265> <element> <srcWxH> <outWxH>
+_gs_va_scale_ok() {
+  local codec="${1:-}" el="${2:-}" src="${3:-}" dst="${4:-}" key cached pp parse=h264parse
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 1
+  key="scale.$el.$src.$dst"
+  if cached="$(_gs_caps_get "$key")"; then
+    [ "$cached" = ok ]
+    return
+  fi
+  pp="$(gs_va_element postproc)" || return 1
+  [ "$codec" = h265 ] && parse=h265parse
+  _gs_va_launch "$key" videotestsrc num-buffers=2 \
+    ! "video/x-raw,format=BGRA,width=${src%x*},height=${src#*x},framerate=60/1" ! "$pp" \
+    ! "video/x-raw(memory:VAMemory),format=NV12,width=${dst%x*},height=${dst#*x}" \
+    ! "$el" rate-control=vbr target-percentage=95 bitrate=8000 cpb-size=8000 \
+    key-int-max=120 b-frames=0 ref-frames=1 "target-usage=${GS_VA_TARGET_USAGE:-4}" \
+    ! "$parse" ! fakesink sync=false
+}
+
+# True when the active encoder for <codec> is a VA element that _gs_va_ok accepts at
+# the current GS_ENC_DIMS, so pick_scale_convert always matches the encoder across
+# subshells and sizes. Returns 1 before any probe unless GS_GPU_VENDOR=amd.
+# Usage: _active_encoder_is_va <h264|h265>
+_active_encoder_is_va() {
+  local codec=h264 pick
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 1
+  case "${1:-h264}" in
+    h265|hevc) codec=h265 ;;
+  esac
+  _ensure_nvenc_pick "$codec" quiet
+  pick="${GS_NVENC_PICK:-}"
+  [ "$codec" = h265 ] && pick="${GS_NVENC_PICK_H265:-}"
+  case "$pick" in
+    va:*) _gs_va_ok "$codec" "${pick#va:}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# One ENCODER-CAPS line per capture mode (S4-D6), from the caller's parent shell after
+# the pipeline is built, never inside $(...): mode, requested and actual codec, the
+# encoder element, the render node, the gfx token, the PCI device id, the scaler and the
+# reason. A WARN when the codec fell back or the encoder is software (x264enc for live
+# and clips, libx264 for inline renders). The sixth argument sets the reason (inline
+# renders pass it); otherwise it comes from encoder_caps. Also writes requested.<mode>,
+# actual.<mode> and reason.<mode> to encoder_caps.
+# Usage: gs_encoder_status <live|clip|inline> <requested codec> <actual codec> <encoder string> <convert string> [<reason>]
+gs_encoder_status() {
+  # encoder.<mode> keeps the element in use (the first word of the encoder string), on AMD
+  # only like the rest of encoder_caps; gs_encoder_marker reads encoder.live for the
+  # status=live report.
+  if [ "${GS_GPU_VENDOR:-}" = amd ] && [ "$#" -ge 4 ] && [ -n "${4%% *}" ]; then
+    _gs_caps_put "encoder.$1" "${4%% *}"
+  fi
+  [ "${GS_GPU_VENDOR:-}" = amd ] || return 0
+  local mode="${1:-}" req="${2:-}" act="${3:-}" enc="${4:-}" conv="${5:-}" reason="${6:-}"
+  local el gfx did scaler=cpu msg
+  el="${enc%% *}"
+  case "$conv" in
+    *vapostproc*) scaler=vapostproc ;;
+  esac
+  if [ -z "$reason" ]; then
+    if [ "$act" != "$req" ]; then
+      reason="$(_gs_caps_get "${req}_reason")"
+    elif [ "$el" = x264enc ] || [ "$el" = libx264 ]; then
+      reason="$(_gs_caps_get "${act}_reason")"
+    elif [ "$scaler" = cpu ] && [ "${el#va}" != "$el" ] \
+      && [[ "$(_gs_caps_get "scale.$el.${CS2_DISPLAY_RES:-1920x1080}.${GS_ENC_DIMS:-1920x1080}")" == fail:* ]]; then
+      reason=va-scale-fail
+    else
+      reason=ok
+    fi
+  fi
+  [ -n "$reason" ] || reason='?'
+  gfx="$(_gs_va_gfx)"
+  did="$(_gs_caps_get device_id)"
+  _gs_caps_put "requested.$mode" "$req"
+  _gs_caps_put "actual.$mode" "$act"
+  _gs_caps_put "reason.$mode" "$reason"
+  msg="ENCODER-CAPS: mode=$mode requested=$req actual=$act encoder=${el:-?} device=${GS_RENDER_NODE:-?} gfx=${gfx:-?} device_id=${did:-?} scaler=$scaler reason=$reason"
+  if [ "$act" != "$req" ] || [ "$el" = x264enc ] || [ "$el" = libx264 ]; then
+    warn "$msg"
+  else
+    log "$msg"
+  fi
+  return 0
+}
 # Emit the scale + colorspace-convert fragment that feeds the encoder.
 # When the active encoder is a CUDA NVENC element and cudaconvertscale is
 # present, the scale (e.g. 1440p->1080p) and RGBx->NV12 convert run on the
@@ -474,11 +1166,53 @@ _cuda_scale_available() {
 # Falls back to the all-CPU path for legacy nvenc / x264, and to a
 # CPU-convert-then-upload path if a CUDA encoder is paired with a pod that
 # lacks cudaconvertscale (so the encoder still receives CUDA memory).
+# On AMD a VA-API encoder (_active_encoder_is_va) gets the VA branch first:
+# videorate, then the render node's VA postproc (vapostproc) scales and converts
+# to NV12 in VA memory. Its capsfilter ends the fragment, so the encoder follows
+# it directly and a same-size convert folds into the encoder (EFC). With GPU
+# scaling off (GS_GPU_SCALE), no postproc on the node or a failed scale trial,
+# the fragment is videorate plus the CPU one, and the encoder stays VA-API.
 # Usage: pick_scale_convert <out_w> <out_h> <fps> <codec>
 pick_scale_convert() {
   local w="${1:?width required}" h="${2:?height required}"
   local fps="${3:?fps required}" codec="${4:-h264}"
   local cpu="videoscale ! video/x-raw,width=${w},height=${h},framerate=${fps}/1 ! videoconvert ! video/x-raw,format=NV12"
+  # AMD (S4-D8): a VA-API encoder gets the scale and the RGB to NV12 convert from the VA
+  # postproc, behind videorate (videorate first avoids the synthetic PTS of the
+  # GStreamer 1.24.2 va elements). The postproc capsfilter ends the fragment, so nothing
+  # sits between it and the encoder, and a same-size convert folds into the encoder
+  # (EFC). The CPU fragment, behind the same videorate, when GS_GPU_SCALE turns GPU
+  # scaling off, when no VA postproc drives the render node, or when the capture size
+  # (CS2_DISPLAY_RES) differs from the output and the scale trial fails (reason
+  # va-scale-fail): the encoder stays VA either way. Writes scaler=vapostproc|cpu to
+  # encoder_caps when it changes.
+  if _active_encoder_is_va "$codec"; then
+    local c=h264 el pp="" src="${CS2_DISPLAY_RES:-1920x1080}"
+    case "$codec" in
+      h265|hevc) c=h265 el="${GS_NVENC_PICK_H265:-}" ;;
+      *) el="${GS_NVENC_PICK:-}" ;;
+    esac
+    el="${el#va:}"
+    case "${GS_GPU_SCALE:-auto}" in
+      0|off|false|no) ;;
+      *) pp="$(gs_va_element postproc)" || pp="" ;;
+    esac
+    if [ -n "$pp" ] && [ "$src" != "${w}x${h}" ] \
+      && ! _gs_va_scale_ok "$c" "$el" "$src" "${w}x${h}"; then
+      pp=""
+    fi
+    if [ -n "$pp" ]; then
+      [ "$(_gs_caps_get scaler)" = vapostproc ] || _gs_caps_put scaler vapostproc
+      log "  scaler: vapostproc (VA scale+convert)" >&2
+      printf 'videorate ! video/x-raw,framerate=%s/1 ! %s ! video/x-raw(memory:VAMemory),format=NV12,width=%s,height=%s,framerate=%s/1' \
+        "$fps" "$pp" "$w" "$h" "$fps"
+      return 0
+    fi
+    [ "$(_gs_caps_get scaler)" = cpu ] || _gs_caps_put scaler cpu
+    log "  scaler: CPU videoscale+videoconvert" >&2
+    printf 'videorate ! %s' "$cpu"
+    return 0
+  fi
   if _active_encoder_is_cuda "$codec"; then
     if _cuda_scale_available; then
       log "  scaler: cudaconvertscale (GPU scale+convert)" >&2
@@ -502,12 +1236,26 @@ pick_scale_convert() {
 # encoder with a convert fragment that doesn't produce CUDA memory — i.e. built a
 # pipeline without pick_scale_convert in front of the encoder. Usage:
 # _assert_cuda_chain "<convert fragment>" "<encoder fragment>".
+# On AMD it also guards EFC for a VA-API encoder (va*enc*): between the last
+# vapostproc and the encoder only the postproc capsfilter may sit, and any other
+# element there gets a BUG warning (warn only). AMD_DEBUG=noefc, Mesa's own
+# switch, turns EFC off for A/B tests in a dev pod only.
 _assert_cuda_chain() {
   case "$2" in
     *nvcudah264enc*|*nvcudah265enc*)
       case "$1" in
         *cudaupload*|*CUDAMemory*) ;;
         *) warn "BUG: CUDA encoder fed non-CUDA memory — pick_scale_convert must precede the encoder (convert='$1')" ;;
+      esac ;;
+    # AMD (S4 C6): a VA encoder must follow vapostproc and its capsfilter directly, or
+    # a same-size convert no longer folds into the encoder (EFC). Warn only.
+    va*enc*)
+      [ "${GS_GPU_VENDOR:-}" = amd ] || return 0
+      case "$1" in
+        *vapostproc*)
+          case "${1##*vapostproc}" in
+            *'!'*'!'*) warn "BUG: an element sits between vapostproc and the VA encoder, which breaks EFC (convert=$1)" ;;
+          esac ;;
       esac ;;
   esac
 }
@@ -516,6 +1264,8 @@ _assert_cuda_chain() {
 # True unless we have POSITIVE evidence it's off — the host kernel param is visible
 # via the shared /sys; unreadable/absent -> assume on (don't block the default path
 # on a missing sysfs).
+# AMD hosts load no nvidia_drm module, so the parameter file is absent: the
+# check below returns 0 and vkcapture stays available there.
 _drm_modeset_on() {
   local f=/sys/module/nvidia_drm/parameters/modeset v
   [ -r "$f" ] || return 0
@@ -533,11 +1283,21 @@ _drm_modeset_on() {
 # empty string = "don't pin this side". Only splits on a box with ≥4 cores (below
 # that, carving out cores starves cs2 more than contention does). Idempotent.
 compute_cpu_split() {
+  # Record caller presets before the first fill, including explicit empty lists.
+  # Export the answer so a child does not mistake our filled lists for presets.
+  if [ -z "${GS_CPU_SPLIT_PRESET+x}" ]; then
+    GS_CPU_SPLIT_PRESET=""
+    [ -n "${CAPTURE_CPUS+x}" ] && GS_CPU_SPLIT_PRESET+="CAPTURE_CPUS "
+    [ -n "${CS2_CPUS+x}" ] && GS_CPU_SPLIT_PRESET+="CS2_CPUS "
+    [ -n "${AUX_CPUS+x}" ] && GS_CPU_SPLIT_PRESET+="AUX_CPUS "
+    GS_CPU_SPLIT_PRESET="${GS_CPU_SPLIT_PRESET% }"
+    export GS_CPU_SPLIT_PRESET
+  fi
   [ -n "${GS_CPU_SPLIT_DONE:-}" ] && return 0
   local ncpu capn caphi caplo
   ncpu=$(nproc 2>/dev/null || echo 0)
   if [ "$ncpu" -ge 4 ]; then
-    capn="${CAPTURE_CORES:-2}"
+    capn="${CAPTURE_CORES:-${GS_CAPTURE_CORES_AUTO:-2}}"
     [ "$capn" -lt 1 ] && capn=1
     [ "$capn" -ge "$ncpu" ] && capn=$(( ncpu - 1 ))
     caplo=$(( ncpu - capn )); caphi=$(( ncpu - 1 ))
@@ -565,6 +1325,24 @@ compute_cpu_split() {
   GS_AUX_CPUS="${AUX_CPUS:-}"
   GS_CPU_SPLIT_DONE=1
   export GS_CAPTURE_CPUS GS_CS2_CPUS GS_AUX_CPUS GS_CPU_SPLIT_DONE CAPTURE_CPUS CS2_CPUS AUX_CPUS
+}
+
+# Recompute only a self-filled split when a CPU encoder needs four capture cores.
+# Explicit CAPTURE_CORES or any original caller list wins, even an empty list.
+# Usage: gs_cpu_split_for_encoder <resolved encoder fragment>
+gs_cpu_split_for_encoder() {
+  local enc="${1:-}" ncpu
+  compute_cpu_split
+  [ "${enc%% *}" = x264enc ] || return 0
+  [ -z "${CAPTURE_CORES+x}" ] && [ -z "${GS_CPU_SPLIT_PRESET:-}" ] || return 0
+  ncpu=$(nproc 2>/dev/null || echo 0)
+  [ "$ncpu" -ge 8 ] || return 0
+  [ "${GS_CAPTURE_CORES_AUTO:-}" != 4 ] || return 0
+  GS_CAPTURE_CORES_AUTO=4
+  export GS_CAPTURE_CORES_AUTO
+  unset GS_CPU_SPLIT_DONE CAPTURE_CPUS CS2_CPUS AUX_CPUS
+  compute_cpu_split
+  apply_cpu_split
 }
 
 # Set the CPU affinity of <pid>, every thread of it, and all its descendants.
@@ -624,6 +1402,77 @@ vkcapture_available() {
   [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] || return 1
   command -v vkcapture-consumer >/dev/null 2>&1 || return 1
   _drm_modeset_on
+}
+
+# AMD: a VA encoder must first encode one frame at the output size. The result
+# stays in encoder_caps for the pod's life (trial.ffmpeg.<encoder>.<WxH>=ok or
+# fail:<rc>) and the output goes to encoder_trials.log. A failure other than a timeout
+# (rc 124 or 137) runs once more. On failure VA_TRIAL_REASON is trial-fail or
+# trial-timeout.
+# Usage: gs_va_ffmpeg_trial <h264_vaapi|hevc_vaapi> <encoder args...>
+# shellcheck disable=SC2034  # VA_TRIAL_REASON is consumed by inline and nade callers
+gs_va_ffmpeg_trial() {
+  local key="trial.ffmpeg.$1.$GS_ENC_DIMS" rc=0 cached
+  shift
+  VA_TRIAL_REASON=""
+  if cached=$(_gs_caps_get "$key"); then
+    case "$cached" in
+      ok) return 0 ;;
+      fail:124 | fail:137) VA_TRIAL_REASON=trial-timeout ;;
+      *) VA_TRIAL_REASON=trial-fail ;;
+    esac
+    return 1
+  fi
+  for _ in 1 2; do
+    rc=0
+    timeout -k 5 20 ffmpeg -hide_banner -loglevel error "${FFMPEG_HW_ARGS[@]}" \
+      -f lavfi -i "testsrc2=size=${CLIP_OUTPUT_DIMS:-1920x1080}:rate=${CLIP_OUTPUT_FPS:-60}" \
+      -frames:v 1 -vf "crop=${GS_ENC_DIMS/x/:}:0:0,format=nv12,hwupload" "$@" -f null - \
+      >>"${LOG_DIR:-/tmp/game-streamer}/encoder_trials.log" 2>&1 || rc=$?
+    case "$rc" in 0 | 124 | 137) break ;; esac
+  done
+  if [ "$rc" = 0 ]; then
+    _gs_caps_put "$key" ok
+    return 0
+  fi
+  _gs_caps_put "$key" "fail:$rc"
+  case "$rc" in 124 | 137) VA_TRIAL_REASON=trial-timeout ;; *) VA_TRIAL_REASON=trial-fail ;; esac
+  return 1
+}
+# A successful actual live/demo capture updates the pod-local CPU record.
+# An idempotent start with no new GS_LAST_CAPTURE_ENC preserves the record.
+gs_record_live_encoder() {
+  local el="${GS_LAST_CAPTURE_ENC:-}"
+  el="${el%% *}"
+  [ -n "$el" ] || return 0
+  if [ "$el" = x264enc ]; then
+    : > "$LOG_DIR/live-cpu-encode"
+  else
+    rm -f "$LOG_DIR/live-cpu-encode"
+  fi
+}
+
+# gs_encoder_marker: fills the array GS_ENCODER_MARKER with the extra status=live argument
+# progress_stage=encoder:<element>, the live encoder element that gs_encoder_status wrote to
+# encoder_caps as encoder.live on AMD, or x264enc from live-cpu-encode on either vendor.
+# Without either record the array stays empty and the report arguments stay unchanged.
+# The api keeps progress_stage in the status history, where the GPU nodes page shows the
+# element as the encoder tag of a busy node. Not for batch mode: broadcast_batch_status
+# folds a progress_stage into the stage and would post "live:encoder:<element>" to every
+# job as a booting tick.
+# shellcheck disable=SC2034  # the status=live sites in src/flows/ read the array
+gs_encoder_marker() {
+  GS_ENCODER_MARKER=()
+  local el
+  if [ -e "$LOG_DIR/live-cpu-encode" ]; then
+    el=x264enc
+  elif [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    el=$(_gs_caps_get encoder.live) || return 0
+  else
+    return 0
+  fi
+  [ -n "$el" ] && GS_ENCODER_MARKER=("progress_stage=encoder:$el")
+  return 0
 }
 
 # Trap-friendly verbose toggle. `GS_TRACE=1 ./game-streamer.sh ...` runs

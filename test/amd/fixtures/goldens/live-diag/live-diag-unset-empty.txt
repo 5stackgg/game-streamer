@@ -1,0 +1,1 @@
+  LIVE-DIAG 8f14e45f: gpu(util,vramMiB,clkMHz,tempC)= | cs2cpu=?% capcpu=?% (composite=0)
