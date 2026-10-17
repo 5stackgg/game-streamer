@@ -293,8 +293,33 @@ report_status status=live \
 # errors the pipeline out instead of silently reconnecting into mediamtx's
 # stale HLS muxer (which desyncs audio). Respawn cleanly via restart_capture
 # (its 1s gap lets mediamtx expire the old session and rebuild a synced muxer).
+_GS_DISPLAY_FAILURES=0
 while :; do
   if ! stream_running "$MATCH_ID"; then
+    # Check the display only when capture is down. A live capture can still be
+    # blocked in Xlib; that existing blind spot requires a separate watchdog.
+    if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+      if xorg_running; then
+        _GS_DISPLAY_FAILURES=0
+      else
+        _GS_DISPLAY_FAILURES=$((_GS_DISPLAY_FAILURES+1))
+        if [ "$_GS_DISPLAY_FAILURES" -ge 3 ]; then
+          if [ "$(gs_display_tier)" = C ]; then
+            _GS_DISPLAY_LOST_MSG="display lost on $DISPLAY; see $LOG_DIR/weston.log and $LOG_DIR/xwayland.${DISPLAY#:}.log"
+          else
+            _GS_DISPLAY_LOST_MSG="display lost on $DISPLAY; see /var/log/Xorg.${DISPLAY#:}.log"
+          fi
+          warn "$_GS_DISPLAY_LOST_MSG"
+          report_status status=errored "error=$_GS_DISPLAY_LOST_MSG" || true
+          # die does not run the TERM trap, so stop explicitly before exiting.
+          shutdown_display
+          die "$_GS_DISPLAY_LOST_MSG"
+        fi
+        sleep 5 &
+        wait $!
+        continue
+      fi
+    fi
     warn "live capture down — restarting to resync via a fresh mediamtx session"
     restart_capture "$MATCH_ID" || warn "restart_capture failed; will retry"
   fi

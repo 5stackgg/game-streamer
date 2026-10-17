@@ -104,6 +104,10 @@ start_hud() {
   # stayed the same, so they're cs2's own cost and GPU drawing (1) stays the default.
   local gpu_flags=(--disable-gpu-sandbox)
   [ "${HUD_GPU:-1}" = "1" ] || gpu_flags=(--disable-gpu --enable-transparent-visuals)
+  # AMD: keep the HUD on X11 whatever the HUD image defaults to (S3-D30, S3 C30).
+  if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    gpu_flags+=(--ozone-platform=x11)
+  fi
   log "hud-manager: GPU drawing $([ "${HUD_GPU:-1}" = "1" ] && echo on || echo off) (HUD_GPU=${HUD_GPU:-1})"
   HUD_PORT="$HUD_PORT" \
   GSI_PORT="$HUD_GSI_PORT" \

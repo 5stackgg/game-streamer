@@ -787,6 +787,12 @@ _final_nvenc_pick() {
   export GS_FINAL_NVENC; _probe_cache_store GS_FINAL_NVENC
   printf '%s' "$GS_FINAL_NVENC"
 }
+# AMD: libx264 until the h264_vaapi final encode is enabled. Setting x264 also skips
+# the h264_nvenc test encodes below, which cannot pass without the NVIDIA runtime.
+if [ "${GS_GPU_VENDOR:-}" = amd ] && [ -z "${CLIP_FINAL_ENCODER:-}" ]; then
+  CLIP_FINAL_ENCODER=x264
+  say "final encode: h264_vaapi not enabled yet, using libx264"
+fi
 FINAL_NVENC=""
 [ "${CLIP_FINAL_ENCODER:-nvenc}" != "x264" ] && FINAL_NVENC=$(_final_nvenc_pick || true)
 if [ "$FINAL_NVENC" = "nobref" ]; then
@@ -846,6 +852,12 @@ case "$CLIP_VIDEO_CODEC" in
       say "h265 probe: ffmpeg hevc_nvenc OK ($(printf '%s' "$FFMPEG_HEVC_LINE" | awk '{$1=$1};1'))"
     else
       say "h265 probe: ffmpeg hevc_nvenc NOT FOUND in 'ffmpeg -encoders' (this build was compiled without NVENC HEVC)"
+    fi
+    # AMD: ffmpeg -encoders lists hevc_nvenc in any build, so the grep above cannot
+    # tell; HEVC stays off until the hevc_vaapi path is enabled.
+    if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+      FFMPEG_H265_OK=0
+      say "h265: ffmpeg VA path not enabled yet, using libx264"
     fi
     if [ "$GST_H265_OK" = "1" ] && [ "$FFMPEG_H265_OK" = "1" ]; then
       FFMPEG_VENC_ARGS=(-c:v hevc_nvenc -preset p5 -rc vbr -cq 24 -tag:v hvc1)

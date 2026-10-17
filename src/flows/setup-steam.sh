@@ -33,6 +33,7 @@ start_status_reporter
 
 preflight_gpu
 start_xorg
+preflight_vulkan
 start_snapshot_loop || warn "start_snapshot_loop failed — continuing without thumbnails"
 start_pulseaudio
 start_spec_server

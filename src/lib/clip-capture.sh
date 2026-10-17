@@ -7,15 +7,18 @@
 # Dispatches on CLIP_CAPTURE_METHOD:
 #   vkcapture — obs-vkcapture Vulkan present-hook (DEFAULT). The layer inside cs2
 #               (OBS_VKCAPTURE=1) shares the swapchain over a socket; our
-#               vkcapture-consumer feeds it into the NVENC pipeline below. Never
-#               touches the X server, so it can't stall cs2's present (the
-#               gunfight-stutter fix). Needs nvidia-drm.modeset=1 on the host.
+#               vkcapture-consumer feeds it into the GPU encoder pipeline below
+#               (NVENC or VA-API). Never touches the X server, so it can't stall
+#               cs2's present (the gunfight-stutter fix). On NVIDIA it needs
+#               nvidia-drm.modeset=1 on the host; AMD has no such prerequisite.
 #   ximagesrc — the gstreamer X11-grab pipeline; fallback if vkcapture can't start.
 # vkcapture is gated on three preflight checks (binary present, nvidia-drm modeset
 # on — _drm_modeset_on in common.sh, consumer survives spawn); any miss => ximagesrc,
 # which needs no DRM and always works. The modeset gate matters because a modeset-off
 # node would spawn the consumer fine but never receive a dmabuf — so without it we'd
 # produce empty segments instead of degrading cleanly.
+# The modeset check is NVIDIA-only: on a host without the nvidia_drm module (AMD)
+# _drm_modeset_on finds no modeset parameter and passes, so the other two decide.
 start_clip_capture() {
   local method="${CLIP_CAPTURE_METHOD:-vkcapture}"
   CLIP_CAPTURE_READY_FILE=""
@@ -43,9 +46,10 @@ start_clip_capture() {
   _start_clip_capture_gst "$@"
 }
 
-# Resolve the NVENC encoder fragment + parser for a clip, honoring CLIP_VIDEO_CODEC
-# (h264 default; falls back to h264 if no NVENC HEVC). Sets CLIP_ENC / CLIP_PARSE_CAPS
-# / CLIP_CODEC. The hvc1 caps on h265 are required for mp4 / Safari / iOS playback.
+# Resolve the GPU encoder fragment (NVENC or VA-API) + parser for a clip, honoring
+# CLIP_VIDEO_CODEC (h264 default; falls back to h264 if no NVENC HEVC, or on AMD no
+# VA-API HEVC usable at GS_ENC_DIMS). Sets CLIP_ENC / CLIP_PARSE_CAPS / CLIP_CODEC.
+# The hvc1 caps on h265 are required for mp4 / Safari / iOS playback.
 _clip_resolve_encoder() {
   local gop="$1" kbps="$2"
   CLIP_CODEC="${CLIP_VIDEO_CODEC:-h264}"
@@ -56,7 +60,11 @@ _clip_resolve_encoder() {
         CLIP_PARSE_CAPS="h265parse config-interval=1 ! video/x-h265,stream-format=hvc1,alignment=au"
         return 0
       fi
+      if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+        warn "CLIP_VIDEO_CODEC=$CLIP_CODEC but no VA-API HEVC encoder is usable at ${GS_ENC_DIMS:-1920x1080}, falling back to h264 (see ENCODER-CAPS)"
+      else
       warn "CLIP_VIDEO_CODEC=$CLIP_CODEC but no NVENC HEVC encoder available — falling back to h264"
+      fi
       ;;
     h264) : ;;
     *) warn "CLIP_VIDEO_CODEC=$CLIP_CODEC unrecognized — using h264" ;;
@@ -68,7 +76,7 @@ _clip_resolve_encoder() {
 }
 
 # vkcapture: feed cs2's Vulkan swapchain (obs-vkcapture layer -> our
-# vkcapture-consumer) into the SAME NVENC encode tail as the ximagesrc path. The
+# vkcapture-consumer) into the SAME NVENC or VA-API encode tail as the ximagesrc path. The
 # consumer runs a GStreamer pipeline whose source is `appsrc name=vksrc` and pushes
 # frames sampled from the shared dmabuf at $fps; encode/scale/mux are byte-for-byte
 # the gst path, so output dims, codec selection and audio behave identically. The
@@ -86,6 +94,8 @@ _start_clip_capture_vkcapture() {
   local out_h="${CLIP_OUTPUT_DIMS#*x}"
   [ -z "$out_w" ] && out_w=1920
   [ -z "$out_h" ] && out_h=1080
+  # The size the VA-API checks judge the encoder at (AMD only; unused on NVIDIA).
+  local GS_ENC_DIMS="${out_w}x${out_h}"
 
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
@@ -109,6 +119,10 @@ _start_clip_capture_vkcapture() {
   local convert
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
   _assert_cuda_chain "$convert" "$enc"
+  # ENCODER-CAPS names both codecs h264 or h265: hevc is h265, an unknown request h264.
+  local codec_req=h264
+  case "${CLIP_VIDEO_CODEC:-h264}" in h265|hevc) codec_req=h265 ;; esac
+  gs_encoder_status clip "$codec_req" "${codec/hevc/h265}" "$enc" "$convert"
 
   # Zero-copy (CLIP_ZEROCOPY=1, off by default — measured no gain, see the docs): the layer exports the shared image as
   # an OPAQUE_FD that the consumer imports into CUDA, and each frame is one GPU-to-GPU
@@ -118,6 +132,11 @@ _start_clip_capture_vkcapture() {
   # cudaupload uploads as before); no import => it asks the layer for the host-mapped
   # image and uploads each frame to CUDA itself.
   local zc="${CLIP_ZEROCOPY:-0}"
+  # AMD has no CUDA import: always the host-map copy, whatever CLIP_ZEROCOPY says.
+  if [ "${GS_GPU_VENDOR:-}" = amd ] && [ "$zc" != "0" ]; then
+    log "  clip capture: zero-copy not available on AMD yet, using host-map copy"
+    zc=0
+  fi
   if [ "$zc" = "1" ] && [[ "$convert" != *cudaupload* ]]; then
     log "  clip capture: encode chain isn't CUDA (no cudaupload) — host-map copy, no zero-copy"
     zc=0
@@ -206,6 +225,10 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
       zc=0
       continue
     fi
+    if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+      warn "vkcapture-consumer died on spawn: obs-vkcapture layer not loaded in cs2 (OBS_VKCAPTURE=1 launch option?) or bad gst pipeline (see ENCODER-CAPS)"
+      return 1
+    fi
     warn "vkcapture-consumer died on spawn — obs-vkcapture layer not loaded in cs2 (OBS_VKCAPTURE=1 launch option?), nvidia-drm.modeset=1 missing on host, or bad gst pipeline"
     return 1
   done
@@ -215,6 +238,8 @@ qtmux faststart=true name=mux ! filesink location=$out_file"
 # Reads $CLIP_OUTPUT_DIMS from env to scale capture → output dims so
 # the produced mp4 is always at the spec'd resolution regardless of
 # the X display's native size (the node may run CS2 at 1080p or 1440p).
+# On AMD the VA-API checks judge the encoder at these output dims (GS_ENC_DIMS below),
+# and the vapostproc scale follows the encoder (see pick_scale_convert).
 _start_clip_capture_gst() {
   local out_file="${1:?output file required}"
   local fps="${2:-60}"
@@ -240,6 +265,8 @@ _start_clip_capture_gst() {
   local out_h="${CLIP_OUTPUT_DIMS#*x}"
   [ -z "$out_w" ] && out_w=1920
   [ -z "$out_h" ] && out_h=1080
+  # The size the VA-API checks judge the encoder at (AMD only; unused on NVIDIA).
+  local GS_ENC_DIMS="${out_w}x${out_h}"
 
   mkdir -p "$(dirname "$out_file")"
   rm -f "$out_file"
@@ -249,10 +276,14 @@ _start_clip_capture_gst() {
 
   log "  clip capture: $out_file (${out_w}x${out_h}@${fps}fps, ${kbps}kbps, audio=$audio, codec=$codec)"
 
-  # GPU scale+convert when the encoder is CUDA-based (see pick_scale_convert).
+  # GPU scale+convert when the encoder is CUDA-based or VA-API (see pick_scale_convert).
   local convert
   convert=$(pick_scale_convert "$out_w" "$out_h" "$fps" "$codec")
   _assert_cuda_chain "$convert" "$enc"
+  # ENCODER-CAPS names both codecs h264 or h265: hevc is h265, an unknown request h264.
+  local codec_req=h264
+  case "${CLIP_VIDEO_CODEC:-h264}" in h265|hevc) codec_req=h265 ;; esac
+  gs_encoder_status clip "$codec_req" "${codec/hevc/h265}" "$enc" "$convert"
 
   # qtmux faststart=true puts moov first so the api streams uploads to S3 without buffering.
   if [ "$audio" = "1" ]; then

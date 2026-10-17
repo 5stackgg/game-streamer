@@ -562,9 +562,9 @@ if [ -n "${STILL_AT_MS[aim]:-}" ]; then
 fi
 
 # --- STEP 5: the delivered encode ---------------------------------------------
-# The capture runs at 24Mbps so the stills above are clean. What ships is
-# re-encoded the way highlights are (~9Mbps): a raw capture is ~60MB for a
-# 20s render, too big for Discord to play inline when the lineup is shared.
+# The high-bitrate capture keeps the stills clean. A smaller delivery encode
+# follows: NVIDIA tries NVENC, while AMD uses libx264 in P2. If every delivery
+# attempt fails, the recorded capture remains the upload.
 
 nade_delivery_encode() {
   rm -f "$NADE_DELIVERY_FILE"
@@ -578,12 +578,21 @@ NADE_NVENC_ARGS=(-c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr
   -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20 -bf 3
   -pix_fmt yuv420p -profile:v high -level 4.2)
 
-# Pre-Turing GPUs reject B-frames as references, and a node without NVENC
-# falls back to the CPU encode highlights used before NVENC.
-if nade_delivery_encode "${NADE_NVENC_ARGS[@]}" -b_ref_mode middle \
-   || nade_delivery_encode "${NADE_NVENC_ARGS[@]}" \
-   || nade_delivery_encode -c:v libx264 -preset veryfast -crf 22 \
-        -pix_fmt yuv420p -profile:v high -level 4.2; then
+# NVIDIA keeps its two NVENC attempts, including the pre-Turing no-B-ref
+# retry. AMD skips both. The final CPU attempt is shared.
+NADE_DELIVERY_ENC=""
+if [ "${GS_GPU_VENDOR:-}" != amd ] && nade_delivery_encode "${NADE_NVENC_ARGS[@]}" -b_ref_mode middle; then
+  NADE_DELIVERY_ENC=h264_nvenc
+  say "delivery encode: encoder=$NADE_DELIVERY_ENC"
+elif [ "${GS_GPU_VENDOR:-}" != amd ] && nade_delivery_encode "${NADE_NVENC_ARGS[@]}"; then
+  NADE_DELIVERY_ENC=h264_nvenc
+  say "delivery encode: encoder=$NADE_DELIVERY_ENC (no B-frame refs)"
+elif nade_delivery_encode -c:v libx264 -preset veryfast -crf 22 \
+     -pix_fmt yuv420p -profile:v high -level 4.2; then
+  NADE_DELIVERY_ENC=libx264
+  say "delivery encode: encoder=$NADE_DELIVERY_ENC"
+fi
+if [ -n "$NADE_DELIVERY_ENC" ]; then
   mv -f "$NADE_DELIVERY_FILE" "$NADE_CLIP_FILE"
   say "delivery encode: $(stat -c '%s' "$NADE_CLIP_FILE" 2>/dev/null || stat -f '%z' "$NADE_CLIP_FILE")B"
 else
