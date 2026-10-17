@@ -30,6 +30,16 @@
 #   gst-inspect-1.0  exits 1.
 # A render in ubuntu:24.04 with these stubs prints no 'command not found' line, so no other
 # command needs a stub.
+# Optional encoder-mode fixtures, inactive by default:
+#   INLINE_CPU_AT_SEEK_TICK=N: write the pod CPU marker on a seek at or above N.
+#   INLINE_RECORD_CAPTURE=1: append selected GST elements to inline/capture.encoders.
+#   INLINE_NO_AUDIO_SEG=N: the zero-based segment has no audio stream.
+#   INLINE_PAD_FAIL=1: silent-pad calls fail; a graph using that missing audio fails.
+#   INLINE_CAPTURE_DEATH_MODE=gpu|all and INLINE_CAPTURE_DEATH_SEG=N: kill a live
+#     selected capture during a monitor GET, once per PID; all also kills its CPU redo.
+#   INLINE_CAPTURE_START_FAIL=gpu|cpu|all: selected capture attempts die on spawn.
+#   INLINE_CAPTURE_BYTES=N: capture size (default2048), including an unusable zero.
+#   capture.events records starts, deaths and pause/marker order for these fixtures.
 # inline_render [VAR=VALUE ...] runs one render, bounded by timeout, and sets INLINE_RC
 # and INLINE_LOG. The render's stdout and stderr, in order, are in
 # $T_TMP/inline/render.log; the ffmpeg calls, one line each with every argument quoted by
@@ -113,11 +123,23 @@ case "$site" in
     echo "$n" >"$d/site$site.count"
     [ "$n" -le "${INLINE_FAIL_COUNT:-1}" ] && exit 1 ;;
 esac
+if [ "${INLINE_PAD_FAIL:-0}" = 1 ]; then
+  case "${*: -1}" in *.aud.mp4) exit 1 ;; esac
+  if [ "$site" = 3 ] && [ -n "${INLINE_NO_AUDIO_SEG:-}" ]; then
+    printf -v no_audio "seg-%03d.mp4" "$INLINE_NO_AUDIO_SEG"
+    case " $* " in *"$no_audio"*) exit 1 ;; esac
+  fi
+fi
 head -c 2048 /dev/zero >"${*: -1}"
 exit 0'
   _inline_stub ffprobe '
 case " $* " in
-  *" stream=codec_type "*) echo audio ;;
+  *" stream=codec_type "*)
+    if [ -n "${INLINE_NO_AUDIO_SEG:-}" ]; then
+      printf -v no_audio "seg-%03d.mp4" "$INLINE_NO_AUDIO_SEG"
+      case " $* " in *"$no_audio"*) exit 0 ;; esac
+    fi
+    echo audio ;;
   *) echo 1.000000 ;;
 esac
 exit 0'
@@ -148,12 +170,49 @@ for a in "$@"; do
   [ "$prev" = --data-binary ] && [ "$a" = @- ] && body=1
   prev="$a"
 done
-[ "$body" = 1 ] && cat >/dev/null
+payload=""
+if [ "$body" = 1 ]; then payload=$(cat); fi
+if [ "${INLINE_CPU_AT_SEEK_TICK:-0}" -gt 0 ] 2>/dev/null; then
+  case "$url" in
+    */demo/seek)
+      re="\"tick\"[[:space:]]*:[[:space:]]*([0-9]+)"
+      if [[ "$payload" =~ $re ]] && [ "${BASH_REMATCH[1]}" -ge "$INLINE_CPU_AT_SEEK_TICK" ]; then
+        : > "$LOG_DIR/cpu-fallback"
+      fi
+      ;;
+  esac
+fi
+if [ -n "${INLINE_CAPTURE_DEATH_MODE:-}" ]; then
+  case "$url" in
+    */demo/pause)
+      marker=0; [ -e "$LOG_DIR/cpu-fallback" ] && marker=1
+      printf "pause marker=%s\n" "$marker" >> "$d/capture.events"
+      ;;
+  esac
+fi
 if [ "$wo" = 1 ]; then printf 200; exit 0; fi
 case "$url" in
   */demo/state) printf "{\"tick\":100,\"paused\":true}" ;;
   */demo/seek-state) printf "0|" ;;
   */demo/capture-fields*)
+    if [ -n "${INLINE_CAPTURE_DEATH_MODE:-}" ]; then
+      pid=$(cat "$d/capture.pid" 2>/dev/null || true)
+      captured=$(cat "$d/capture.file" 2>/dev/null || true)
+      enc=$(cat "$d/capture.encoder" 2>/dev/null || true)
+      printf -v wanted "seg-%03d.mp4" "${INLINE_CAPTURE_DEATH_SEG:-0}"
+      case "$captured" in
+        */"$wanted")
+          if [ "${pid:-0}" -gt 1 ] 2>/dev/null && kill -0 "$pid" 2>/dev/null \
+             && [ ! -e "$d/killed.$pid" ]; then
+            if [ "$INLINE_CAPTURE_DEATH_MODE" = all ] || [ "$enc" != x264enc ]; then
+              : > "$d/killed.$pid"
+              printf "die %s %s\n" "$enc" "${captured##*/}" >> "$d/capture.events"
+              kill -TERM "$pid" 2>/dev/null || true
+            fi
+          fi
+          ;;
+      esac
+    fi
     n=$(( $(cat "$d/cf.count" 2>/dev/null || echo 0) + 1 ))
     echo "$n" >"$d/cf.count"
     printf "live|%d|%d|100|live|5|0" $((100000 - n)) "$n" ;;
@@ -169,7 +228,27 @@ for a in "$@"; do
   case "$a" in location=*) out="${a#location=}" ;; esac
 done
 [ -n "$out" ] || exit 0
-head -c 2048 /dev/zero >"$out"
+if [ "${INLINE_RECORD_CAPTURE:-0}" = 1 ] || [ -n "${INLINE_CAPTURE_DEATH_MODE:-}" ] \
+   || [ -n "${INLINE_CAPTURE_START_FAIL:-}" ]; then
+  enc=""
+  for a in "$@"; do
+    case "$a" in nvcudah*enc|nvh*enc|va*enc|x264enc) enc="$a" ;; esac
+  done
+  if [ "${INLINE_RECORD_CAPTURE:-0}" = 1 ]; then
+    printf "%s\n" "$enc" >> "$T_TMP/inline/capture.encoders"
+  fi
+  marker=0; [ -e "$LOG_DIR/cpu-fallback" ] && marker=1
+  printf "start %s %s marker=%s\n" "$enc" "${out##*/}" "$marker" >> "$T_TMP/inline/capture.events"
+  if [ -n "${INLINE_CAPTURE_DEATH_MODE:-}" ]; then
+    printf "%s\n" "$$" > "$T_TMP/inline/capture.pid"
+    printf "%s\n" "$out" > "$T_TMP/inline/capture.file"
+    printf "%s\n" "$enc" > "$T_TMP/inline/capture.encoder"
+  fi
+  case "${INLINE_CAPTURE_START_FAIL:-}:$enc" in
+    all:*|gpu:nvcudah*|gpu:nvh*|gpu:va*|cpu:x264enc) exit 1 ;;
+  esac
+fi
+head -c "${INLINE_CAPTURE_BYTES:-2048}" /dev/zero >"$out"
 exec env --default-signal=INT sleep 3600'
   _inline_stub gst-inspect-1.0 'exit 1'
   # The simulated CS2 process is alive; other process searches find nothing.

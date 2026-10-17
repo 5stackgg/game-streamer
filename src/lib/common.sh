@@ -365,6 +365,22 @@ spawn_logged() {
 # can't change for the life of the pod, so they're cached in a file.
 GS_PROBE_CACHE="${GS_PROBE_CACHE:-/tmp/game-streamer/gst-probes.env}"
 
+# Resolve policy on every call: the pod marker can appear after setup. Explicit
+# gpu/cpu wins; explicit auto has the same marker behavior as an absent value.
+# Stdout is only the mode, including when this function runs in $(...).
+gs_video_encoder_mode() {
+  case "${GS_VIDEO_ENCODER:-auto}" in
+    gpu|cpu) printf '%s' "$GS_VIDEO_ENCODER"; return 0 ;;
+    auto|'') ;;
+    *) warn "GS_VIDEO_ENCODER=${GS_VIDEO_ENCODER}: unrecognized, using auto" ;;
+  esac
+  if [ -e "${LOG_DIR:-/tmp/game-streamer}/cpu-fallback" ]; then
+    printf cpu-fallback
+  else
+    printf auto
+  fi
+}
+
 # Load <var> from the probe cache unless it's already set. 0 if it's set now.
 _probe_cache_load() {
   local var="$1" line
@@ -462,6 +478,7 @@ pick_h264_pipeline() {
         fi
       else
         why="$(_gs_caps_get h264_reason)"
+        [ "$(gs_video_encoder_mode)" = gpu ] && return 1
         warn "VA H.264 encoder not usable at ${GS_ENC_DIMS:-1920x1080} (reason=${why:-?}), using x264enc"
         printf 'x264enc tune=zerolatency speed-preset=veryfast bitrate=%s key-int-max=%s' \
           "$kbps" "$gop"
@@ -531,6 +548,10 @@ _resolve_h264_method() {
   fi
   [ "$force" = "va" ] && \
     warn "GS_NVENC_ELEMENT=va forced but unavailable"
+  if [ "$(gs_video_encoder_mode)" = gpu ]; then
+    warn "video_encoder=gpu: no GPU H.264 encoder, not using x264enc"
+    return 1
+  fi
   log "  encoder: x264enc (software fallback)" >&2
   printf 'x264enc'
 }
@@ -730,7 +751,31 @@ _ensure_nvenc_pick() {
   case "${1:-h264}" in
     h265|hevc) var=GS_NVENC_PICK_H265 resolve=_resolve_h265_method ;;
   esac
-  _probe_cache_load "$var" && return 0
+  local mode
+  mode=$(gs_video_encoder_mode)
+  case "$mode" in
+    cpu|cpu-fallback)
+      local override=GS_NVENC_ELEMENT value=x264enc
+      if [ "$var" = GS_NVENC_PICK_H265 ]; then
+        override=GS_NVENC_H265_ELEMENT
+        value=none
+      fi
+      if [ -n "${!override:-}" ]; then
+        warn "video_encoder=$mode: $override=${!override} ignored"
+      fi
+      printf -v "$var" '%s' "$value"
+      export "${var?}"
+      return 0
+      ;;
+  esac
+  if _probe_cache_load "$var"; then
+    if [ "$mode" = gpu ] && [ "${!var:-}" = x264enc ]; then
+      warn "video_encoder=gpu: ignoring cached x264enc"
+      unset "$var"
+    else
+      return 0
+    fi
+  fi
   if [ "${2:-}" = quiet ]; then
     pick=$("$resolve" 2>/dev/null) || true
   else
@@ -938,7 +983,10 @@ _gs_va_gfx() {
   fi
   gfx=""
   if [ -n "${GS_RENDER_NODE:-}" ]; then
-    out="$(vainfo --display drm --device "$GS_RENDER_NODE" 2>/dev/null)" || true
+    case "$(gs_video_encoder_mode)" in
+      cpu|cpu-fallback) ;;
+      *) out="$(vainfo --display drm --device "$GS_RENDER_NODE" 2>/dev/null)" || true ;;
+    esac
   fi
   out="${out,,}"
   if [[ "$out" =~ $re_si ]]; then
@@ -1012,6 +1060,9 @@ _gs_va_ok() {
     fi
   fi
   [ "$(_gs_caps_get "${codec}_reason")" = "$reason" ] || _gs_caps_put "${codec}_reason" "$reason"
+  if [ "$reason" != ok ] && [ "$(gs_video_encoder_mode)" = gpu ]; then
+    warn "video_encoder=gpu: VA $codec encoder not usable at $dims (reason=$reason)"
+  fi
   [ "$reason" = ok ]
 }
 
@@ -1067,6 +1118,12 @@ _active_encoder_is_va() {
 # actual.<mode> and reason.<mode> to encoder_caps.
 # Usage: gs_encoder_status <live|clip|inline> <requested codec> <actual codec> <encoder string> <convert string> [<reason>]
 gs_encoder_status() {
+  # encoder.<mode> keeps the element in use (the first word of the encoder string), on AMD
+  # only like the rest of encoder_caps; gs_encoder_marker reads encoder.live for the
+  # status=live report.
+  if [ "${GS_GPU_VENDOR:-}" = amd ] && [ "$#" -ge 4 ] && [ -n "${4%% *}" ]; then
+    _gs_caps_put "encoder.$1" "${4%% *}"
+  fi
   [ "${GS_GPU_VENDOR:-}" = amd ] || return 0
   local mode="${1:-}" req="${2:-}" act="${3:-}" enc="${4:-}" conv="${5:-}" reason="${6:-}"
   local el gfx did scaler=cpu msg
@@ -1226,11 +1283,21 @@ _drm_modeset_on() {
 # empty string = "don't pin this side". Only splits on a box with ≥4 cores (below
 # that, carving out cores starves cs2 more than contention does). Idempotent.
 compute_cpu_split() {
+  # Record caller presets before the first fill, including explicit empty lists.
+  # Export the answer so a child does not mistake our filled lists for presets.
+  if [ -z "${GS_CPU_SPLIT_PRESET+x}" ]; then
+    GS_CPU_SPLIT_PRESET=""
+    [ -n "${CAPTURE_CPUS+x}" ] && GS_CPU_SPLIT_PRESET+="CAPTURE_CPUS "
+    [ -n "${CS2_CPUS+x}" ] && GS_CPU_SPLIT_PRESET+="CS2_CPUS "
+    [ -n "${AUX_CPUS+x}" ] && GS_CPU_SPLIT_PRESET+="AUX_CPUS "
+    GS_CPU_SPLIT_PRESET="${GS_CPU_SPLIT_PRESET% }"
+    export GS_CPU_SPLIT_PRESET
+  fi
   [ -n "${GS_CPU_SPLIT_DONE:-}" ] && return 0
   local ncpu capn caphi caplo
   ncpu=$(nproc 2>/dev/null || echo 0)
   if [ "$ncpu" -ge 4 ]; then
-    capn="${CAPTURE_CORES:-2}"
+    capn="${CAPTURE_CORES:-${GS_CAPTURE_CORES_AUTO:-2}}"
     [ "$capn" -lt 1 ] && capn=1
     [ "$capn" -ge "$ncpu" ] && capn=$(( ncpu - 1 ))
     caplo=$(( ncpu - capn )); caphi=$(( ncpu - 1 ))
@@ -1258,6 +1325,24 @@ compute_cpu_split() {
   GS_AUX_CPUS="${AUX_CPUS:-}"
   GS_CPU_SPLIT_DONE=1
   export GS_CAPTURE_CPUS GS_CS2_CPUS GS_AUX_CPUS GS_CPU_SPLIT_DONE CAPTURE_CPUS CS2_CPUS AUX_CPUS
+}
+
+# Recompute only a self-filled split when a CPU encoder needs four capture cores.
+# Explicit CAPTURE_CORES or any original caller list wins, even an empty list.
+# Usage: gs_cpu_split_for_encoder <resolved encoder fragment>
+gs_cpu_split_for_encoder() {
+  local enc="${1:-}" ncpu
+  compute_cpu_split
+  [ "${enc%% *}" = x264enc ] || return 0
+  [ -z "${CAPTURE_CORES+x}" ] && [ -z "${GS_CPU_SPLIT_PRESET:-}" ] || return 0
+  ncpu=$(nproc 2>/dev/null || echo 0)
+  [ "$ncpu" -ge 8 ] || return 0
+  [ "${GS_CAPTURE_CORES_AUTO:-}" != 4 ] || return 0
+  GS_CAPTURE_CORES_AUTO=4
+  export GS_CAPTURE_CORES_AUTO
+  unset GS_CPU_SPLIT_DONE CAPTURE_CPUS CS2_CPUS AUX_CPUS
+  compute_cpu_split
+  apply_cpu_split
 }
 
 # Set the CPU affinity of <pid>, every thread of it, and all its descendants.
@@ -1317,6 +1402,77 @@ vkcapture_available() {
   [ "${CLIP_CAPTURE_METHOD:-vkcapture}" = "vkcapture" ] || return 1
   command -v vkcapture-consumer >/dev/null 2>&1 || return 1
   _drm_modeset_on
+}
+
+# AMD: a VA encoder must first encode one frame at the output size. The result
+# stays in encoder_caps for the pod's life (trial.ffmpeg.<encoder>.<WxH>=ok or
+# fail:<rc>) and the output goes to encoder_trials.log. A failure other than a timeout
+# (rc 124 or 137) runs once more. On failure VA_TRIAL_REASON is trial-fail or
+# trial-timeout.
+# Usage: gs_va_ffmpeg_trial <h264_vaapi|hevc_vaapi> <encoder args...>
+# shellcheck disable=SC2034  # VA_TRIAL_REASON is consumed by inline and nade callers
+gs_va_ffmpeg_trial() {
+  local key="trial.ffmpeg.$1.$GS_ENC_DIMS" rc=0 cached
+  shift
+  VA_TRIAL_REASON=""
+  if cached=$(_gs_caps_get "$key"); then
+    case "$cached" in
+      ok) return 0 ;;
+      fail:124 | fail:137) VA_TRIAL_REASON=trial-timeout ;;
+      *) VA_TRIAL_REASON=trial-fail ;;
+    esac
+    return 1
+  fi
+  for _ in 1 2; do
+    rc=0
+    timeout -k 5 20 ffmpeg -hide_banner -loglevel error "${FFMPEG_HW_ARGS[@]}" \
+      -f lavfi -i "testsrc2=size=${CLIP_OUTPUT_DIMS:-1920x1080}:rate=${CLIP_OUTPUT_FPS:-60}" \
+      -frames:v 1 -vf format=nv12,hwupload "$@" -f null - \
+      >>"${LOG_DIR:-/tmp/game-streamer}/encoder_trials.log" 2>&1 || rc=$?
+    case "$rc" in 0 | 124 | 137) break ;; esac
+  done
+  if [ "$rc" = 0 ]; then
+    _gs_caps_put "$key" ok
+    return 0
+  fi
+  _gs_caps_put "$key" "fail:$rc"
+  case "$rc" in 124 | 137) VA_TRIAL_REASON=trial-timeout ;; *) VA_TRIAL_REASON=trial-fail ;; esac
+  return 1
+}
+# A successful actual live/demo capture updates the pod-local CPU record.
+# An idempotent start with no new GS_LAST_CAPTURE_ENC preserves the record.
+gs_record_live_encoder() {
+  local el="${GS_LAST_CAPTURE_ENC:-}"
+  el="${el%% *}"
+  [ -n "$el" ] || return 0
+  if [ "$el" = x264enc ]; then
+    : > "$LOG_DIR/live-cpu-encode"
+  else
+    rm -f "$LOG_DIR/live-cpu-encode"
+  fi
+}
+
+# gs_encoder_marker: fills the array GS_ENCODER_MARKER with the extra status=live argument
+# progress_stage=encoder:<element>, the live encoder element that gs_encoder_status wrote to
+# encoder_caps as encoder.live on AMD, or x264enc from live-cpu-encode on either vendor.
+# Without either record the array stays empty and the report arguments stay unchanged.
+# The api keeps progress_stage in the status history, where the GPU nodes page shows the
+# element as the encoder tag of a busy node. Not for batch mode: broadcast_batch_status
+# folds a progress_stage into the stage and would post "live:encoder:<element>" to every
+# job as a booting tick.
+# shellcheck disable=SC2034  # the status=live sites in src/flows/ read the array
+gs_encoder_marker() {
+  GS_ENCODER_MARKER=()
+  local el
+  if [ -e "$LOG_DIR/live-cpu-encode" ]; then
+    el=x264enc
+  elif [ "${GS_GPU_VENDOR:-}" = amd ]; then
+    el=$(_gs_caps_get encoder.live) || return 0
+  else
+    return 0
+  fi
+  [ -n "$el" ] && GS_ENCODER_MARKER=("progress_stage=encoder:$el")
+  return 0
 }
 
 # Trap-friendly verbose toggle. `GS_TRACE=1 ./game-streamer.sh ...` runs

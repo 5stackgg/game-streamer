@@ -284,8 +284,10 @@ fi
 start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
   || die "capture failed to publish"
 
+gs_encoder_marker
 report_status status=live \
-  "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
+  "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
+  "${GS_ENCODER_MARKER[@]}"
 
 # The api kills the Job when the stream ends; if we exit 0 the pod
 # tears down mid-match. cs2/gst are nohup'd so we can't wait on them.
@@ -321,7 +323,20 @@ while :; do
       fi
     fi
     warn "live capture down — restarting to resync via a fresh mediamtx session"
-    restart_capture "$MATCH_ID" || warn "restart_capture failed; will retry"
+    _GS_CAPTURE_PREV_ENC="${GS_LAST_CAPTURE_ENC:-}"
+    _GS_CAPTURE_PREV_ENC="${_GS_CAPTURE_PREV_ENC%% *}"
+    if restart_capture "$MATCH_ID"; then
+      _GS_CAPTURE_NOW_ENC="${GS_LAST_CAPTURE_ENC:-}"
+      _GS_CAPTURE_NOW_ENC="${_GS_CAPTURE_NOW_ENC%% *}"
+      if [ -n "$_GS_CAPTURE_NOW_ENC" ] && [ "$_GS_CAPTURE_NOW_ENC" != "$_GS_CAPTURE_PREV_ENC" ]; then
+        gs_encoder_marker
+        report_status status=live \
+          "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
+          "${GS_ENCODER_MARKER[@]}"
+      fi
+    else
+      warn "restart_capture failed; will retry"
+    fi
   fi
   sleep 5 &
   wait $!

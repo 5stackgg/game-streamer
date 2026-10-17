@@ -390,9 +390,11 @@ if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
 else
   start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
     || die "capture failed to publish"
+  gs_encoder_marker
   report_status status=live \
     "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}" \
-    "playback_mode=demo"
+    "playback_mode=demo" \
+    "${GS_ENCODER_MARKER[@]}"
 fi
 
 if hud_running; then

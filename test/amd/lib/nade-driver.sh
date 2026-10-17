@@ -1,6 +1,11 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2016  # stub and t_run bodies expand in their child shells
 # Standalone driver for the complete nade-clip CLI; no inline-driver dependency.
+# Optional fault controls: NADE_CAPTURE_DEATH_MODE=gpu|all kills the actual
+# capture at render_go; NADE_CAPTURE_UNUSABLE=first|all creates an empty file.
+# NADE_TRACE_EXEC=1 records process/trap/approach state through the exec redo;
+# NADE_CANCEL_ON_REDO=1 returns cancelled on the rerun status GET.
+# The parent uses the batch subshell/wait shape and records its status/env.
 
 _nade_kind() {
   local last="${!#}"
@@ -45,8 +50,12 @@ nade_case() {
   _nade_stub node 'shift
 op="${1:-}"; shift || true
 case "$op" in
-  status-field) cat >/dev/null; echo rendering ;;
-  nade-timeline) printf "0\t+attack\n50\t-attack\n" ;;
+  status-field) value=$(cat); if [ "$value" = cancelled ]; then echo cancelled; else echo rendering; fi ;;
+  nade-timeline)
+    if [ "${NADE_TRACE_EXEC:-0}" = 1 ]; then
+      bytes=$(wc -c); printf "timeline pid=%s redo=%s bytes=%s\n" "$PPID" "${NADE_CPU_REDO:-0}" "$bytes" >> "$T_TMP/nade/lifecycle"
+    fi
+    printf "0\t+attack\n50\t-attack\n" ;;
   status-body)
     printf "{"; sep=""
     for item in "$@"; do
@@ -74,6 +83,16 @@ case "$url" in
       *"say /render_stage "*)
         printf "[5stack-render] staged lineup=%s x=0 y=0 z=0 dz=0 pitch=0 yaw=0 lean=0 v=1\n" "$NADE_LINEUP_ID" >> "$NADE_OUT_DIR/$NADE_RENDER_JOB_ID.events" ;;
       *"say /render_go "*)
+        if [ -n "${NADE_CAPTURE_DEATH_MODE:-}" ]; then
+          pid=$(cat "$T_TMP/nade/capture.pid" 2>/dev/null || true)
+          enc=$(cat "$T_TMP/nade/capture.encoder" 2>/dev/null || true)
+          if [ "$NADE_CAPTURE_DEATH_MODE" = all ] || [ "$enc" != x264enc ]; then
+            if [ "${pid:-0}" -gt 1 ] 2>/dev/null; then
+              printf "die %s pid=%s\n" "$enc" "$pid" >> "$T_TMP/nade/lifecycle"
+              kill -TERM "$pid" 2>/dev/null || true
+            fi
+          fi
+        fi
         for kind in stance stance_eyes aim aim_pin aim_close landing; do
           printf "[5stack-render] still lineup=%s kind=%s t=100\n" "$NADE_LINEUP_ID" "$kind"
         done >> "$NADE_OUT_DIR/$NADE_RENDER_JOB_ID.events"
@@ -82,7 +101,8 @@ case "$url" in
         done >> "$NADE_OUT_DIR/$NADE_RENDER_JOB_ID.events" ;;
     esac ;;
   */status)
-    [ -z "$body" ] || printf "%s\n" "$body" >> "$T_TMP/nade/statuses" ;;
+    if [ -n "$body" ]; then printf "%s\n" "$body" >> "$T_TMP/nade/statuses"
+    elif [ "${NADE_CANCEL_ON_REDO:-0}:${NADE_CPU_REDO:-0}" = 1:1 ]; then echo cancelled; fi ;;
 esac
 if [ -n "$upload" ]; then
   printf "%s bytes=%s\n" "${url##*/}" "$(stat -c %s "$upload")" >> "$T_TMP/nade/uploads"
@@ -90,9 +110,22 @@ elif [ -n "$data_file" ]; then
   printf "%s bytes=%s\n" "${url##*/}" "$(stat -c %s "$data_file")" >> "$T_TMP/nade/uploads"
 fi
 if [ "$write_code" = 1 ]; then printf 200; fi'
-  _nade_stub gst-launch-1.0 'out=""
+  _nade_stub gst-launch-1.0 '[ "${1:-}" = -q ] && exit "${NADE_GST_TRIAL_RC:-0}"
+out=""
 for arg in "$@"; do case "$arg" in location=*) out="${arg#location=}" ;; esac; done
-if [ -n "$out" ]; then mkdir -p "${out%/*}"; head -c 2048 /dev/zero > "$out"; fi
+if [ -n "$out" ]; then
+  mkdir -p "${out%/*}"
+  bytes=2048
+  if [ "${NADE_CAPTURE_UNUSABLE:-}" = all ] || { [ "${NADE_CAPTURE_UNUSABLE:-}" = first ] && [ "${NADE_CPU_REDO:-0}" != 1 ]; }; then bytes=0; fi
+  head -c "$bytes" /dev/zero > "$out"
+  if [ "${NADE_TRACE_EXEC:-0}" = 1 ] || [ -n "${NADE_CAPTURE_DEATH_MODE:-}" ]; then
+    enc=""; for arg in "$@"; do case "$arg" in nvcudah*enc|nvh*enc|va*enc|x264enc) enc="$arg" ;; esac; done
+    printf "%s\n" "$$" > "$T_TMP/nade/capture.pid"
+    printf "%s\n" "$enc" > "$T_TMP/nade/capture.encoder"
+    printf "%s\n" "$enc" >> "$T_TMP/nade/capture.encoders"
+    printf "capture %s pid=%s redo=%s\n" "$enc" "$$" "${NADE_CPU_REDO:-0}" >> "$T_TMP/nade/lifecycle"
+  fi
+fi
 if [ "${NADE_GST_EARLY:-0}" = 1 ]; then exit 1; fi
 exec env --default-signal=INT sleep 3600'
   _nade_stub ffmpeg 'printf -v argv "%q " "$@"
@@ -131,7 +164,28 @@ nade_render() {
     GS_NVENC_PICK=nvcudah264enc NADE_OUTPUT_DIMS=1920x1080 NADE_OUTPUT_FPS=60 \
     NADE_STAGE_TIMEOUT_MS=2000 NADE_STAGE_ATTEMPTS=1 NADE_UNKNOWN_LINEUP_RETRIES=0 \
     NADE_MAX_CLIP_MS=6000 NADE_PIN_PULL_MS=1 NADE_POLL_MS=5 "$@" -- \
-    'timeout -k 5 120 bash "$GS_REPO/src/lib/nade-clip.sh" > "$T_TMP/nade/render.log" 2>&1'
+    'if [ "${NADE_TRACE_EXEC:-0}" = 1 ]; then
+  export BASH_ENV="$T_TMP/nade/bash-env"
+  cat > "$BASH_ENV" <<'"'"'NADE_BASH_ENV'"'"'
+case "$0" in */nade-clip.sh)
+  marker=0; [ -e "$LOG_DIR/cpu-fallback" ] && marker=1
+  release=0; [ -e "$NADE_CS2_RELEASE_MARKER" ] && release=1
+  approach=0; [ -s "$NADE_APPROACH_FILE" ] && approach=1
+  printf "shell pid=%s redo=%s marker=%s released=%s approach=%s\n" "$$" "${NADE_CPU_REDO:-0}" "$marker" "$release" "$approach" >> "$T_TMP/nade/lifecycle"
+  exec 9>> "$T_TMP/nade/xtrace"
+  BASH_XTRACEFD=9
+  PS4="trace pid=$$ redo=${NADE_CPU_REDO:-0} "
+  set -x
+  ;;
+esac
+NADE_BASH_ENV
+fi
+( bash "$GS_REPO/src/lib/nade-clip.sh" ) > "$T_TMP/nade/render.log" 2>&1 &
+nade_child=$!
+printf "%s\n" "$nade_child" > "$T_TMP/nade/waited.pid"
+nade_rc=0; wait "$nade_child" || nade_rc=$?
+printf "wait rc=%s redo=%s\n" "$nade_rc" "${NADE_CPU_REDO-unset}" >> "$T_TMP/nade/parent"
+exit "$nade_rc"'
   NADE_RC="$T_RC"
   NADE_LOG="$(cat "$T_TMP/nade/render.log" 2>/dev/null)"
 }

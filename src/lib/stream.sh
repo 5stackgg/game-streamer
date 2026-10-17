@@ -58,6 +58,46 @@ live_diag_line() {
 # start_capture <stream-id> [fps] [video-kbps] [show-pointer] [audio]
 #   audio: 1 to include PulseAudio leg (default), 0 video-only
 start_capture() {
+  local rc=0 enc
+  _start_capture_once "$@" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    gs_record_live_encoder
+    return 0
+  fi
+  if [ "$rc" -eq 1 ]; then
+    case "$(gs_video_encoder_mode)" in
+      gpu)
+        warn "video_encoder=gpu: capture failed to start, CPU retry is forbidden"
+        return 1
+        ;;
+      cpu-fallback)
+        rm -f "$LOG_DIR/cpu-fallback"
+        unset GS_NVENC_PICK GS_NVENC_PICK_H265
+        return 1
+        ;;
+    esac
+  fi
+  enc="${GS_LAST_CAPTURE_ENC:-}"
+  enc="${enc%% *}"
+  if [ "$rc" -ne 1 ] || [ "$(gs_video_encoder_mode)" != auto ] \
+     || [ -z "$enc" ] || [ "$enc" = x264enc ]; then
+    return "$rc"
+  fi
+  warn "capture: $enc failed to start, retrying on the CPU (video_encoder=auto)"
+  mkdir -p "$LOG_DIR" && : > "$LOG_DIR/cpu-fallback" || return 1
+  stop_capture "$1" || true
+  unset GS_NVENC_PICK GS_NVENC_PICK_H265
+  if _start_capture_once "$@"; then
+    gs_record_live_encoder
+    return 0
+  fi
+  rm -f "$LOG_DIR/cpu-fallback"
+  unset GS_NVENC_PICK GS_NVENC_PICK_H265
+  return 1
+}
+
+_start_capture_once() {
+  GS_LAST_CAPTURE_ENC=""
   local stream_id="${1:?stream-id required}"
   local fps="${2:-30}"
   local kbps="${3:-4000}"
@@ -113,6 +153,13 @@ start_capture() {
   local enc="" parse=""
   case "$codec" in
     h265|hevc)
+      local encoder_mode
+      encoder_mode=$(gs_video_encoder_mode)
+      case "$encoder_mode" in
+        cpu|cpu-fallback)
+          warn "video_encoder=$encoder_mode: encoding on the CPU (x264enc), HEVC becomes H.264"
+          ;;
+      esac
       if enc=$(pick_h265_pipeline "$gop" "$kbps" live); then
         parse="h265parse config-interval=1"
       elif [ "${GS_GPU_VENDOR:-}" = amd ]; then
@@ -134,6 +181,7 @@ start_capture() {
       || { warn "no H.264 encoder resolved — not starting capture"; return 1; }
     parse="h264parse config-interval=1"
   fi
+  GS_LAST_CAPTURE_ENC="$enc"
   log "  codec: $codec"
 
   # Scale + colorspace convert. Runs on the GPU when the encoder is CUDA-based
@@ -262,6 +310,7 @@ $hud_src"
     # never share a core. CAPTURE_CPUS overrides the list (empty = no pin);
     # CAPTURE_CORES sets the count (2 is the floor — capture needs ~1.7 cores).
     local capture_pin=()
+    gs_cpu_split_for_encoder "$enc"
     compute_cpu_split
     if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
       capture_pin=(taskset -c "$GS_CAPTURE_CPUS")

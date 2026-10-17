@@ -79,6 +79,7 @@ esac
 : "${NADE_ACT_AT_MS:=8500}"
 
 CLIP_OUTPUT_DIMS="$NADE_OUTPUT_DIMS"
+GS_ENC_DIMS="$NADE_OUTPUT_DIMS"
 CLIP_OUTPUT_FPS="$NADE_OUTPUT_FPS"
 CLIP_OUT_DIR="$NADE_OUT_DIR"
 export CLIP_OUTPUT_DIMS CLIP_OUTPUT_FPS CLIP_OUT_DIR
@@ -488,6 +489,10 @@ while :; do
 done
 
 say "STEP 3: stop capture"
+NADE_CAPTURE_ALIVE=0
+if [ -n "${CLIP_CAPTURE_PID:-}" ] && kill -0 "$CLIP_CAPTURE_PID" 2>/dev/null; then
+  NADE_CAPTURE_ALIVE=1
+fi
 stop_clip_capture
 stop_render_tail
 api_status "status=rendering" "progress=0.9"
@@ -498,8 +503,24 @@ CLIP_DURATION_S=$(ffprobe -v error -show_entries format=duration \
   -of default=noprint_wrappers=1:nokey=1 "$NADE_CLIP_FILE" 2>/dev/null \
   | awk '{printf "%.2f", $1}')
 [ -z "$CLIP_DURATION_S" ] && CLIP_DURATION_S=0
-if [ "$(awk -v d="$CLIP_DURATION_S" -v b="$CLIP_BYTES" \
-        'BEGIN{print (d >= 1.0 && b > 1024) ? 1 : 0}')" != "1" ]; then
+NADE_CLIP_USABLE=$(awk -v d="$CLIP_DURATION_S" -v b="$CLIP_BYTES" \
+  'BEGIN{print (d >= 1.0 && b > 1024) ? 1 : 0}')
+if [ "$NADE_CAPTURE_ALIVE" != 1 ] || [ "$NADE_CLIP_USABLE" != 1 ]; then
+  _nade_capture_enc="${GS_LAST_CAPTURE_ENC:-}"
+  _nade_capture_enc="${_nade_capture_enc%% *}"
+  if [ "$(gs_video_encoder_mode)" = auto ] && [ -n "$_nade_capture_enc" ] \
+     && [ "$_nade_capture_enc" != x264enc ] && [ ! -e "$LOG_DIR/cpu-fallback" ] \
+     && [ -z "${NADE_CPU_REDO+x}" ]; then
+    say "WARN capture: $_nade_capture_enc died or produced an unusable nade, redoing it once on the CPU (video_encoder=auto)"
+    : > "$LOG_DIR/cpu-fallback" || die_failed "could not activate the CPU fallback"
+    export NADE_CPU_REDO=1
+    exec bash "$0" "$@"
+  fi
+  if [ "$(gs_video_encoder_mode)" = gpu ]; then
+    say "WARN video_encoder=gpu: nade capture failed, CPU redo is forbidden"
+  fi
+  rm -f "$LOG_DIR/cpu-fallback"
+  if [ "$NADE_CAPTURE_ALIVE" != 1 ]; then die_failed "nade capture died mid-render"; fi
   die_failed "encode produced an unusable clip (${CLIP_BYTES}B, ${CLIP_DURATION_S}s)"
 fi
 CLIP_DURATION_MS=$(awk -v d="$CLIP_DURATION_S" 'BEGIN{printf "%d", d * 1000}')
@@ -563,12 +584,26 @@ fi
 
 # --- STEP 5: the delivered encode ---------------------------------------------
 # The high-bitrate capture keeps the stills clean. A smaller delivery encode
-# follows: NVIDIA tries NVENC, while AMD uses libx264 in P2. If every delivery
-# attempt fails, the recorded capture remains the upload.
+# follows: NVIDIA tries NVENC, AMD tries VA-API after its gates and trial, and
+# libx264 is the fallback. If delivery fails, the recorded capture is uploaded.
+
+# Only this delivery helper consumes NADE_DELIVERY_PRE. Empty it for CPU retries;
+# still extraction and capture keep their own arguments.
+NADE_VIDEO_ENCODER_MODE=$(gs_video_encoder_mode)
+NADE_DELIVERY_PRE=()
+FFMPEG_HW_ARGS=()
+NADE_VA_ARGS=()
+if [[ "$NADE_VIDEO_ENCODER_MODE" != cpu* ]] && [ "${GS_GPU_VENDOR:-}" = amd ] && [ -n "${GS_RENDER_NODE:-}" ]; then
+  FFMPEG_HW_ARGS=(-init_hw_device "vaapi=gsva:$GS_RENDER_NODE" -filter_hw_device gsva)
+  NADE_VA_ARGS=(-c:v h264_vaapi -rc_mode VBR -b:v "${NADE_FINAL_BITRATE:-9M}"
+    -maxrate "${NADE_FINAL_MAXRATE:-14M}" -bufsize "${NADE_FINAL_BUFSIZE:-18M}"
+    -compression_level "${GS_VA_FFMPEG_LEVEL:-5}" -bf 0 -g "$((NADE_OUTPUT_FPS * 2))"
+    -profile:v high -level 4.2)
+fi
 
 nade_delivery_encode() {
   rm -f "$NADE_DELIVERY_FILE"
-  timeout 180 ffmpeg -y -hide_banner -loglevel error -i "$NADE_CLIP_FILE" "$@" \
+  timeout 180 ffmpeg -y -hide_banner -loglevel error "${NADE_DELIVERY_PRE[@]}" -i "$NADE_CLIP_FILE" "$@" \
     -c:a copy -movflags +faststart "$NADE_DELIVERY_FILE" 2>/dev/null \
     && [ -s "$NADE_DELIVERY_FILE" ]
 }
@@ -579,15 +614,52 @@ NADE_NVENC_ARGS=(-c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr
   -pix_fmt yuv420p -profile:v high -level 4.2)
 
 # NVIDIA keeps its two NVENC attempts, including the pre-Turing no-B-ref
-# retry. AMD skips both. The final CPU attempt is shared.
+# retry. AMD checks its render node, active H.264 encoder and cached ffmpeg
+# trial in that order. Its CPU fallback carries the first refusal reason.
 NADE_DELIVERY_ENC=""
-if [ "${GS_GPU_VENDOR:-}" != amd ] && nade_delivery_encode "${NADE_NVENC_ARGS[@]}" -b_ref_mode middle; then
+NADE_DELIVERY_REASON=""
+if [[ "$NADE_VIDEO_ENCODER_MODE" = cpu* ]]; then
+  if nade_delivery_encode -c:v libx264 -preset veryfast -crf 22 \
+       -pix_fmt yuv420p -profile:v high -level 4.2; then
+    NADE_DELIVERY_ENC=libx264
+    say "delivery encode: encoder=$NADE_DELIVERY_ENC (video_encoder=$NADE_VIDEO_ENCODER_MODE)"
+  fi
+elif [ "${GS_GPU_VENDOR:-}" = amd ]; then
+  if [ "${#FFMPEG_HW_ARGS[@]}" -eq 0 ]; then
+    NADE_DELIVERY_REASON=no-render-node
+  elif ! _active_encoder_is_va h264; then
+    NADE_DELIVERY_REASON=$(_gs_caps_get h264_reason)
+  elif ! gs_va_ffmpeg_trial h264_vaapi "${NADE_VA_ARGS[@]}"; then
+    NADE_DELIVERY_REASON="$VA_TRIAL_REASON"
+  else
+    NADE_DELIVERY_PRE=("${FFMPEG_HW_ARGS[@]}")
+    if nade_delivery_encode -vf format=nv12,hwupload "${NADE_VA_ARGS[@]}"; then
+      NADE_DELIVERY_ENC=h264_vaapi
+      say "delivery encode: encoder=$NADE_DELIVERY_ENC"
+    else
+      if [ "$NADE_VIDEO_ENCODER_MODE" = gpu ]; then
+        say "WARN video_encoder=gpu: h264_vaapi delivery failed, CPU retry is forbidden"
+      else
+        say "WARN delivery encode: h264_vaapi failed, retrying with libx264"
+      fi
+      NADE_DELIVERY_REASON=retry-fail
+    fi
+  fi
+  if [ -z "$NADE_DELIVERY_ENC" ] && [ "$NADE_VIDEO_ENCODER_MODE" != gpu ]; then
+    NADE_DELIVERY_PRE=()
+    if nade_delivery_encode -c:v libx264 -preset veryfast -crf 22 \
+         -pix_fmt yuv420p -profile:v high -level 4.2; then
+      NADE_DELIVERY_ENC=libx264
+      say "delivery encode: encoder=$NADE_DELIVERY_ENC (reason=${NADE_DELIVERY_REASON:-?})"
+    fi
+  fi
+elif [ "${GS_GPU_VENDOR:-}" != amd ] && nade_delivery_encode "${NADE_NVENC_ARGS[@]}" -b_ref_mode middle; then
   NADE_DELIVERY_ENC=h264_nvenc
   say "delivery encode: encoder=$NADE_DELIVERY_ENC"
 elif [ "${GS_GPU_VENDOR:-}" != amd ] && nade_delivery_encode "${NADE_NVENC_ARGS[@]}"; then
   NADE_DELIVERY_ENC=h264_nvenc
   say "delivery encode: encoder=$NADE_DELIVERY_ENC (no B-frame refs)"
-elif nade_delivery_encode -c:v libx264 -preset veryfast -crf 22 \
+elif [ "$NADE_VIDEO_ENCODER_MODE" != gpu ] && nade_delivery_encode -c:v libx264 -preset veryfast -crf 22 \
      -pix_fmt yuv420p -profile:v high -level 4.2; then
   NADE_DELIVERY_ENC=libx264
   say "delivery encode: encoder=$NADE_DELIVERY_ENC"
@@ -597,6 +669,9 @@ if [ -n "$NADE_DELIVERY_ENC" ]; then
   say "delivery encode: $(stat -c '%s' "$NADE_CLIP_FILE" 2>/dev/null || stat -f '%z' "$NADE_CLIP_FILE")B"
 else
   rm -f "$NADE_DELIVERY_FILE"
+  if [ "$NADE_VIDEO_ENCODER_MODE" = gpu ]; then
+    say "WARN video_encoder=gpu: no GPU delivery encode succeeded, uploading the GPU capture"
+  fi
   say "WARN delivery encode failed — uploading the capture as recorded"
 fi
 

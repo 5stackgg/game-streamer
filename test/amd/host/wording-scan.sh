@@ -40,8 +40,11 @@ esac
 moved() {
   # S3 C14 and S4 C12: stream.sh's LIVE-DIAG line moves into live_diag_line, which adds
   # the enc= field on AMD only; S5-U3 (test/amd/live-diag.sh) proves the NVIDIA text.
+  # S7-D10 expands the supervisor restart into a conditional so successful encoder
+  # changes can be reported. Its failure branch keeps this exact WARN message.
   cat <<'EOF'
 log "  LIVE-DIAG ${stream_id:0:8}: gpu(util,vramMiB,clkMHz,tempC)=${g} | cs2cpu=${cs2cpu}% capcpu=${capcpu}% (composite=${comp})${adiag}"
+restart_capture "$MATCH_ID" || warn "restart_capture failed; will retry"
 EOF
 }
 

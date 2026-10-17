@@ -20,6 +20,42 @@
 # The modeset check is NVIDIA-only: on a host without the nvidia_drm module (AMD)
 # _drm_modeset_on finds no modeset parameter and passes, so the other two decide.
 start_clip_capture() {
+  local rc=0 enc
+  _start_clip_capture_once "$@" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq 1 ]; then
+    case "$(gs_video_encoder_mode)" in
+      gpu)
+        warn "video_encoder=gpu: capture failed to start, CPU retry is forbidden"
+        return 1
+        ;;
+      cpu-fallback)
+        rm -f "$LOG_DIR/cpu-fallback"
+        unset GS_NVENC_PICK GS_NVENC_PICK_H265
+        return 1
+        ;;
+    esac
+  fi
+  enc="${GS_LAST_CAPTURE_ENC:-}"
+  enc="${enc%% *}"
+  if [ "$rc" -ne 1 ] || [ "$(gs_video_encoder_mode)" != auto ] \
+     || [ -z "$enc" ] || [ "$enc" = x264enc ]; then
+    return "$rc"
+  fi
+  warn "capture: $enc failed to start, retrying on the CPU (video_encoder=auto)"
+  mkdir -p "$LOG_DIR" && : > "$LOG_DIR/cpu-fallback" || return 1
+  stop_clip_capture || true
+  unset GS_NVENC_PICK GS_NVENC_PICK_H265
+  if _start_clip_capture_once "$@"; then
+    return 0
+  fi
+  rm -f "$LOG_DIR/cpu-fallback"
+  unset GS_NVENC_PICK GS_NVENC_PICK_H265
+  return 1
+}
+
+_start_clip_capture_once() {
+  GS_LAST_CAPTURE_ENC=""
   local method="${CLIP_CAPTURE_METHOD:-vkcapture}"
   CLIP_CAPTURE_READY_FILE=""
   CLIP_CAPTURE_START_FILE=""
@@ -56,7 +92,15 @@ _clip_resolve_encoder() {
   CLIP_ENC="" CLIP_PARSE_CAPS=""
   case "$CLIP_CODEC" in
     h265|hevc)
+      local encoder_mode
+      encoder_mode=$(gs_video_encoder_mode)
+      case "$encoder_mode" in
+        cpu|cpu-fallback)
+          warn "video_encoder=$encoder_mode: encoding on the CPU (x264enc), HEVC becomes H.264"
+          ;;
+      esac
       if CLIP_ENC=$(pick_h265_pipeline "$gop" "$kbps" clip); then
+        GS_LAST_CAPTURE_ENC="$CLIP_ENC"
         CLIP_PARSE_CAPS="h265parse config-interval=1 ! video/x-h265,stream-format=hvc1,alignment=au"
         return 0
       fi
@@ -72,6 +116,7 @@ _clip_resolve_encoder() {
   CLIP_CODEC=h264
   CLIP_ENC=$(pick_h264_pipeline "$gop" "$kbps" clip) \
     || { warn "no H.264 encoder resolved"; return 1; }
+  GS_LAST_CAPTURE_ENC="$CLIP_ENC"
   CLIP_PARSE_CAPS="h264parse config-interval=1"
 }
 
@@ -156,6 +201,7 @@ _start_clip_capture_vkcapture() {
   # pinned to the complementary cores at launch (cs2_cpu_pin), so the split is
   # real — they never share a core. CAPTURE_CPUS overrides the list (empty = no pin).
   local capture_pin=()
+  gs_cpu_split_for_encoder "$enc"
   compute_cpu_split
   if [ -n "${GS_CAPTURE_CPUS:-}" ] && command -v taskset >/dev/null 2>&1; then
     capture_pin=(taskset -c "$GS_CAPTURE_CPUS")

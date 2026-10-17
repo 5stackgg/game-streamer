@@ -39,3 +39,18 @@ jobs:
       # node and bash.
       - name: node --test
         run: node --test
+
+  bash-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: GPU policy and pipeline regressions with recording stubs
+        run: bash test/amd/lib/run.sh
+
+      - name: Preserve upstream log wording
+        run: bash test/amd/host/wording-scan.sh

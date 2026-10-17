@@ -747,9 +747,40 @@ has_audio_stream() {
 
 # Resolve codec end-to-end before any segment runs — gst capture and
 # ffmpeg concat/polish passes must all agree, otherwise re-encoded
-# outputs can drift from captured segments. HEVC needs both NVENC paths
-# (gst + ffmpeg); downgrade to h264 if either is missing.
+# outputs can drift from captured segments. HEVC needs a GPU encoder in both
+# paths, gst and ffmpeg (NVENC, or VA-API on AMD); downgrade to h264 if either
+# is missing.
 CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h264}"
+GS_INLINE_ENCODER_MODE=$(gs_video_encoder_mode)
+if [ "$GS_INLINE_ENCODER_MODE" = gpu ] && [ "${CLIP_FINAL_ENCODER:-}" = x264 ]; then
+  say "WARN video_encoder=gpu: CLIP_FINAL_ENCODER=x264 ignored"
+  unset CLIP_FINAL_ENCODER
+fi
+# Inline VA-API on AMD: FFMPEG_HW_ARGS opens the render node before the first -i, and
+# VA_UPLOAD (sites 1 and 3) or VA_VF_ARGS (sites 2 and 4) hands the frames to a VA
+# encoder through hwupload; site 3 then maps VA_VMAP. On NVIDIA they stay empty and
+# VA_VMAP is [v]. CLIP_CODEC_REQ keeps the requested codec for the ENCODER-CAPS line.
+case "$CLIP_VIDEO_CODEC" in h265 | hevc) CLIP_CODEC_REQ=h265 ;; *) CLIP_CODEC_REQ=h264 ;; esac
+GS_ENC_DIMS="${CLIP_OUTPUT_DIMS:-1920x1080}"
+FFMPEG_HW_ARGS=()
+VA_H264_ARGS=()
+VA_HEVC_ARGS=()
+VA_UPLOAD=""
+VA_VF_ARGS=()
+VA_VMAP='[v]'
+FINAL_VA_REASON=""
+HEVC_VA_REASON=""
+if [ "${GS_GPU_VENDOR:-}" = amd ] && [ -n "${GS_RENDER_NODE:-}" ] \
+   && [ "$GS_INLINE_ENCODER_MODE" != cpu ] && [ "$GS_INLINE_ENCODER_MODE" != cpu-fallback ]; then
+  FFMPEG_HW_ARGS=(-init_hw_device "vaapi=gsva:$GS_RENDER_NODE" -filter_hw_device gsva)
+  VA_H264_ARGS=(-c:v h264_vaapi -rc_mode VBR -b:v "${CLIP_FINAL_BITRATE:-9M}"
+    -maxrate "${CLIP_FINAL_MAXRATE:-14M}" -bufsize "${CLIP_FINAL_BUFSIZE:-18M}"
+    -compression_level "${GS_VA_FFMPEG_LEVEL:-5}" -bf 0 -g "$((${CLIP_OUTPUT_FPS:-60} * 2))"
+    -profile:v high -level 4.2)
+  VA_HEVC_ARGS=(-c:v hevc_vaapi -rc_mode CQP -qp "${GS_VA_FFMPEG_QP:-24}"
+    -compression_level "${GS_VA_FFMPEG_LEVEL:-5}" -bf 0 -g "$((${CLIP_OUTPUT_FPS:-60} * 2))"
+    -profile:v main -tag:v hvc1)
+fi
 # yuv420p + high@4.2 are required for broad Safari/iOS/Android MP4 playback.
 # The delivered encode. NVENC (p6/hq, spatial+temporal AQ, lookahead, B-frames as
 # references) at a target bitrate around what the old libx264 veryfast/crf 22 made
@@ -757,6 +788,8 @@ CLIP_VIDEO_CODEC="${CLIP_VIDEO_CODEC:-h264}"
 # Constant quality 19 tripled the size without a visible difference. NVENC is checked
 # with a tiny test encode; the old libx264 encode is the fallback.
 # CLIP_FINAL_BITRATE / CLIP_FINAL_MAXRATE tune it; CLIP_FINAL_ENCODER=x264 forces libx264.
+# On AMD the final encoder is h264_vaapi (VBR at the same CLIP_FINAL_* knobs), checked
+# with a one-frame encode at the output size; libx264 is the fallback there as well.
 H264_X264_ARGS=(-c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -profile:v high -level 4.2)
 H264_NVENC_ARGS=(-c:v h264_nvenc -preset p6 -tune hq -multipass qres -rc vbr
   -b:v "${CLIP_FINAL_BITRATE:-9M}" -maxrate "${CLIP_FINAL_MAXRATE:-14M}" -bufsize "${CLIP_FINAL_BUFSIZE:-18M}"
@@ -787,38 +820,158 @@ _final_nvenc_pick() {
   export GS_FINAL_NVENC; _probe_cache_store GS_FINAL_NVENC
   printf '%s' "$GS_FINAL_NVENC"
 }
-# AMD: libx264 until the h264_vaapi final encode is enabled. Setting x264 also skips
-# the h264_nvenc test encodes below, which cannot pass without the NVIDIA runtime.
-if [ "${GS_GPU_VENDOR:-}" = amd ] && [ -z "${CLIP_FINAL_ENCODER:-}" ]; then
-  CLIP_FINAL_ENCODER=x264
-  say "final encode: h264_vaapi not enabled yet, using libx264"
-fi
 FINAL_NVENC=""
-[ "${CLIP_FINAL_ENCODER:-nvenc}" != "x264" ] && FINAL_NVENC=$(_final_nvenc_pick || true)
-if [ "$FINAL_NVENC" = "nobref" ]; then
-  _a=(); _skip=0
-  for _x in "${H264_NVENC_ARGS[@]}"; do
-    if [ "$_skip" = 1 ]; then _skip=0; continue; fi
-    [ "$_x" = "-b_ref_mode" ] && { _skip=1; continue; }
-    _a+=("$_x")
-  done
-  H264_NVENC_ARGS=("${_a[@]}"); unset _a _skip _x
-fi
-if [ -n "$FINAL_NVENC" ]; then
-  H264_VENC_ARGS=("${H264_NVENC_ARGS[@]}")
-  say "final encode: h264_nvenc p6/hq ${CLIP_FINAL_BITRATE:-9M} (max ${CLIP_FINAL_MAXRATE:-14M})$([ "$FINAL_NVENC" = nobref ] && echo ', no B-frame refs')"
-else
+if [ "$GS_INLINE_ENCODER_MODE" = cpu ] || [ "$GS_INLINE_ENCODER_MODE" = cpu-fallback ]; then
+  FINAL_VA=0
+  FINAL_VA_REASON="$GS_INLINE_ENCODER_MODE"
+  HEVC_VA_REASON="$GS_INLINE_ENCODER_MODE"
   H264_VENC_ARGS=("${H264_X264_ARGS[@]}")
-  say "final encode: libx264 veryfast crf 22 (h264_nvenc unavailable or CLIP_FINAL_ENCODER=x264)"
+  if [ "$GS_INLINE_ENCODER_MODE" = cpu ]; then
+    say "final encode: libx264 veryfast crf 22 (video_encoder=cpu)"
+  else
+    say "final encode: libx264 veryfast crf 22 (the CPU fallback is active in this pod)"
+  fi
+elif [ "${GS_GPU_VENDOR:-}" = amd ]; then
+  # AMD: h264_vaapi at the CLIP_FINAL_* settings once its trial passes, else libx264.
+  # The h264_nvenc test encodes need the NVIDIA runtime, so they never run here.
+  FINAL_VA=0
+  if [ "${CLIP_FINAL_ENCODER:-}" = x264 ]; then
+    FINAL_VA_REASON=forced-x264
+  elif [ "${#FFMPEG_HW_ARGS[@]}" -eq 0 ]; then
+    FINAL_VA_REASON=no-render-node
+  elif ! _active_encoder_is_va h264; then
+    FINAL_VA_REASON=$(_gs_caps_get h264_reason)
+  elif gs_va_ffmpeg_trial h264_vaapi "${VA_H264_ARGS[@]}"; then
+    FINAL_VA=1
+  else
+    FINAL_VA_REASON="$VA_TRIAL_REASON"
+  fi
+  if [ "$FINAL_VA" = 1 ]; then
+    H264_VENC_ARGS=("${VA_H264_ARGS[@]}")
+    say "final encode: h264_vaapi VBR ${CLIP_FINAL_BITRATE:-9M} (max ${CLIP_FINAL_MAXRATE:-14M}) on $GS_RENDER_NODE"
+  else
+    FINAL_VA_REASON="${FINAL_VA_REASON:-?}"
+    H264_VENC_ARGS=("${H264_X264_ARGS[@]}")
+    if [ "$GS_INLINE_ENCODER_MODE" = gpu ]; then
+      say "video_encoder=gpu: H.264 VA final encoder unavailable (reason=$FINAL_VA_REASON)"
+    else
+      say "final encode: libx264 veryfast crf 22 (h264_vaapi unavailable or CLIP_FINAL_ENCODER=x264, reason=$FINAL_VA_REASON)"
+    fi
+  fi
+else
+  FINAL_NVENC=""
+  [ "${CLIP_FINAL_ENCODER:-nvenc}" != "x264" ] && FINAL_NVENC=$(_final_nvenc_pick || true)
+  if [ "$FINAL_NVENC" = "nobref" ]; then
+    _a=(); _skip=0
+    for _x in "${H264_NVENC_ARGS[@]}"; do
+      if [ "$_skip" = 1 ]; then _skip=0; continue; fi
+      [ "$_x" = "-b_ref_mode" ] && { _skip=1; continue; }
+      _a+=("$_x")
+    done
+    H264_NVENC_ARGS=("${_a[@]}"); unset _a _skip _x
+  fi
+  if [ -n "$FINAL_NVENC" ]; then
+    H264_VENC_ARGS=("${H264_NVENC_ARGS[@]}")
+    say "final encode: h264_nvenc p6/hq ${CLIP_FINAL_BITRATE:-9M} (max ${CLIP_FINAL_MAXRATE:-14M})$([ "$FINAL_NVENC" = nobref ] && echo ', no B-frame refs')"
+  else
+    H264_VENC_ARGS=("${H264_X264_ARGS[@]}")
+    if [ "$GS_INLINE_ENCODER_MODE" = gpu ]; then
+      say "video_encoder=gpu: H.264 NVENC final encoder unavailable"
+    else
+      say "final encode: libx264 veryfast crf 22 (h264_nvenc unavailable or CLIP_FINAL_ENCODER=x264)"
+    fi
+  fi
 fi
 
+# _venc_run_at <index> <word...>: true when the args array of the calling ffmpeg_venc
+# holds these words, in this order, from <index> on. An empty word list never matches.
+_venc_run_at() {
+  local at="$1" k=0 w
+  shift
+  [ "$#" -gt 0 ] || return 1
+  for w in "$@"; do
+    [ "${args[at + k]:-}" = "$w" ] || return 1
+    k=$((k + 1))
+  done
+  return 0
+}
+
+# Build the CPU argv in ffmpeg_venc's local cpu_args array. Match the complete
+# encoder sequence, so this also replaces HEVC options and its hvc1 tag. Device
+# arrays and the two VA graph suffixes use the same cleanup as the VA retry below.
+_ffmpeg_venc_cpu_args() {
+  local args=("$@") out=() a i
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    if _venc_run_at "$i" "${FFMPEG_HW_ARGS[@]}"; then
+      i=$((i + ${#FFMPEG_HW_ARGS[@]} - 1))
+    elif _venc_run_at "$i" "${VA_VF_ARGS[@]}"; then
+      i=$((i + ${#VA_VF_ARGS[@]} - 1))
+    elif _venc_run_at "$i" "${FFMPEG_VENC_ARGS[@]}"; then
+      out+=("${H264_X264_ARGS[@]}"); i=$((i + ${#FFMPEG_VENC_ARGS[@]} - 1))
+    else
+      a="${args[i]//",format=nv12,hwupload[vout]"/"[vout]"}"
+      a="${a//";[v]format=nv12,hwupload[vhw]"/}"
+      out+=("${a//"[vhw]"/"[v]"}")
+    fi
+  done
+  cpu_args=("${out[@]}")
+  FFMPEG_VENC_ARGS=("${H264_X264_ARGS[@]}")
+  FFMPEG_HW_ARGS=(); VA_UPLOAD=""; VA_VF_ARGS=(); VA_VMAP='[v]'
+}
+
 # ffmpeg with the final encoder args (passed in-line as "${FFMPEG_VENC_ARGS[@]}"). If an
-# NVENC encode fails mid-job (session limit, driver hiccup), switch this process to
-# libx264 and run the same command again, instead of failing the clip.
+# NVENC encode, or AMD's h264_vaapi final encode, fails mid-job (session limit, driver
+# hiccup), switch this process to libx264 and run the same command again, instead of
+# failing the clip.
 # FFMPEG_NICE=<n> runs it under nice.
 ffmpeg_venc() {
-  local pre=() ; [ -n "${FFMPEG_NICE:-}" ] && pre=(nice -n "$FFMPEG_NICE")
+  local pre=() cpu_args=() mode encoder
+  [ -n "${FFMPEG_NICE:-}" ] && pre=(nice -n "$FFMPEG_NICE")
+  mode=$(gs_video_encoder_mode)
+  encoder="${FFMPEG_VENC_ARGS[1]:-}"
+  case "$mode:$encoder" in
+    cpu:*nvenc|cpu:*vaapi|cpu-fallback:*nvenc|cpu-fallback:*vaapi)
+      _ffmpeg_venc_cpu_args "$@"
+      say "WARN final encode: $encoder skipped, the CPU fallback is active in this pod, using libx264"
+      if [ "$BASH_SUBSHELL" -eq 0 ]; then
+        gs_encoder_status inline "$CLIP_CODEC_REQ" h264 libx264 "" "$mode"
+      fi
+      set -- "${cpu_args[@]}"
+      ;;
+  esac
   "${pre[@]}" ffmpeg "$@" && return 0
+  if [ "$mode" = gpu ]; then
+    say "WARN final encode: $encoder failed, video_encoder=gpu forbids the libx264 retry"
+    return 1
+  fi
+  if [ "${FFMPEG_VENC_ARGS[1]:-}" = "h264_vaapi" ]; then
+    # AMD: the same libx264 retry for h264_vaapi. It also drops the VA device and
+    # upload args, takes hwupload out of the site 1 and site 3 graphs and maps [v].
+    local args=("$@") out=() a i
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      if _venc_run_at "$i" "${FFMPEG_HW_ARGS[@]}"; then
+        i=$((i + ${#FFMPEG_HW_ARGS[@]} - 1))
+      elif _venc_run_at "$i" "${VA_VF_ARGS[@]}"; then
+        i=$((i + ${#VA_VF_ARGS[@]} - 1))
+      elif _venc_run_at "$i" "${FFMPEG_VENC_ARGS[@]}"; then
+        out+=("${H264_X264_ARGS[@]}"); i=$((i + ${#FFMPEG_VENC_ARGS[@]} - 1))
+      else
+        a="${args[i]//",format=nv12,hwupload[vout]"/"[vout]"}"
+        a="${a//";[v]format=nv12,hwupload[vhw]"/}"
+        out+=("${a//"[vhw]"/"[v]"}")
+      fi
+    done
+    FFMPEG_VENC_ARGS=("${H264_X264_ARGS[@]}")
+    FFMPEG_HW_ARGS=(); VA_UPLOAD=""; VA_VF_ARGS=(); VA_VMAP='[v]'
+    say "WARN final encode: h264_vaapi failed, retrying with libx264"
+    # Sites 2 to 4 run in this shell, so the render's status changes; site 1's
+    # subshell keeps its swap to itself.
+    if [ "$BASH_SUBSHELL" -eq 0 ]; then
+      gs_encoder_status inline "$CLIP_CODEC_REQ" h264 libx264 "" retry-fail
+    fi
+    "${pre[@]}" ffmpeg "${out[@]}"
+    return
+  fi
   [ "${FFMPEG_VENC_ARGS[1]:-}" = "h264_nvenc" ] || return 1
   local args=("$@") n=${#FFMPEG_VENC_ARGS[@]} i j match out=()
   for ((i = 0; i < ${#args[@]}; i++)); do
@@ -836,31 +989,62 @@ ffmpeg_venc() {
   FFMPEG_VENC_ARGS=("${H264_X264_ARGS[@]}")
   "${pre[@]}" ffmpeg "${out[@]}"
 }
+# CPU policy skips both GPU codec probes before selecting the H.264 branch.
+case "$GS_INLINE_ENCODER_MODE:$CLIP_VIDEO_CODEC" in
+  cpu:h265|cpu:hevc|cpu-fallback:h265|cpu-fallback:hevc)
+    say "h265 requested, but this render encodes on the CPU, using h264"
+    CLIP_VIDEO_CODEC=h264
+    GST_H265_OK=0
+    FFMPEG_H265_OK=0
+    ;;
+esac
 case "$CLIP_VIDEO_CODEC" in
   h265|hevc)
     GST_H265_OK=0
     FFMPEG_H265_OK=0
-    if h265_available; then
-      GST_H265_OK=1
-      say "h265 probe: gstreamer NVENC HEVC OK (pick=${GS_NVENC_PICK_H265:-?})"
-    else
-      say "h265 probe: gstreamer NVENC HEVC unavailable (no nvcudah265enc/nvh265enc element on this pod)"
-    fi
-    FFMPEG_HEVC_LINE=$(ffmpeg -hide_banner -encoders 2>/dev/null | grep -E '\bhevc_nvenc\b' || true)
-    if [ -n "$FFMPEG_HEVC_LINE" ]; then
-      FFMPEG_H265_OK=1
-      say "h265 probe: ffmpeg hevc_nvenc OK ($(printf '%s' "$FFMPEG_HEVC_LINE" | awk '{$1=$1};1'))"
-    else
-      say "h265 probe: ffmpeg hevc_nvenc NOT FOUND in 'ffmpeg -encoders' (this build was compiled without NVENC HEVC)"
-    fi
-    # AMD: ffmpeg -encoders lists hevc_nvenc in any build, so the grep above cannot
-    # tell; HEVC stays off until the hevc_vaapi path is enabled.
     if [ "${GS_GPU_VENDOR:-}" = amd ]; then
-      FFMPEG_H265_OK=0
-      say "h265: ffmpeg VA path not enabled yet, using libx264"
+      # AMD: the VA-API HEVC pick, then a one-frame hevc_vaapi trial in place of the
+      # hevc_nvenc grep below ('ffmpeg -encoders' lists hevc_nvenc in any build).
+      if h265_available; then
+        GST_H265_OK=1
+        say "h265 probe: gstreamer VA-API HEVC OK (pick=${GS_NVENC_PICK_H265:-?})"
+      else
+        HEVC_VA_REASON=$(_gs_caps_get h265_reason)
+        HEVC_VA_REASON="${HEVC_VA_REASON:-?}"
+        say "h265 probe: gstreamer VA-API HEVC unavailable (reason=$HEVC_VA_REASON)"
+      fi
+      if [ "$GST_H265_OK" = "1" ] && [ "${#FFMPEG_HW_ARGS[@]}" -eq 0 ]; then
+        HEVC_VA_REASON=no-render-node
+      elif [ "$GST_H265_OK" = "1" ]; then
+        if gs_va_ffmpeg_trial hevc_vaapi "${VA_HEVC_ARGS[@]}"; then
+          FFMPEG_H265_OK=1
+          say "h265 probe: ffmpeg hevc_vaapi OK on $GS_RENDER_NODE"
+        else
+          HEVC_VA_REASON="$VA_TRIAL_REASON"
+          say "h265 probe: ffmpeg hevc_vaapi failed its one-frame trial at $GS_ENC_DIMS"
+        fi
+      fi
+    else
+      if h265_available; then
+        GST_H265_OK=1
+        say "h265 probe: gstreamer NVENC HEVC OK (pick=${GS_NVENC_PICK_H265:-?})"
+      else
+        say "h265 probe: gstreamer NVENC HEVC unavailable (no nvcudah265enc/nvh265enc element on this pod)"
+      fi
+      FFMPEG_HEVC_LINE=$(ffmpeg -hide_banner -encoders 2>/dev/null | grep -E '\bhevc_nvenc\b' || true)
+      if [ -n "$FFMPEG_HEVC_LINE" ]; then
+        FFMPEG_H265_OK=1
+        say "h265 probe: ffmpeg hevc_nvenc OK ($(printf '%s' "$FFMPEG_HEVC_LINE" | awk '{$1=$1};1'))"
+      else
+        say "h265 probe: ffmpeg hevc_nvenc NOT FOUND in 'ffmpeg -encoders' (this build was compiled without NVENC HEVC)"
+      fi
     fi
     if [ "$GST_H265_OK" = "1" ] && [ "$FFMPEG_H265_OK" = "1" ]; then
-      FFMPEG_VENC_ARGS=(-c:v hevc_nvenc -preset p5 -rc vbr -cq 24 -tag:v hvc1)
+      if [ "${GS_GPU_VENDOR:-}" = amd ]; then
+        FFMPEG_VENC_ARGS=("${VA_HEVC_ARGS[@]}")
+      else
+        FFMPEG_VENC_ARGS=(-c:v hevc_nvenc -preset p5 -rc vbr -cq 24 -tag:v hvc1)
+      fi
       CLIP_VIDEO_CODEC=h265
       say "h265 selected for this render"
     else
@@ -874,7 +1058,29 @@ case "$CLIP_VIDEO_CODEC" in
     FFMPEG_VENC_ARGS=("${H264_VENC_ARGS[@]}")
     ;;
 esac
+if [ "$GS_INLINE_ENCODER_MODE" = gpu ] && [ "${FFMPEG_VENC_ARGS[1]:-}" = libx264 ]; then
+  die_failed "video_encoder=gpu: no GPU encoder for the final encode"
+fi
 export CLIP_VIDEO_CODEC
+# AMD: a VA encoder takes its frames through hwupload, the last video filter at each
+# site. The ENCODER-CAPS line then names the encoder and, for a fallback, the reason.
+case "${FFMPEG_VENC_ARGS[1]:-}" in
+  h264_vaapi | hevc_vaapi)
+    VA_UPLOAD='format=nv12,hwupload'
+    VA_VF_ARGS=(-vf "format=nv12,hwupload")
+    VA_VMAP='[vhw]'
+    ;;
+  *) FFMPEG_HW_ARGS=() ;;
+esac
+if [ "$CLIP_VIDEO_CODEC" != "$CLIP_CODEC_REQ" ]; then
+  _reason="$HEVC_VA_REASON"
+elif [ "${FFMPEG_VENC_ARGS[1]:-}" = libx264 ]; then
+  _reason="$FINAL_VA_REASON"
+else
+  _reason=ok
+fi
+gs_encoder_status inline "$CLIP_CODEC_REQ" "$CLIP_VIDEO_CODEC" "${FFMPEG_VENC_ARGS[1]:-}" "" "$_reason"
+unset _reason
 
 # Parse segments + compute total duration for progress weighting.
 SEG_COUNT=$(printf '%s' "$CLIP_SEGMENTS" | node "$CLIP_HELPERS" segs-count)
@@ -1129,8 +1335,9 @@ OUTRO_CACHE_DIR="${OUTRO_CACHE_DIR:-$CLIP_OUT_DIR/.outro-cache}"
 # Precompute: will an outro be appended at concat time? If yes AND we
 # would have run a per-segment chip-overlay pass, we can fuse both into
 # a single ffmpeg encode at the end — eliminating
-# one full 1080p60 NVENC pass per clip. The polish-skip gate below
-# reads OUTRO_WILL_APPEND; the fused encode reads it at concat time.
+# one full 1080p60 GPU encode (NVENC, or VA-API on AMD) per clip. The
+# polish-skip gate below reads OUTRO_WILL_APPEND; the fused encode reads
+# it at concat time.
 OUTRO_WILL_APPEND=0
 OUTRO_FUSED_FILE=""
 if [ "$BRANDING_ENABLED" = "1" ] && [ "${CLIP_DISABLE_OUTRO:-0}" != "1" ]; then
@@ -1176,7 +1383,8 @@ rm -f "$SEG_DIR"/*.mp4 "$SEG_DIR/concat.txt" 2>/dev/null || true
 # Per-segment polish runs in the BACKGROUND so its ~5-8s NVENC encode
 # overlaps the NEXT segment's seek+capture instead of sitting between
 # them. Concurrency is exactly 1 (reap previous before spawning next):
-# capture holds one NVENC session and the GTX 980 limit is 2.
+# capture holds one NVENC session and the GTX 980 limit is 2. That limit
+# is NVIDIA's: on AMD the polish is a VA-API encode and VCN has no session cap.
 # CLIP_POLISH_OVERLAP=0 reaps immediately after spawn (serial behavior).
 # concat.txt is written AFTER the loop from CONCAT_ENTRY (index order) —
 # it isn't read until then, and entries are recorded before the polish
@@ -1187,6 +1395,41 @@ CLIP_POLISH_OVERLAP="${CLIP_POLISH_OVERLAP:-1}"
 # stream-copy concat fast path below.
 COPY_ELIGIBLE=1
 declare -a CONCAT_ENTRY=()
+declare -a SEG_ENC=()
+MIXED_SEG_ENC=0
+
+# Only valid concat entries participate; a dropped segment's old encoder does not.
+_inline_set_mixed_segment_enc() {
+  local first="" idx enc
+  MIXED_SEG_ENC=0
+  for idx in "${!CONCAT_ENTRY[@]}"; do
+    [ -n "${CONCAT_ENTRY[idx]:-}" ] || continue
+    enc="${SEG_ENC[idx]:-}"
+    [ -n "$enc" ] || continue
+    if [ -z "$first" ]; then
+      first="$enc"
+    elif [ "$enc" != "$first" ]; then
+      MIXED_SEG_ENC=1
+      return 0
+    fi
+  done
+}
+
+# Same A/V concat graph as the existing outro path. Every input must have audio;
+# a failed silent pad keeps the existing filter-graph failure behavior.
+_inline_mixed_concat_graph() {
+  local line f i
+  CONCAT_INPUTS=()
+  while IFS= read -r line; do
+    f=$(printf '%s' "$line" | awk -F"'" '/^file/{print $2}')
+    [ -n "$f" ] && CONCAT_INPUTS+=(-i "$f")
+  done < "$SEG_DIR/concat.txt"
+  FC=""
+  for ((i=0; i<SEG_COUNT; i++)); do FC+="[${i}:v:0][${i}:a:0]"; done
+  FC+="concat=n=${SEG_COUNT}:v=1:a=1[v][a]"
+  FC+="${VA_UPLOAD:+;[v]${VA_UPLOAD}[vhw]}"
+}
+
 POLISH_BG_PID=""
 POLISH_BG_IDX=""
 POLISH_BG_LOG=""
@@ -1202,7 +1445,7 @@ reap_polish_bg() {
   # A libx264 retry in the polish pass (ffmpeg_venc) leaves this segment encoded by
   # another encoder than the outro transcode would use: keep the montage off the
   # stream-copy fast path, so the filter-graph concat re-encodes it.
-  if [ -n "$log" ] && grep -q 'WARN final encode: [^ ]* failed' "$log" 2>/dev/null; then
+  if [ -n "$log" ] && grep -qE 'WARN final encode: [^ ]* (failed|skipped)' "$log" 2>/dev/null; then
     COPY_ELIGIBLE=0
   fi
   rm -f "$log"
@@ -1219,6 +1462,7 @@ ELAPSED_TICKS_TOTAL=0
 # Explicit index (not a `for` over seq) so an empty vkcapture segment can redo
 # the SAME index once after falling back to ximagesrc (see validation below).
 SEG_IDX=0
+CPU_REDO_SEG=""
 VKCAP_FELL_BACK=0
 VKCAP_RETRY_SEG=""        # segment being redone on ximagesrc after a one-off failure
 VKCAP_ONE_OFF_FAILS=0     # those one-off failures so far (capped, then the job stays on ximagesrc)
@@ -1460,6 +1704,8 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   if ! start_clip_capture "$SEG_FILE" "${CLIP_OUTPUT_FPS:-60}" "${CLIP_VIDEO_KBPS:-24000}" 1; then
     die_failed "clip capture failed to start (segment $SEG_IDX)"
   fi
+  SEG_ENC[SEG_IDX]="${GS_LAST_CAPTURE_ENC:-}"
+  SEG_ENC[SEG_IDX]="${SEG_ENC[SEG_IDX]%% *}"
   say "STEP 6: pid=${CLIP_CAPTURE_PID:-?}"
   if [ "$SEG_PREROLL_MS" -gt 0 ] && [ -z "${CLIP_CAPTURE_START_FILE:-}" ]; then
     # Fell back to a gateless capture: it would record the pre-roll, so drop it.
@@ -1556,6 +1802,19 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   PREV_MS=$GATE_MS
   while : ; do
     if ! kill -0 "${CLIP_CAPTURE_PID:-0}" 2>/dev/null; then
+      _dead_capture_enc="${SEG_ENC[SEG_IDX]:-}"
+      if [ "$(gs_video_encoder_mode)" = auto ] && [ -n "$_dead_capture_enc" ] \
+         && [ "$_dead_capture_enc" != x264enc ] && [ ! -e "$LOG_DIR/cpu-fallback" ]; then
+        say "WARN capture: $_dead_capture_enc died in segment $SEG_IDX, redoing it once on the CPU (video_encoder=auto)"
+        : > "$LOG_DIR/cpu-fallback" || die_failed "could not activate the CPU fallback"
+        CPU_REDO_SEG=$SEG_IDX
+        spec_post /demo/pause '{"force": true}'
+        break
+      fi
+      if [ "$(gs_video_encoder_mode)" = gpu ]; then
+        say "WARN video_encoder=gpu: capture died in segment $SEG_IDX, CPU redo is forbidden"
+      fi
+      rm -f "$LOG_DIR/cpu-fallback"
       die_failed "clip capture died mid-render (segment $SEG_IDX)"
     fi
     now_ms NOW_MS
@@ -1708,6 +1967,13 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
   fi
   [ -n "${CLIP_CAPTURE_TIMING_FILE:-}" ] && rm -f "$CLIP_CAPTURE_TIMING_FILE"
 
+  if [ "${CPU_REDO_SEG:-}" = "$SEG_IDX" ]; then
+    rm -f "$SEG_FILE"
+    unset CPU_REDO_SEG
+    say "capture: restarting segment $SEG_IDX on the CPU"
+    continue
+  fi
+
   if [ "$GSI_SIG_POLLS" -ge 12 ] && [ "$GSI_SIG_CHANGED" = "0" ]; then
     flat_segment_redo
     rm -f "$SEG_FILE"
@@ -1735,7 +2001,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
     # Skipped when no chip applies so the no-chip path keeps GStreamer's
     # capture intact. Also skipped when WILL_FUSE_POLISH_OUTRO=1 — the
     # chip gets baked into the same filter_complex as the outro concat,
-    # saving one full NVENC encode per clip.
+    # saving one full GPU encode (NVENC, or VA-API on AMD) per clip.
     wait_for_chip_render
     # Chip = player intro card — overlay it ONCE, on the first segment only.
     # Segments >0 fall through to the no-chip path (raw segment, silence-padded).
@@ -1751,7 +2017,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
         # Keep the underlying segment's duration and blend the chip's
         # alpha properly. The chip mov is only ~3.5s — past its end the
         # [1:v] stream ends and overlay falls through with no chip drawn.
-        FC_VIDEO="[0:v][1:v]overlay=0:0:eof_action=pass:format=auto[vout]"
+        FC_VIDEO="[0:v][1:v]overlay=0:0:eof_action=pass:format=auto${VA_UPLOAD:+,$VA_UPLOAD}[vout]"
         INPUT_ARGS=(-i "$SEG_FILE" -i "$CHIP_MOV")
 
         AUDIO_ARGS=()
@@ -1762,6 +2028,7 @@ while [ "$SEG_IDX" -lt "$SEG_COUNT" ]; do
         fi
 
         if ! FFMPEG_NICE=10 ffmpeg_venc -y -hide_banner -loglevel warning \
+             "${FFMPEG_HW_ARGS[@]}" \
              "${INPUT_ARGS[@]}" \
              -filter_complex "$FC_VIDEO" \
              -map "[vout]" \
@@ -1875,6 +2142,8 @@ if [ "$SEG_COUNT" -lt 1 ]; then
   die_failed "all segments produced empty captures — cs2 may be stalled"
 fi
 
+_inline_set_mixed_segment_enc
+
 # Outro append. We track whether one was added so the concat below
 # knows to skip stream-copy (mismatched PTS between captured segments
 # and the Remotion outro pushes the outro ~30s past in stream-copy).
@@ -1954,8 +2223,10 @@ try_concat_copy() {
     local staging="${outro_matched}.$$.tmp"
     local venc_before="${FFMPEG_VENC_ARGS[1]:-}"
     if ! ffmpeg_venc -y -hide_banner -loglevel warning \
+         "${FFMPEG_HW_ARGS[@]}" \
          "${in_args[@]}" \
          "${map_args[@]}" \
+         "${VA_VF_ARGS[@]}" \
          "${FFMPEG_VENC_ARGS[@]}" \
          -r "${CLIP_OUTPUT_FPS:-60}" \
          -c:a aac -b:a 192k -ar 48000 -ac 2 \
@@ -2020,7 +2291,8 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
   #
   # WILL_FUSE_POLISH_OUTRO=1: the per-segment polish pass was skipped,
   # so the chip overlay gets folded into this same encode — one NVENC
-  # pass instead of two (polish-per-segment + concat).
+  # pass instead of two (polish-per-segment + concat). On AMD that pass is a
+  # VA-API encode.
   CAP_SEG_COUNT=$((SEG_COUNT - 1))  # last entry in concat.txt is outro
   CONCAT_INPUTS=()
   while IFS= read -r line; do
@@ -2039,6 +2311,7 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
   else
     # Fused path: bake chip overlay into the same encode as the outro
     # concat — one NVENC pass instead of two.
+    # On AMD that pass is a VA-API encode.
     say "STEP 9: ffmpeg fused polish+concat ${CAP_SEG_COUNT} seg(s) + outro"
 
     # Chip = the player intro card; show it ONCE, on the FIRST segment only — not
@@ -2065,11 +2338,29 @@ elif [ "$OUTRO_APPENDED" = "1" ]; then
     FC+="[${CAP_SEG_COUNT}:v][${CAP_SEG_COUNT}:a]"
     FC+="concat=n=${SEG_COUNT}:v=1:a=1[v][a]"
   fi
+  # AMD: a VA encoder takes the concat output through hwupload (VA_UPLOAD).
+  FC+="${VA_UPLOAD:+;[v]${VA_UPLOAD}[vhw]}"
 
   if ! ffmpeg_venc -y -hide_banner -loglevel warning \
+       "${FFMPEG_HW_ARGS[@]}" \
        "${CONCAT_INPUTS[@]}" \
        -filter_complex "$FC" \
-       -map "[v]" -map "[a]" \
+       -map "${VA_VMAP:-[v]}" -map "[a]" \
+       "${FFMPEG_VENC_ARGS[@]}" \
+       -r "${CLIP_OUTPUT_FPS:-60}" \
+       -c:a aac -b:a 192k -ar 48000 -ac 2 \
+       -movflags +faststart \
+       "$CLIP_OUT_FILE"; then
+    die_failed "ffmpeg concat (filter-graph) failed"
+  fi
+elif [ "$MIXED_SEG_ENC" = 1 ]; then
+  say "STEP 9: mixed capture encoders, joining ${SEG_COUNT} segments with a filter graph"
+  _inline_mixed_concat_graph
+  if ! ffmpeg_venc -y -hide_banner -loglevel warning \
+       "${FFMPEG_HW_ARGS[@]}" \
+       "${CONCAT_INPUTS[@]}" \
+       -filter_complex "$FC" \
+       -map "${VA_VMAP:-[v]}" -map "[a]" \
        "${FFMPEG_VENC_ARGS[@]}" \
        -r "${CLIP_OUTPUT_FPS:-60}" \
        -c:a aac -b:a 192k -ar 48000 -ac 2 \
@@ -2089,7 +2380,9 @@ else
     rm -f "$CLIP_OUT_FILE"
     say "  concat: stream-copy refused — re-encoding"
     if ! ffmpeg_venc -y -hide_banner -loglevel warning \
+         "${FFMPEG_HW_ARGS[@]}" \
          -f concat -safe 0 -i "$SEG_DIR/concat.txt" \
+         "${VA_VF_ARGS[@]}" \
          "${FFMPEG_VENC_ARGS[@]}" \
          -r "${CLIP_OUTPUT_FPS:-60}" \
          -c:a aac -b:a 192k \
