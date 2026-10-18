@@ -53,6 +53,7 @@
 #include <dlfcn.h>
 
 #include "capture.h"
+#include "flow-diag.h"
 
 static const char SOCK_NAME[] = "/com/obsproject/vkcapture";
 
@@ -131,6 +132,8 @@ struct state {
     // gstreamer
     GstElement *pipeline;
     GstAppSrc  *appsrc;
+    VkcapFlowDiag *flow_diag;    // VKCAP_PIPELINE_DIAG=1: metadata counters only
+    guint       flow_diag_src;
     bool        caps_set;
     bool        playing;         // pipeline moved to PLAYING (on first frame)
     int         fps;
@@ -891,6 +894,14 @@ static gboolean on_debug_tick(gpointer user)
     return G_SOURCE_CONTINUE;
 }
 
+static void emit_flow_diag(const char *line) { log_msg("%s", line); }
+static gboolean on_flow_diag_tick(gpointer user)
+{
+    (void)user;
+    vkcap_flow_report(st.flow_diag, running_time_now(), emit_flow_diag);
+    return G_SOURCE_CONTINUE;
+}
+
 // ---- TEST mode: log + dump one frame -------------------------------------
 static void test_handle_frame(void)
 {
@@ -1278,6 +1289,9 @@ int main(int argc, char **argv)
         }
         // READY (not PLAYING): we flip to PLAYING when the first frame arrives, so
         // the live pulsesrc audio starts together with video (no audio lead-in).
+        st.flow_diag = vkcap_flow_start(st.pipeline,
+            g_strcmp0(getenv("VKCAP_PIPELINE_DIAG"), "1") == 0);
+        if (st.flow_diag) st.flow_diag_src = g_timeout_add_seconds(5, on_flow_diag_tick, NULL);
         gst_element_set_state(st.pipeline, GST_STATE_READY);
     } else {
         log_msg("TEST mode: will log %d texture update(s), dump to %s, no encode",
@@ -1328,6 +1342,8 @@ int main(int argc, char **argv)
     g_main_loop_run(st.loop);
 
     // teardown
+    if (st.flow_diag_src) g_source_remove(st.flow_diag_src);
+    if (st.flow_diag) on_flow_diag_tick(NULL);
     if (st.timing_path && st.fixed_ts && st.pts_frames > 0) {
         // Video (game) span vs the wall-clock span the same frames took: the clip
         // renderer stretches the pulsesrc audio by wall/video so the two line up.
@@ -1350,6 +1366,7 @@ int main(int argc, char **argv)
         // waits on our exit before it can probe (or retry) the segment.
         alarm(5);
         gst_element_set_state(st.pipeline, GST_STATE_NULL);
+        vkcap_flow_free(st.flow_diag);
         gst_object_unref(st.pipeline);
     }
     release_frame();
