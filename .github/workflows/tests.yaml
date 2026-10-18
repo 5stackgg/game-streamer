@@ -11,6 +11,25 @@ permissions:
   contents: read
 
 jobs:
+  capture-flow-diagnostics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install capture build and CPU test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+      - name: Build the production consumer without a GPU
+        run: |
+          gcc -O2 -Wall -Wextra -Isrc/vkcapture/cuda-stub \
+            -o /tmp/vkcapture-consumer src/vkcapture/vkcapture-consumer.c \
+            $(pkg-config --cflags --libs glib-2.0 gio-2.0 gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-cuda-1.0) -ldl
+      - name: Detect a 60-to-5 FPS throughput gap and preserve encoded output
+        run: |
+          gcc -O2 -Wall -Wextra -Werror -o /tmp/flow-diag-test src/vkcapture/flow-diag.test.c $(pkg-config --cflags --libs gstreamer-1.0)
+          /tmp/flow-diag-test
+
   node-test:
     runs-on: ubuntu-latest
     steps:
@@ -39,22 +58,3 @@ jobs:
       # node and bash.
       - name: node --test
         run: node --test
-
-  capture-flow-diagnostics:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install capture build and CPU test dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends gcc pkg-config libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
-      - name: Build the production consumer without a GPU
-        run: |
-          gcc -O2 -Wall -Wextra -Isrc/vkcapture/cuda-stub \
-            -o /tmp/vkcapture-consumer src/vkcapture/vkcapture-consumer.c \
-            $(pkg-config --cflags --libs glib-2.0 gio-2.0 gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-cuda-1.0) -ldl
-      - name: Detect a 60-to-5 FPS throughput gap and preserve encoded output
-        run: |
-          gcc -O2 -Wall -Wextra -Werror -o /tmp/flow-diag-test src/vkcapture/flow-diag.test.c $(pkg-config --cflags --libs gstreamer-1.0)
-          /tmp/flow-diag-test
