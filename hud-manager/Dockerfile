@@ -95,7 +95,7 @@ FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.source="https://github.com/5stackgg/game-streamer"
 LABEL org.opencontainers.image.description="JTs Hud Manager Linux unpacked build, consumed by game-streamer via COPY --from"
-LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.licenses="GPL-3.0-or-later"
 
 COPY --from=builder /out/hud-manager /opt/hud-manager
 RUN chmod +x /opt/hud-manager/jts-hud-manager
