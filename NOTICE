@@ -2,8 +2,7 @@
 Copyright (C) 2026 Luke Policinski. All rights reserved.
 
 This repository is licensed under the terms in LICENSE, except for the two
-directories below, which are licensed under the GNU General Public
-License.
+directories below and the third-party software listed after them.
 
 
 GPL-LICENSED DIRECTORIES
@@ -13,8 +12,8 @@ hud-manager/
     (https://github.com/JohnTimmermann/JTs-Hud-Manager), GNU GPL version 3,
     and publishes it as ghcr.io/5stackgg/hud-manager. auto-overlay.patch
     and camera-overlay.js modify it and are licensed under the GNU GPL
-    version 3 or later (hud-manager/LICENSE). The image's complete source
-    is the upstream tag named in hud-manager/Dockerfile plus this directory.
+    version 3 (hud-manager/LICENSE). The image's complete source is the
+    upstream tag named in hud-manager/Dockerfile plus this directory.
 
 src/vkcapture/
     present-eventfd.patch modifies obs-vkcapture by David Rosca
@@ -27,7 +26,7 @@ src/vkcapture/
     GNU LGPL version 2 or later.
 
 
-THIRD-PARTY SOFTWARE IN THE IMAGE
+THIRD-PARTY SOFTWARE
 
 - The NVIDIA CUDA base image (nvidia/cuda, Ubuntu 24.04), under NVIDIA's
   license for CUDA container images.
@@ -37,14 +36,26 @@ THIRD-PARTY SOFTWARE IN THE IMAGE
   is in /usr/share/doc/<package>/copyright inside the image, and its
   source is in the Ubuntu archive (apt-get source <package>) for the
   installed version.
+- SteamCMD (/opt/steamcmd) and the Steam client bootstrap
+  (/opt/steam-bootstrap), downloaded from Valve when the image is built.
+  They are Valve's software, used under the Steam Subscriber Agreement.
+  Counter-Strike 2 itself is downloaded from Steam at run time and is not
+  distributed with the image.
 - Node.js (https://nodejs.org), MIT License, installed from NodeSource.
 - Remotion (https://www.remotion.dev), under the Remotion License: free
   for individuals, non-profits and companies with up to three employees.
   A larger company that runs this image needs a Remotion company license
   (https://www.remotion.dev/license).
+- Chrome Headless Shell, downloaded by Remotion when the image is built,
+  under the Chromium licenses (https://www.chromium.org).
 - React (https://react.dev), MIT License.
+- The Oxanium font in motion/public/fonts, Copyright 2019 The Oxanium
+  Project Authors (https://github.com/sevmeyer/oxanium), SIL Open Font
+  License 1.1 (motion/public/fonts/Oxanium-OFL.txt).
+- motion/.agents/skills/remotion-best-practices comes from Remotion
+  (https://github.com/remotion-dev/skills) under the Remotion License. It
+  is development guidance only and is left out of the image.
 - The license text of every npm package in the image is in its directory
   under /opt/game-streamer/motion/node_modules.
 
-Counter-Strike 2 and the Steam client are downloaded from Valve at run
-time under Valve's terms and are not distributed with the image.
+The image carries this NOTICE and LICENSE in /opt/game-streamer.

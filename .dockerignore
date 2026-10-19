@@ -7,3 +7,4 @@ src/.env
 **/node_modules
 motion/out
 motion/.remotion
+motion/.agents

@@ -10,4 +10,4 @@ Please visit [5Stack](https://docs.5stack.gg) for more documentation.
 
 ## License
 
-Proprietary. You may run the published image, unmodified, as part of a 5Stack installation you operate, but not copy, modify, resell or host it as a service for others. See [LICENSE](LICENSE). `hud-manager/` and `src/vkcapture/` are licensed under the GNU GPL, and the image's third-party software is listed in [NOTICE](NOTICE).
+Proprietary. You may run the published image, unmodified, as part of a 5Stack installation you operate, but not copy, modify, resell or host it as a service for others. See [LICENSE](LICENSE). `hud-manager/` and `src/vkcapture/` are licensed under the GNU GPL, and the third-party software is listed in [NOTICE](NOTICE). Contributors sign the [CLA](CLA.md) on their first pull request.

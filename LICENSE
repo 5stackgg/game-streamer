@@ -7,10 +7,14 @@ ghcr.io/5stackgg/game-streamer (together, the "Software"), are proprietary.
 The source is published so it can be inspected. Publishing it grants no
 rights beyond the ones below.
 
-Exception: the hud-manager/ and src/vkcapture/ directories are not covered
-by this license. Each is licensed under the GNU General Public License as
-stated in its own LICENSE file, because it is a modified version of, or is
-built from, GPL software. See NOTICE.
+Exceptions: this license does not cover
+- the hud-manager/ and src/vkcapture/ directories, or the programs built
+  from them, which are licensed under the GNU General Public License as
+  stated in each directory's LICENSE file, because they modify or are
+  built from GPL software; or
+- third-party files in this repository and in the images, which keep
+  their own licenses.
+NOTICE lists both.
 
 1. Permission to run. You may download the published container images
    and run them, unmodified, as part of a 5Stack installation that you
@@ -29,9 +33,8 @@ built from, GPL software. See NOTICE.
       your own 5Stack installation;
    d. remove or change any copyright, license or attribution notice.
 
-3. Third-party software. The images contain third-party software under
-   its own licenses, listed in NOTICE. Nothing in this license limits your
-   rights under those licenses.
+3. Third-party software. Nothing in this license limits your rights under
+   the licenses of the third-party software listed in NOTICE.
 
 4. Termination. If you break these terms, your permission ends
    automatically.
