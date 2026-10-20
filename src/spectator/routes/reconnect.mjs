@@ -1,6 +1,6 @@
 import process from "node:process";
 
-import { execCfgCommand, execCfgViaConsole } from "../cs2/exec-cfg.mjs";
+import { execCfgFromBind, execCfgFromConsole, execCfgUntyped } from "../cs2/exec-cfg.mjs";
 import { sendConsoleCommand } from "../cs2/input.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
 import { gsiState } from "../state/gsi.mjs";
@@ -21,18 +21,23 @@ function hasUnsafeCfgChars(v) {
 const GSI_IN_GAME_MAX_AGE_MS = 5_000;
 
 function inGame() {
-  return gsiState.mapName !== null && Date.now() - gsiState.lastReceivedMs < GSI_IN_GAME_MAX_AGE_MS;
+  return (
+    gsiState.mapName !== null &&
+    gsiState.localActivity !== "menu" &&
+    Date.now() - gsiState.lastReceivedMs < GSI_IN_GAME_MAX_AGE_MS
+  );
 }
 
 // Binds don't fire on the main menu or behind its Disconnected dialog, so from
-// there the console is the only way in. A disconnect run in the same batch as the
+// there the console is the only way in, and it is on the stream: only the
+// disconnect and the exec are typed. A disconnect in the same batch as the
 // connect drops cs2 to the menu before the connect runs, hence the gap.
-async function reconnectFromMenu(followUp) {
+async function disconnectThenExec() {
   if (!(await sendConsoleCommand("disconnect"))) {
     return false;
   }
   await new Promise((r) => setTimeout(r, 1000));
-  return execCfgViaConsole(followUp);
+  return execCfgFromConsole();
 }
 
 function resolveTarget() {
@@ -88,8 +93,12 @@ export async function reconnectHandler(_req, res) {
 
   // In a game `connect`/`playcast` leave the current one themselves.
   const viaBind = inGame();
-  const ok = viaBind ? await execCfgCommand(followUp) : await reconnectFromMenu(followUp);
-  if (!ok) {
+  const sent = await execCfgUntyped(followUp, viaBind ? execCfgFromBind : disconnectThenExec);
+  if (sent === "unwritable") {
+    sendJson(res, 503, { error: "exec cfg could not be written" });
+    return;
+  }
+  if (sent === "unreachable") {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
   }

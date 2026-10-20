@@ -26,21 +26,32 @@ export async function execCfgCommand(cmd) {
     if (!writeExecCfg(cmd)) {
       return sendConsoleCommand(cmd);
     }
-    // Via sendKey so the flush key gets the same focus recovery as every other
-    // input path — a raw xdotool key silently no-ops when focus has drifted.
-    return sendKey(EXEC_CFG_KEY);
+    return execCfgFromBind();
   });
 }
 
-// For where the BACKSPACE bind can't fire (the main menu and its Disconnected
-// dialog). The console is on the stream, so only the exec is ever typed into it.
-export async function execCfgViaConsole(cmd) {
+// For a cmd that must never be typed where the stream can see it: no console
+// fallback, and `deliver` runs only once the cfg holds the cmd, inside the chain
+// so no other input lands in the middle of it.
+export async function execCfgUntyped(cmd, deliver) {
   return serialized(async () => {
     if (!writeExecCfg(cmd)) {
-      return false;
+      return "unwritable";
     }
-    return sendConsoleCommand("exec 5stack_exec");
+    return (await deliver()) ? "sent" : "unreachable";
   });
+}
+
+// Via sendKey so the flush key gets the same focus recovery as every other
+// input path — a raw xdotool key silently no-ops when focus has drifted.
+export function execCfgFromBind() {
+  return sendKey(EXEC_CFG_KEY);
+}
+
+// For where the BACKSPACE bind can't fire (the main menu and its Disconnected
+// dialog).
+export function execCfgFromConsole() {
+  return sendConsoleCommand("exec 5stack_exec");
 }
 
 function writeExecCfg(cmd) {

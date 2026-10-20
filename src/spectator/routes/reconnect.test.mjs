@@ -11,10 +11,10 @@ import { applyGsiUpdate, gsiState } from "../state/gsi.mjs";
 const root = mkdtempSync(join(tmpdir(), "reconnect-"));
 const cfgDir = join(root, "cfg");
 const execCfg = join(cfgDir, "5stack_exec.cfg");
+const execCfgTmp = `${execCfg}.tmp`;
 const keystrokes = join(root, "keystrokes");
 let reconnectHandler;
 let execCfgCommand;
-let execCfgViaConsole;
 
 // xdotool finds cs2 already focused and records every key and typed line, each with
 // what the exec cfg held at that moment.
@@ -40,11 +40,12 @@ esac
     PATH: `${bin}:${process.env.PATH}`,
   });
   ({ reconnectHandler } = await import("./reconnect.mjs"));
-  ({ execCfgCommand, execCfgViaConsole } = await import("../cs2/exec-cfg.mjs"));
+  ({ execCfgCommand } = await import("../cs2/exec-cfg.mjs"));
 });
 
 beforeEach(() => {
   rmSync(keystrokes, { force: true });
+  rmSync(execCfgTmp, { recursive: true, force: true });
   writeFileSync(execCfg, "");
 });
 
@@ -149,10 +150,48 @@ test("a target that would break out of the cfg is refused before anything reache
   assert.equal(readFileSync(execCfg, "utf8"), "");
 });
 
-test("an exec-cfg command sent alongside waits until the console exec has read the cfg", async () => {
-  await Promise.all([
-    execCfgViaConsole('password "hunter2"; connect 10.0.0.5:27015'),
+test("GSI saying the client is on the menu is not taken as being in a game, map name or not", async () => {
+  applyGsiUpdate({ map: { name: "de_mirage", phase: "live" }, player: { activity: "menu" } });
+  const res = await reconnect({ CONNECT_ADDR: "10.0.0.5:27015", CONNECT_PASSWORD: "hunter2" });
+  assert.equal(res.status, 200);
+  assert.deepEqual(typed(), ["disconnect", "exec 5stack_exec"]);
+  assert.deepEqual(ran(), ["disconnect", 'password "hunter2"', "connect 10.0.0.5:27015"]);
+});
+
+// The cfg write goes through a .tmp file, so a directory in its place fails it even
+// for root.
+for (const [where, enter] of [["in a game", inGame], ["on the menu", onMenu]]) {
+  test(`a cfg that can't be written ${where} answers 503 with nothing sent to cs2`, async () => {
+    mkdirSync(execCfgTmp);
+    enter();
+    const res = await reconnect({ CONNECT_ADDR: "10.0.0.5:27015", CONNECT_PASSWORD: "hunter2" });
+    assert.deepEqual(inputs(), []);
+    assert.equal(res.status, 503);
+    assert.deepEqual(res.body, { error: "exec cfg could not be written" });
+  });
+}
+
+const MENU_RECONNECT_KEYS = [
+  "key grave", "type disconnect", "key Return", "key grave",
+  "key grave", "type exec 5stack_exec", "key Return", "key grave",
+];
+
+test("two reconnects and a scoreboard press at once each run whole, one after another", async () => {
+  onMenu();
+  const target = { CONNECT_ADDR: "10.0.0.5:27015", CONNECT_PASSWORD: "hunter2" };
+  const [first, , second] = await Promise.all([
+    reconnect(target),
     execCfgCommand("+showscores"),
+    reconnect(target),
   ]);
-  assert.deepEqual(ran(), ['password "hunter2"', "connect 10.0.0.5:27015", "+showscores"]);
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  const keys = inputs().map(({ input }) => input);
+  const press = keys.indexOf("key BackSpace");
+  assert.equal(press % MENU_RECONNECT_KEYS.length, 0, keys.join("\n"));
+  keys.splice(press, 1);
+  assert.deepEqual(keys, [...MENU_RECONNECT_KEYS, ...MENU_RECONNECT_KEYS]);
+  const reconnectRan = ["disconnect", 'password "hunter2"', "connect 10.0.0.5:27015"];
+  assert.deepEqual(ran().filter((c) => c !== "+showscores"), [...reconnectRan, ...reconnectRan]);
+  assert.equal(ran().filter((c) => c === "+showscores").length, 1);
 });

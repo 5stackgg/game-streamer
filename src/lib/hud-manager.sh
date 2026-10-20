@@ -237,8 +237,8 @@ position_hud_overlay() {
 # weapons / match_stats).
 # A motionless player generates no GSI state changes, so the heartbeat is the
 # only thing that keeps GSI fresh while a nade render stands perfectly still on
-# a lineup -- run-nades lowers GSI_HEARTBEAT for that; live/demo keep the cheap
-# 10s pulse. The value goes into the cfg via the heredoc below; the explanation
+# a lineup -- run-nades lowers GSI_HEARTBEAT for that; live/demo keep the 1s
+# default. The value goes into the cfg via the heredoc below; the explanation
 # stays HERE, because a '#' comment inside a Valve KeyValues file is a parse
 # error ("got } in key") that makes cs2 reject the whole GSI config.
 # cs2 posts the auth token back in every body, and that is how the spec-server
