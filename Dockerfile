@@ -212,6 +212,7 @@ RUN mkdir -p /opt/steam-bootstrap \
 
 COPY src/ /opt/game-streamer/src/
 COPY resources/ /opt/game-streamer/resources/
+COPY LICENSE NOTICE /opt/game-streamer/
 COPY resources/xorg-dummy-1080p.conf /etc/X11/xorg-dummy-1080p.conf
 COPY resources/xorg-dummy-1440p.conf /etc/X11/xorg-dummy-1440p.conf
 # Offscreen software-framebuffer configs (Driver "dummy"): the coexist fallback

@@ -1,0 +1,51 @@
+5Stack Game Streamer License
+
+Copyright (C) 2026 Luke Policinski. All rights reserved.
+
+This repository and the container images built from it, including
+ghcr.io/5stackgg/game-streamer (together, the "Software"), are proprietary.
+The source is published so it can be inspected. Publishing it grants no
+rights beyond the ones below.
+
+Exceptions: this license does not cover
+- the hud-manager/ and src/vkcapture/ directories, or the programs built
+  from them, which are licensed under the GNU General Public License as
+  stated in each directory's LICENSE file, because they modify or are
+  built from GPL software; or
+- third-party files in this repository and in the images, which keep
+  their own licenses.
+NOTICE lists both.
+
+1. Permission to run. You may download the published container images
+   and run them, unmodified, as part of a 5Stack installation that you
+   operate, for any purpose, including events you charge for.
+
+2. Restrictions. Unless the copyright holder agrees in writing, you may
+   not:
+
+   a. copy, modify, adapt, translate or create derivative works of the
+      Software, except as applicable law allows despite this restriction;
+   b. sell, rent, lease, sublicense or redistribute the Software, except
+      as part of an unmodified 5Stack installation that you operate;
+   c. offer the Software, or its features such as live streaming, demo
+      playback and highlight or clip rendering, to third parties as a
+      hosted or managed service, other than to the players and viewers of
+      your own 5Stack installation;
+   d. remove or change any copyright, license or attribution notice.
+
+3. Third-party software. Nothing in this license limits your rights under
+   the licenses of the third-party software listed in NOTICE.
+
+4. Termination. If you break these terms, your permission ends
+   automatically.
+
+5. No warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+   KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+   IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES
+   OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR
+   THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For any other use, contact the copyright holder:
+https://github.com/lukepolo

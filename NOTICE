@@ -1,0 +1,61 @@
+5Stack Game Streamer
+Copyright (C) 2026 Luke Policinski. All rights reserved.
+
+This repository is licensed under the terms in LICENSE, except for the two
+directories below and the third-party software listed after them.
+
+
+GPL-LICENSED DIRECTORIES
+
+hud-manager/
+    Builds JTs Hud Manager by John Timmermann
+    (https://github.com/JohnTimmermann/JTs-Hud-Manager), GNU GPL version 3,
+    and publishes it as ghcr.io/5stackgg/hud-manager. auto-overlay.patch
+    and camera-overlay.js modify it and are licensed under the GNU GPL
+    version 3 (hud-manager/LICENSE). The image's complete source is the
+    upstream tag named in hud-manager/Dockerfile plus this directory.
+
+src/vkcapture/
+    present-eventfd.patch modifies obs-vkcapture by David Rosca
+    (https://github.com/nowrep/obs-vkcapture), GNU GPL version 2 or later,
+    and the image builds the patched layer from the upstream tag named in
+    the Dockerfile. capture.h is copied from obs-vkcapture and
+    vkcapture-consumer.c is built with it, so both are licensed under the
+    GNU GPL version 2 or later (src/vkcapture/LICENSE). The headers in
+    src/vkcapture/cuda-stub come from GStreamer and are licensed under the
+    GNU LGPL version 2 or later.
+
+
+THIRD-PARTY SOFTWARE
+
+- The NVIDIA CUDA base image (nvidia/cuda, Ubuntu 24.04), under NVIDIA's
+  license for CUDA container images.
+- Ubuntu 24.04 packages, including GStreamer and its plugins, FFmpeg,
+  x264, the X.Org server, Mesa, PulseAudio, Openbox, picom and xdotool.
+  Several are licensed under the GNU GPL or LGPL. Each package's license
+  is in /usr/share/doc/<package>/copyright inside the image, and its
+  source is in the Ubuntu archive (apt-get source <package>) for the
+  installed version.
+- SteamCMD (/opt/steamcmd) and the Steam client bootstrap
+  (/opt/steam-bootstrap), downloaded from Valve when the image is built.
+  They are Valve's software, used under the Steam Subscriber Agreement.
+  Counter-Strike 2 itself is downloaded from Steam at run time and is not
+  distributed with the image.
+- Node.js (https://nodejs.org), MIT License, installed from NodeSource.
+- Remotion (https://www.remotion.dev), under the Remotion License: free
+  for individuals, non-profits and companies with up to three employees.
+  A larger company that runs this image needs a Remotion company license
+  (https://www.remotion.dev/license).
+- Chrome Headless Shell, downloaded by Remotion when the image is built,
+  under the Chromium licenses (https://www.chromium.org).
+- React (https://react.dev), MIT License.
+- The Oxanium font in motion/public/fonts, Copyright 2019 The Oxanium
+  Project Authors (https://github.com/sevmeyer/oxanium), SIL Open Font
+  License 1.1 (motion/public/fonts/Oxanium-OFL.txt).
+- motion/.agents/skills/remotion-best-practices comes from Remotion
+  (https://github.com/remotion-dev/skills) under the Remotion License. It
+  is development guidance only and is left out of the image.
+- The license text of every npm package in the image is in its directory
+  under /opt/game-streamer/motion/node_modules.
+
+The image carries this NOTICE and LICENSE in /opt/game-streamer.
