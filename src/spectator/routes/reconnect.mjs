@@ -1,7 +1,9 @@
 import process from "node:process";
 
+import { execCfgCommand, execCfgViaConsole } from "../cs2/exec-cfg.mjs";
 import { sendConsoleCommand } from "../cs2/input.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
+import { gsiState } from "../state/gsi.mjs";
 import { sendJson } from "../util/http.mjs";
 
 const NON_BLANK = /\S/;
@@ -12,6 +14,25 @@ function isNonBlankString(v) {
 const UNSAFE_CFG_CHARS = /[";\r\n]/;
 function hasUnsafeCfgChars(v) {
   return typeof v === "string" && UNSAFE_CFG_CHARS.test(v);
+}
+
+// GSI heartbeats every second, so a map name older than this is a client that
+// left the game without saying so.
+const GSI_IN_GAME_MAX_AGE_MS = 5_000;
+
+function inGame() {
+  return gsiState.mapName !== null && Date.now() - gsiState.lastReceivedMs < GSI_IN_GAME_MAX_AGE_MS;
+}
+
+// Binds don't fire on the main menu or behind its Disconnected dialog, so from
+// there the console is the only way in. A disconnect run in the same batch as the
+// connect drops cs2 to the menu before the connect runs, hence the gap.
+async function reconnectFromMenu(followUp) {
+  if (!(await sendConsoleCommand("disconnect"))) {
+    return false;
+  }
+  await new Promise((r) => setTimeout(r, 1000));
+  return execCfgViaConsole(followUp);
 }
 
 function resolveTarget() {
@@ -65,22 +86,16 @@ export async function reconnectHandler(_req, res) {
     followUp = `password "${target.password}"; connect ${target.addr}`;
   }
 
-  const disconnectOk = await sendConsoleCommand("disconnect");
-  if (!disconnectOk) {
-    sendJson(res, 503, { error: "cs2 console unreachable" });
-    return;
-  }
-
-  await new Promise((r) => setTimeout(r, 1000));
-
-  const ok = await sendConsoleCommand(followUp);
+  // In a game `connect`/`playcast` leave the current one themselves.
+  const viaBind = inGame();
+  const ok = viaBind ? await execCfgCommand(followUp) : await reconnectFromMenu(followUp);
   if (!ok) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
   }
 
   process.stderr.write(
-    `[spec-server] reconnect (${target.kind}) -> ${target.addr ?? target.url}\n`,
+    `[spec-server] reconnect (${target.kind} via ${viaBind ? "bind" : "console"}) -> ${target.addr ?? target.url}\n`,
   );
   sendJson(res, 200, { ok: true, kind: target.kind });
 }
