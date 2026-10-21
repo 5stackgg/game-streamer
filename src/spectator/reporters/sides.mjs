@@ -10,6 +10,7 @@ import { gsiState } from "../state/gsi.mjs";
 // `reverse-side` to follow.
 const sidesState = {
   lastCtTeamName: null,
+  lastTTeamName:  null,
   lastMapName:    null,
 };
 
@@ -20,6 +21,7 @@ function currentMapName() {
 
 export function resetSidesState() {
   sidesState.lastCtTeamName = null;
+  sidesState.lastTTeamName  = null;
   sidesState.lastMapName    = null;
 }
 
@@ -31,19 +33,34 @@ export async function maybeReverseSideOnFreezetime() {
 
   const ctName = gsiState.teamCtName;
   if (!ctName) return;
+  const tName = gsiState.teamTName;
 
   // Map change → reseed the baseline without flipping. The HUD reseed
   // already restores starting sides for the new map.
   if (sidesState.lastMapName !== mapName) {
     sidesState.lastMapName    = mapName;
     sidesState.lastCtTeamName = ctName;
+    sidesState.lastTTeamName  = tName;
     return;
   }
 
   if (sidesState.lastCtTeamName === ctName) return;
 
   const prev = sidesState.lastCtTeamName;
+  const prevT = sidesState.lastTTeamName;
   sidesState.lastCtTeamName = ctName;
+  sidesState.lastTTeamName  = tName;
+
+  // A swap puts the team that was T on CT. Names that are new altogether are
+  // another match, such as the one a switch moved to after a late update from
+  // the one it left, so they only reseed.
+  if (prevT !== null && ctName !== prevT) {
+    process.stderr.write(
+      `[spec-server] new teams on ${mapName} (CT ${prev} -> ${ctName}), not a side swap\n`,
+    );
+    return;
+  }
+
   process.stderr.write(
     `[spec-server] side swap detected on ${mapName}: CT ${prev} -> ${ctName}, calling reverse-side\n`,
   );

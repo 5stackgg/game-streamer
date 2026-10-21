@@ -23,6 +23,7 @@ let directorState;
 let gsiHandler;
 let reconnectHandler;
 let cameraWhepHandler;
+let resetSidesState;
 
 // xdotool finds cs2 already focused and records every key and typed line, each with
 // what the exec cfg held at that moment. The pivot flow is a no-op, the HUD seed
@@ -72,11 +73,13 @@ esac
   ({ gsiHandler } = await import("./gsi.mjs"));
   ({ reconnectHandler } = await import("./reconnect.mjs"));
   ({ cameraWhepHandler } = await import("./camera.mjs"));
+  ({ resetSidesState } = await import("../reporters/sides.mjs"));
   const { playingState } = await import("../reporters/demo-playing.mjs");
   playingState.reported = true;
 });
 
 beforeEach(() => {
+  resetSidesState();
   rmSync(keystrokes, { force: true });
   rmSync(seeded, { force: true });
   rmSync(flows, { force: true });
@@ -276,8 +279,8 @@ test("every switch hands the flow the stream the pod booted on, which the captur
   assert.deepEqual(await lines(flows, 3), ["match-a", "match-a", "match-a"]);
 });
 
-function freezetime(ctName) {
-  const map = { name: "de_mirage", phase: "live", team_ct: { name: ctName } };
+function freezetime(ctName, tName) {
+  const map = { name: "de_mirage", phase: "live", team_ct: { name: ctName }, team_t: { name: tName } };
   gsi({ map, round: { phase: "live" } });
   gsi({ map, round: { phase: "freezetime" } });
 }
@@ -285,11 +288,23 @@ function freezetime(ctName) {
 const sideSwaps = () => apiCalls.filter(({ url }) => url.endsWith("/reverse-side")).length;
 
 test("a switch to a match on the same map takes its sides as they start, and still follows its halftime", async () => {
-  freezetime("Team A1");
+  freezetime("Team A1", "Team A2");
   assert.equal((await switchMatch(CONNECT)).status, 200);
-  freezetime("Team B1");
+  freezetime("Team B1", "Team B2");
   assert.equal(sideSwaps(), 0);
-  freezetime("Team B2");
+  freezetime("Team B2", "Team B1");
+  assert.equal(sideSwaps(), 1);
+});
+
+// cs2 can post a GSI update or two from the match it is leaving after the switch
+// was sent.
+test("a late freezetime from the match the pod left doesn't flip the new match's sides", async () => {
+  freezetime("Team A1", "Team A2");
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  freezetime("Team A1", "Team A2");
+  freezetime("Team B1", "Team B2");
+  assert.equal(sideSwaps(), 0);
+  freezetime("Team B2", "Team B1");
   assert.equal(sideSwaps(), 1);
 });
 
