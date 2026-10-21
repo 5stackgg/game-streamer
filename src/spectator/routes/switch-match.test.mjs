@@ -292,3 +292,17 @@ test("a switch to a match on the same map takes its sides as they start, and sti
   freezetime("Team B2");
   assert.equal(sideSwaps(), 1);
 });
+
+test("a switch queued behind another picks the console or the bind from where the client is once its turn comes", async () => {
+  onMenu();
+  const first = switchMatch(CONNECT);
+  await sleep(300);
+  inGame();
+  const second = switchMatch({ matchId: "match-c", connect: { addr: "10.0.0.8:27015", password: "other" } });
+  await sleep(100);
+  onMenu();
+  assert.equal((await first).status, 200);
+  assert.equal((await second).status, 200);
+  assert.deepEqual(typed(), ["disconnect", "exec 5stack_exec", "disconnect", "exec 5stack_exec"]);
+  assert.deepEqual(ran().slice(-2), ['password "other"', "connect 10.0.0.8:27015"]);
+});
