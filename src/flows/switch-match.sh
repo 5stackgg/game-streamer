@@ -26,6 +26,8 @@ SCRIPT_TAG=switch-match
 . "$LIB_DIR/hud-manager.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/snapshot.sh"
 
 : "${MATCH_ID:=}"
 : "${MATCH_PASSWORD:=}"
@@ -50,6 +52,7 @@ rm -f "${LOG_DIR}/status.boot.epoch" "${LOG_DIR}/status.last" \
       "${LOG_DIR}/status.state" "${LOG_DIR}/status.ack" 2>/dev/null || true
 export MATCH_ID MATCH_PASSWORD
 start_status_reporter
+restart_snapshot_loop
 STREAM_ID="${OLD_MATCH_ID:-$MATCH_ID}"
 report_status status=live "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${STREAM_ID}"
 
