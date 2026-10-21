@@ -15,6 +15,7 @@ const execCfgTmp = `${execCfg}.tmp`;
 const keystrokes = join(root, "keystrokes");
 let reconnectHandler;
 let execCfgCommand;
+let execCfgConnect;
 
 // xdotool finds cs2 already focused and records every key and typed line, each with
 // what the exec cfg held at that moment.
@@ -40,7 +41,7 @@ esac
     PATH: `${bin}:${process.env.PATH}`,
   });
   ({ reconnectHandler } = await import("./reconnect.mjs"));
-  ({ execCfgCommand } = await import("../cs2/exec-cfg.mjs"));
+  ({ execCfgCommand, execCfgConnect } = await import("../cs2/exec-cfg.mjs"));
 });
 
 beforeEach(() => {
@@ -194,4 +195,12 @@ test("two reconnects and a scoreboard press at once each run whole, one after an
   const reconnectRan = ["disconnect", 'password "hunter2"', "connect 10.0.0.5:27015"];
   assert.deepEqual(ran().filter((c) => c !== "+showscores"), [...reconnectRan, ...reconnectRan]);
   assert.equal(ran().filter((c) => c === "+showscores").length, 1);
+});
+
+test("a connect whose command comes back empty sends nothing and leaves the cfg alone", async () => {
+  for (const empty of [null, undefined]) {
+    assert.deepEqual(await execCfgConnect(() => empty), { sent: "skipped", via: null });
+  }
+  assert.deepEqual(inputs(), []);
+  assert.equal(readFileSync(execCfg, "utf8"), "");
 });

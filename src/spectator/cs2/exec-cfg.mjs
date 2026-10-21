@@ -35,14 +35,15 @@ export async function execCfgCommand(cmd) {
 // where the stream can see them. In a game either one leaves the current game by
 // itself. Everything is decided once its turn in the queue comes, since a connect
 // queued behind another finds the pod and the client wherever that one left
-// them: `command` may be a function, returning null to send nothing, and
-// `onSent` runs before the next caller's turn. Unlike execCfgCommand there is no
-// console fallback: a cfg that can't be written sends nothing.
+// them: `command` may be a function, returning null or undefined to send
+// nothing, and `onSent` runs before the next caller's turn. Unlike
+// execCfgCommand there is no console fallback: a cfg that can't be written
+// sends nothing.
 export async function execCfgConnect(command, { onSent } = {}) {
   let via = null;
   const sent = await serialized(async () => {
     const cmd = typeof command === "function" ? command() : command;
-    if (cmd === null) {
+    if (cmd == null) {
       return "skipped";
     }
     if (!writeExecCfg(cmd)) {
