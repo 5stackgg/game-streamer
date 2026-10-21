@@ -87,6 +87,7 @@ write_cs2_video_cfg demo
 # fixed small static one, whatever the bot account's profile says, so the
 # close-up shows the exact pixel the lineup is aimed at.
 read -r -d '' NADE_VIEW_CMDS <<'EOF' || true
+con_enable 1
 snd_mute_losefocus 0
 engine_no_focus_sleep 0
 volume 1.0
@@ -125,7 +126,8 @@ r_show_build_info 0
 EOF
 
 # Also kept as its own cfg: the account's saved config can load after the
-# autoexec and bring the music back, so every lineup re-execs this in game.
+# autoexec and bring the music back or turn the console off, which the
+# reconnect from the main menu types into, so every lineup re-execs this in game.
 printf '%s\n' "$NADE_VIEW_CMDS" > "$CS2_CFG_DIR/nade_view.cfg"
 
 printf '// see nade_autoexec.cfg\n' > "$CS2_CFG_DIR/autoexec.cfg"

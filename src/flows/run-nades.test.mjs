@@ -44,3 +44,12 @@ test("cs2 launches with its console closed, still logging it and still able to o
   assert.ok(autoexec, "nade_autoexec.cfg not found in run-nades.sh");
   assert.match(autoexec[1], /^con_enable 1$/m);
 });
+
+// The account's saved config can load after the autoexec and turn the console
+// off, and nade_view.cfg is what every lineup re-runs in game.
+test("every lineup's in-game cfg turns the console back on", () => {
+  const view = SCRIPT.match(/read -r -d '' NADE_VIEW_CMDS <<'EOF' \|\| true\n([\s\S]*?)\nEOF/);
+  assert.ok(view, "NADE_VIEW_CMDS not found in run-nades.sh");
+  assert.match(view[1], /^con_enable 1$/m);
+  assert.match(SCRIPT, /printf '%s\\n' "\$NADE_VIEW_CMDS" > "\$CS2_CFG_DIR\/nade_view\.cfg"/);
+});
