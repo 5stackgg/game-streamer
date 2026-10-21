@@ -25,7 +25,7 @@
 # =============================================================================
 
 # ---- Stage 1: build the Electron app ----------------------------------------
-FROM node:24-bookworm AS builder
+FROM node:24.22.1-bookworm AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG HUD_REPO=JohnTimmermann/JTs-Hud-Manager
