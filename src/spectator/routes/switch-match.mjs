@@ -27,7 +27,7 @@ import process from "node:process";
 
 import { SRC_DIR } from "../env.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
-import { execCfgCommand } from "../cs2/exec-cfg.mjs";
+import { execCfgConnect } from "../cs2/exec-cfg.mjs";
 import { directorState, stopDirector } from "../director/index.mjs";
 import { sendJson } from "../util/http.mjs";
 
@@ -144,10 +144,12 @@ export async function switchMatchHandler(_req, res, body) {
     ? body.oldMatchId
     : process.env.MATCH_ID || "";
 
-  // exec-cfg path keeps the disconnect/connect off the visible
-  // console and out of any in-stream capture.
-  const consoleOk = await execCfgCommand(consoleScript(body));
-  if (!consoleOk) {
+  const { sent, via } = await execCfgConnect(consoleScript(body));
+  if (sent === "unwritable") {
+    sendJson(res, 503, { error: "exec cfg could not be written" });
+    return;
+  }
+  if (sent === "unreachable") {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
   }
@@ -157,7 +159,7 @@ export async function switchMatchHandler(_req, res, body) {
 
   const pid = spawnSwitchFlow(body, oldMatchId);
   process.stderr.write(
-    `[spec-server] switch-match: ${oldMatchId || "<unset>"} -> ${body.matchId} (flow pid=${pid})\n`,
+    `[spec-server] switch-match (via ${via}): ${oldMatchId || "<unset>"} -> ${body.matchId} (flow pid=${pid})\n`,
   );
 
   sendJson(res, 200, {
