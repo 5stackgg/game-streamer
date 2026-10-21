@@ -185,6 +185,9 @@ reap_oldest_nade_tail() {
 # The gate waited for a spawn that only a job could cause, so it always ran out
 # the clock and died "never spawned ... stuck in team select". Joining here is
 # what breaks the cycle; the per-job join still covers a mid-batch death.
+# Both this and the probe below also turn the console back on: an account's
+# saved config can load after the autoexec and turn it off, and a client that
+# drops before its first lineup reconnects through it.
 # NEVER press this while already alive: jointeam on a live pawn respawns it, so
 # a re-press loop that ignores health kills the player on a loop. The gate can
 # sit here with health>0 whenever some OTHER condition is holding it up (a stale
@@ -202,7 +205,7 @@ nade_join_team() {
   fi
   spec_curl --fail --silent --max-time 5 \
        --header "content-type: application/json" \
-       --data "{\"cmd\": \"jointeam ${NADE_BATCH_JOIN_TEAM:-3}\"}" \
+       --data "{\"cmd\": \"con_enable 1; jointeam ${NADE_BATCH_JOIN_TEAM:-3}\"}" \
        --output /dev/null \
        "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
 }
@@ -217,7 +220,7 @@ NADE_GATE_LOG_OFFSET=0
 nade_gate_probe() {
   spec_curl --fail --silent --max-time 5 \
        --header "content-type: application/json" \
-       --data '{"cmd": "status"}' \
+       --data '{"cmd": "con_enable 1; status"}' \
        --output /dev/null \
        "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
   sleep 2
