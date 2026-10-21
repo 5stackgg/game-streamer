@@ -264,11 +264,7 @@ nade_reconnect() {
   [ "${age:-'-1'}" = "-1" ] || return 0
   NADE_RECONNECT_ATTEMPTS=$((NADE_RECONNECT_ATTEMPTS + 1))
   say "  no GSI yet — re-issuing connect to ${CS2_CONNECT_ADDR} (attempt ${NADE_RECONNECT_ATTEMPTS}/${NADE_RECONNECT_MAX:-2})"
-  spec_curl --fail --silent --max-time 5 \
-       --header "content-type: application/json" \
-       --data "{\"cmd\": \"password \\\"${CS2_CONNECT_PASSWORD:-}\\\"; connect ${CS2_CONNECT_ADDR}\"}" \
-       --output /dev/null \
-       "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
+  nade_send_reconnect || NADE_RECONNECT_ATTEMPTS=$((NADE_RECONNECT_ATTEMPTS - 1))
 }
 
 # A client the server DROPPED sits at the main menu behind a dialog. GSI has
@@ -280,7 +276,7 @@ nade_reconnect() {
 NADE_DROP_RECONNECTS=0
 NADE_DROP_MARK=0
 nade_reconnect_if_dropped() {
-  local log="${CS2_CONSOLE_LOG:-$CS2_DIR/game/csgo/console.log}" total reason
+  local log="${CS2_CONSOLE_LOG:-$CS2_DIR/game/csgo/console.log}" total reason mark="$NADE_DROP_MARK"
   [ -n "${CS2_CONNECT_ADDR:-}" ] || return 0
   [ -f "$log" ] || return 0
   total=$(wc -l <"$log" 2>/dev/null || echo 0)
@@ -295,11 +291,30 @@ nade_reconnect_if_dropped() {
   fi
   NADE_DROP_RECONNECTS=$((NADE_DROP_RECONNECTS + 1))
   say "  dropped by the server (${reason}) — reconnecting (${NADE_DROP_RECONNECTS}/${NADE_DROP_RECONNECT_MAX:-2})"
-  spec_curl --fail --silent --max-time 5 \
-       --header "content-type: application/json" \
-       --data "{\"cmd\": \"password \\\"${CS2_CONNECT_PASSWORD:-}\\\"; connect ${CS2_CONNECT_ADDR}\"}" \
-       --output /dev/null \
-       "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/demo/exec" || true
+  if ! nade_send_reconnect; then
+    NADE_DROP_RECONNECTS=$((NADE_DROP_RECONNECTS - 1))
+    NADE_DROP_MARK="$mark"
+  fi
+}
+
+# The spec-server's connect route reaches a client on the main menu or behind
+# its Disconnected dialog, where the exec-cfg keybind does nothing. Fails only
+# on a refusal, which never reached cs2's connect; a call that got no answer may
+# still land, so it counts as sent.
+nade_send_reconnect() {
+  local out code
+  out=$(node "$CLIP_HELPERS" status-body "addr=${CS2_CONNECT_ADDR}" "password=${CS2_CONNECT_PASSWORD:-}" \
+    | spec_curl --silent --max-time 10 \
+        --header "content-type: application/json" \
+        --data-binary @- \
+        --write-out '\n%{http_code}' \
+        "${SPEC_SERVER_URL:-http://127.0.0.1:1350}/nade/reconnect")
+  code="${out##*$'\n'}"
+  case "$code" in
+    200) return 0 ;;
+    000|"") say "  reconnect: no answer from spec-server"; return 0 ;;
+    *) say "  reconnect not sent — spec-server answered ${code}: ${out%$'\n'*}"; return 1 ;;
+  esac
 }
 
 # Same side mapping nade-clip.sh uses, read off the batch's first lineup so the
