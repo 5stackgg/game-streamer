@@ -62,7 +62,9 @@ export async function maybeReverseSideOnFreezetime() {
   const ctName = gsiState.teamCtName;
   if (!ctName) return;
   const tName = gsiState.teamTName;
-  if (fromLeftMatch()) return;
+  if (fromLeftMatch()) {
+    return;
+  }
 
   // Map change → reseed the baseline without flipping. The HUD reseed
   // already restores starting sides for the new map.
@@ -76,7 +78,9 @@ export async function maybeReverseSideOnFreezetime() {
   const prev = sidesState.lastCtTeamName;
   const prevT = sidesState.lastTTeamName;
   sidesState.lastTTeamName = tName;
-  if (prev === ctName) return;
+  if (prev === ctName) {
+    return;
+  }
   sidesState.lastCtTeamName = ctName;
 
   // A swap puts the team that was T on CT. Names that are new altogether are
