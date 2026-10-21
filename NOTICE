@@ -26,6 +26,14 @@ src/vkcapture/
     GNU LGPL version 2 or later.
 
 
+CONTRIBUTIONS
+
+Contributions are accepted only under the terms in CONTRIBUTING.md of the
+upstream repository, which let Luke Policinski license them under any
+terms:
+https://github.com/5stackgg/game-streamer/blob/main/CONTRIBUTING.md
+
+
 THIRD-PARTY SOFTWARE
 
 - The NVIDIA CUDA base image (nvidia/cuda, Ubuntu 24.04), under NVIDIA's
@@ -60,9 +68,3 @@ THIRD-PARTY SOFTWARE
 
 The image carries this NOTICE and LICENSE in /opt/game-streamer.
 
-
-CONTRIBUTIONS
-
-Contributions to this repository are accepted only under the terms in
-CONTRIBUTING.md, which let the copyright holder license them under any
-terms.
