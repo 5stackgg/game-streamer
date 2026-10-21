@@ -8,7 +8,7 @@ import process from "node:process";
 import { Readable } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { applyGsiUpdate } from "../state/gsi.mjs";
+import { applyGsiUpdate, gsiState } from "../state/gsi.mjs";
 
 const root = mkdtempSync(join(tmpdir(), "switch-match-"));
 const cfgDir = join(root, "cfg");
@@ -84,6 +84,7 @@ after(() => {
 
 beforeEach(() => {
   resetSidesState();
+  gsiState.players = new Map();
   rmSync(keystrokes, { force: true });
   rmSync(seeded, { force: true });
   rmSync(flows, { force: true });
@@ -283,10 +284,13 @@ test("every switch hands the flow the stream the pod booted on, which the captur
   assert.deepEqual(await lines(flows, 3), ["match-a", "match-a", "match-a"]);
 });
 
-function freezetime(ctName, tName) {
+function freezetime(ctName, tName, players) {
   const map = { name: "de_mirage", phase: "live", team_ct: { name: ctName }, team_t: { name: tName } };
-  gsi({ map, round: { phase: "live" } });
-  gsi({ map, round: { phase: "freezetime" } });
+  const allplayers = players && Object.fromEntries(
+    players.map((steamid, i) => [steamid, { observer_slot: i, team: i % 2 ? "T" : "CT", state: { health: 100 } }]),
+  );
+  gsi({ map, round: { phase: "live" }, ...(allplayers && { allplayers }) });
+  gsi({ map, round: { phase: "freezetime" }, ...(allplayers && { allplayers }) });
 }
 
 const sideSwaps = () => apiCalls.filter(({ url }) => url.endsWith("/reverse-side")).length;
@@ -365,5 +369,33 @@ test("a late update from the match the pod left that shares the new match's CT n
   freezetime("Team 1", "Team 2");
   assert.equal(sideSwaps(), 0);
   freezetime("Team 2", "Team 1");
+  assert.equal(sideSwaps(), 1);
+});
+
+// Teamless lineups are always named "Team 1" and "Team 2", with the one that
+// starts CT as "Team 1", so names can't tell a late update from the match the
+// pod left, in its second half, from the new match's first half.
+test("a late update from a teamless match the pod left doesn't flip a teamless new match's sides", async () => {
+  const left = ["76561198000000011", "76561198000000012"];
+  const joined = ["76561198000000021", "76561198000000022"];
+  freezetime("Team 2", "Team 1", left);
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  freezetime("Team 2", "Team 1", left);
+  freezetime("Team 1", "Team 2", joined);
+  assert.equal(sideSwaps(), 0);
+  freezetime("Team 2", "Team 1", joined);
+  assert.equal(sideSwaps(), 1);
+});
+
+test("a new match with the same players as the one left is followed once the switch has settled", async (t) => {
+  const players = ["76561198000000011", "76561198000000012"];
+  freezetime("Team 2", "Team 1", players);
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  freezetime("Team 2", "Team 1", players);
+  t.mock.timers.tick(20_000);
+  freezetime("Team 1", "Team 2", players);
+  assert.equal(sideSwaps(), 0);
+  freezetime("Team 2", "Team 1", players);
   assert.equal(sideSwaps(), 1);
 });

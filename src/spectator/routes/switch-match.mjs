@@ -29,7 +29,7 @@ import { SRC_DIR } from "../env.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
 import { execCfgConnect } from "../cs2/exec-cfg.mjs";
 import { directorState, stopDirector } from "../director/index.mjs";
-import { resetSidesState } from "../reporters/sides.mjs";
+import { resetSidesForSwitch } from "../reporters/sides.mjs";
 import { podTarget, switchPodTarget } from "../state/pod-target.mjs";
 import { sendJson } from "../util/http.mjs";
 
@@ -168,7 +168,7 @@ export async function switchMatchHandler(_req, res, body) {
           matchPassword: body.matchPassword,
           connect: connectTarget(body),
         });
-        resetSidesState();
+        resetSidesForSwitch();
       },
     },
   );

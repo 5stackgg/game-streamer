@@ -12,7 +12,15 @@ const sidesState = {
   lastCtTeamName: null,
   lastTTeamName:  null,
   lastMapName:    null,
+  leftPlayers:    null,
+  leftAtMs:       0,
 };
+
+// cs2 can post an update or two from the match a switch left. Teamless
+// matches all name their lineups "Team 1" and "Team 2", so those updates are
+// told apart by their players instead, until long after cs2 has left, which
+// also covers two matches with the same players.
+const SWITCH_SETTLE_MS = 20_000;
 
 function currentMapName() {
   const raw = gsiState.mapName || "";
@@ -23,6 +31,26 @@ export function resetSidesState() {
   sidesState.lastCtTeamName = null;
   sidesState.lastTTeamName  = null;
   sidesState.lastMapName    = null;
+  sidesState.leftPlayers    = null;
+}
+
+export function resetSidesForSwitch() {
+  resetSidesState();
+  sidesState.leftPlayers = new Set(gsiState.players.keys());
+  sidesState.leftAtMs    = Date.now();
+}
+
+function fromLeftMatch() {
+  const left = sidesState.leftPlayers;
+  if (!left) {
+    return false;
+  }
+  if (Date.now() - sidesState.leftAtMs < SWITCH_SETTLE_MS
+      && [...gsiState.players.keys()].some((steamId) => left.has(steamId))) {
+    return true;
+  }
+  sidesState.leftPlayers = null;
+  return false;
 }
 
 export async function maybeReverseSideOnFreezetime() {
@@ -34,6 +62,7 @@ export async function maybeReverseSideOnFreezetime() {
   const ctName = gsiState.teamCtName;
   if (!ctName) return;
   const tName = gsiState.teamTName;
+  if (fromLeftMatch()) return;
 
   // Map change → reseed the baseline without flipping. The HUD reseed
   // already restores starting sides for the new map.
