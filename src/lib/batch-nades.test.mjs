@@ -42,7 +42,7 @@ const SPEC_CURL = readFileSync(join(LIB_DIR, "common.sh"), "utf8").match(/^spec_
 const dirs = [];
 after(() => {
   for (const dir of dirs) {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
 });
 
