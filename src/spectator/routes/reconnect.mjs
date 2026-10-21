@@ -2,37 +2,12 @@ import process from "node:process";
 
 import { execCfgConnect } from "../cs2/exec-cfg.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
+import { podTarget } from "../state/pod-target.mjs";
 import { sendJson } from "../util/http.mjs";
-
-const NON_BLANK = /\S/;
-function isNonBlankString(v) {
-  return typeof v === "string" && NON_BLANK.test(v);
-}
 
 const UNSAFE_CFG_CHARS = /[";\r\n]/;
 function hasUnsafeCfgChars(v) {
   return typeof v === "string" && UNSAFE_CFG_CHARS.test(v);
-}
-
-function resolveTarget() {
-  if (isNonBlankString(process.env.PLAYCAST_URL)) {
-    return { kind: "playcast", url: process.env.PLAYCAST_URL };
-  }
-  if (isNonBlankString(process.env.CONNECT_TV_ADDR)) {
-    return {
-      kind: "connect",
-      addr: process.env.CONNECT_TV_ADDR,
-      password: process.env.CONNECT_TV_PASSWORD ?? "",
-    };
-  }
-  if (isNonBlankString(process.env.CONNECT_ADDR)) {
-    return {
-      kind: "connect",
-      addr: process.env.CONNECT_ADDR,
-      password: process.env.CONNECT_PASSWORD ?? "",
-    };
-  }
-  return null;
 }
 
 export async function reconnectHandler(_req, res) {
@@ -41,7 +16,7 @@ export async function reconnectHandler(_req, res) {
     return;
   }
 
-  const target = resolveTarget();
+  const target = podTarget().connect;
   if (!target) {
     sendJson(res, 409, {
       error:

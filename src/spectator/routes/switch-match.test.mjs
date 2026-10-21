@@ -5,6 +5,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
+import { Readable } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { applyGsiUpdate } from "../state/gsi.mjs";
 
@@ -13,16 +15,24 @@ const cfgDir = join(root, "cfg");
 const execCfg = join(cfgDir, "5stack_exec.cfg");
 const execCfgTmp = `${execCfg}.tmp`;
 const keystrokes = join(root, "keystrokes");
+const seeded = join(root, "seeded");
+const apiCalls = [];
 let switchMatchHandler;
 let directorState;
+let gsiHandler;
+let reconnectHandler;
+let cameraWhepHandler;
 
 // xdotool finds cs2 already focused and records every key and typed line, each with
-// what the exec cfg held at that moment. The pivot flow is a no-op.
+// what the exec cfg held at that moment. The pivot flow is a no-op, the HUD seed
+// records which match it was asked for, and the api answers every call. The pod
+// booted streaming match-a.
 before(async () => {
   const bin = join(root, "bin");
   mkdirSync(bin);
   mkdirSync(cfgDir);
   mkdirSync(join(root, "src", "flows"), { recursive: true });
+  mkdirSync(join(root, "src", "lib"), { recursive: true });
   writeFileSync(
     join(bin, "xdotool"),
     `#!/bin/sh
@@ -36,18 +46,39 @@ esac
   );
   chmodSync(join(bin, "xdotool"), 0o755);
   writeFileSync(join(root, "src", "flows", "switch-match.sh"), "exit 0\n");
+  writeFileSync(
+    join(root, "src", "lib", "hud-manager.sh"),
+    `seed_hud_db() { printf '%s\\n' "$1" >>"${seeded}"; }\n`,
+  );
+  globalThis.fetch = async (url, init) => {
+    apiCalls.push({ url: String(url), headers: init?.headers ?? {} });
+    return new Response("answer-sdp", { status: 200 });
+  };
   Object.assign(process.env, {
     LOG_DIR: root,
     CS2_CFG_DIR: cfgDir,
     SRC_DIR: join(root, "src"),
     PATH: `${bin}:${process.env.PATH}`,
+    AUTODIRECTOR: "0",
+    STATUS_API_BASE: "http://api.test",
+    MATCH_ID: "match-a",
+    MATCH_PASSWORD: "match-a-password",
+    CONNECT_TV_ADDR: "10.0.0.5:27020",
+    CONNECT_TV_PASSWORD: "match-a-tv",
   });
   ({ switchMatchHandler } = await import("./switch-match.mjs"));
   ({ directorState } = await import("../director/index.mjs"));
+  ({ gsiHandler } = await import("./gsi.mjs"));
+  ({ reconnectHandler } = await import("./reconnect.mjs"));
+  ({ cameraWhepHandler } = await import("./camera.mjs"));
+  const { playingState } = await import("../reporters/demo-playing.mjs");
+  playingState.reported = true;
 });
 
 beforeEach(() => {
   rmSync(keystrokes, { force: true });
+  rmSync(seeded, { force: true });
+  apiCalls.length = 0;
   rmSync(execCfgTmp, { recursive: true, force: true });
   writeFileSync(execCfg, "");
   directorState.bootstrapped = true;
@@ -61,11 +92,15 @@ function onMenu() {
   applyGsiUpdate({ player: { activity: "menu" } });
 }
 
-async function switchMatch(target) {
-  const res = {
-    writeHead(status) { this.status = status; },
-    end(body) { this.body = JSON.parse(body); },
+function response() {
+  return {
+    writeHead(status, headers) { this.status = status; this.type = headers["Content-Type"]; },
+    end(body) { this.body = this.type === "application/json" ? JSON.parse(body) : String(body); },
   };
+}
+
+async function switchMatch(target) {
+  const res = response();
   await switchMatchHandler(null, res, {
     matchId: "match-b",
     oldMatchId: "match-a",
@@ -148,3 +183,83 @@ for (const [where, enter] of [["in a game", inGame], ["on the menu", onMenu]]) {
     assert.equal(directorState.bootstrapped, true);
   });
 }
+
+const STEAM_ID = "76561198000000001";
+
+function gsi(body) {
+  gsiHandler(null, response(), body);
+}
+
+async function reconnect() {
+  const res = response();
+  await reconnectHandler(null, res);
+  return res;
+}
+
+async function whep(steamId) {
+  const req = Object.assign(Readable.from([Buffer.from("offer-sdp")]), { url: `/camera/${steamId}/whep` });
+  const res = response();
+  await cameraWhepHandler(req, res);
+  return res;
+}
+
+async function seededMatches() {
+  for (let i = 0; i < 100 && !existsSync(seeded); i++) {
+    await sleep(50);
+  }
+  await sleep(100);
+  return existsSync(seeded) ? readFileSync(seeded, "utf8").split("\n").filter(Boolean) : [];
+}
+
+test("a map change after a switch reseeds the HUD with the match the pod switched to", async () => {
+  gsi({ map: { name: "de_mirage", phase: "live" } });
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  rmSync(seeded, { force: true });
+  gsi({ map: { name: "de_inferno", phase: "live" } });
+  assert.deepEqual(await seededMatches(), ["match-b"]);
+});
+
+for (const [kind, target, dialed] of [
+  ["server", CONNECT, ['password "hunter2"', "connect 10.0.0.7:27015"]],
+  ["playcast", { mode: "tv", playcastUrl: "https://tv.example/match-b" }, ['playcast "https://tv.example/match-b"']],
+]) {
+  test(`a reconnect after a switch to a ${kind} dials the match the pod switched to`, async () => {
+    inGame();
+    assert.equal((await switchMatch(target)).status, 200);
+    rmSync(keystrokes, { force: true });
+    const res = await reconnect();
+    assert.equal(res.status, 200);
+    assert.deepEqual(ran(), dialed);
+  });
+}
+
+test("the camera proxy signs in as the match the pod switched to", async () => {
+  inGame();
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  applyGsiUpdate({ map: { name: "de_mirage", phase: "live" }, player: { steamid: STEAM_ID } });
+  const res = await whep(STEAM_ID);
+  assert.equal(res.status, 200);
+  assert.deepEqual(apiCalls.map(({ url, headers }) => [url, headers["x-origin-auth"]]), [
+    [`http://api.test/matches/camera/broadcast/match-b/${STEAM_ID}/whep`, "match-b:match-b-password"],
+  ]);
+});
+
+test("a switch the api names no old match for reports the match the pod switched to last", async () => {
+  inGame();
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  const res = await switchMatch({ ...CONNECT, matchId: "match-c", oldMatchId: undefined });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.oldMatchId, "match-b");
+});
+
+test("a switch that answers 503 leaves reconnects on the match the pod was already on", async () => {
+  inGame();
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  mkdirSync(execCfgTmp);
+  const failed = await switchMatch({ matchId: "match-c", connect: { addr: "10.0.0.8:27015", password: "other" } });
+  assert.equal(failed.status, 503);
+  rmSync(execCfgTmp, { recursive: true, force: true });
+  rmSync(keystrokes, { force: true });
+  assert.equal((await reconnect()).status, 200);
+  assert.deepEqual(ran(), ['password "hunter2"', "connect 10.0.0.7:27015"]);
+});

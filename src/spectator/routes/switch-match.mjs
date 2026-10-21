@@ -29,6 +29,7 @@ import { SRC_DIR } from "../env.mjs";
 import { findCs2Window } from "../cs2/window.mjs";
 import { execCfgConnect } from "../cs2/exec-cfg.mjs";
 import { directorState, stopDirector } from "../director/index.mjs";
+import { podTarget, switchPodTarget } from "../state/pod-target.mjs";
 import { sendJson } from "../util/http.mjs";
 
 const NON_BLANK = /\S/;
@@ -77,6 +78,13 @@ function consoleScript(body) {
     return `playcast "${body.playcastUrl}"`;
   }
   return `password "${body.connect.password}"; connect ${body.connect.addr}`;
+}
+
+function connectTarget(body) {
+  if (isNonBlankString(body.playcastUrl)) {
+    return { kind: "playcast", url: body.playcastUrl };
+  }
+  return { kind: "connect", addr: body.connect.addr, password: body.connect.password };
 }
 
 function spawnSwitchFlow(body, oldMatchId) {
@@ -142,7 +150,7 @@ export async function switchMatchHandler(_req, res, body) {
 
   const oldMatchId = isNonBlankString(body.oldMatchId)
     ? body.oldMatchId
-    : process.env.MATCH_ID || "";
+    : podTarget().matchId || "";
 
   const { sent, via } = await execCfgConnect(consoleScript(body));
   if (sent === "unwritable") {
@@ -153,6 +161,14 @@ export async function switchMatchHandler(_req, res, body) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
   }
+
+  // cs2 is already on its way to the new match, so the pod is too, even if the
+  // flow below fails.
+  switchPodTarget({
+    matchId: body.matchId,
+    matchPassword: body.matchPassword,
+    connect: connectTarget(body),
+  });
 
   stopDirector();
   directorState.bootstrapped = false;
