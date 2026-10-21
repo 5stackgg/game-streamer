@@ -169,11 +169,14 @@ do_applaunch() {
   local thread_args=()
   [ "${CS2_THREADS:-0}" != 0 ] && thread_args=(-threads "$CS2_THREADS")
   # -condebug tees cs2's console to csgo/console.log, which is where the
-  # practice plugin's [5stack-render] lines are read from.
+  # practice plugin's [5stack-render] lines are read from. No -console: the
+  # reconnect from the main menu types into the console, and
+  # sendConsoleCommand's grave toggle expects it closed. con_enable 1 in
+  # nade_autoexec keeps it reachable.
   local cs2_args=(
     -windowed -noborder
     -width "$CS2_WIDTH" -height "$CS2_HEIGHT"
-    -novid -nojoy -high -console -condebug
+    -novid -nojoy -high -condebug
     "${thread_args[@]}"
     -disable_loadingplaque
     +cl_disablehtmlmotd 1
