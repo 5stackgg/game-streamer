@@ -150,11 +150,28 @@ export async function switchMatchHandler(_req, res, body) {
     return;
   }
 
-  const oldMatchId = isNonBlankString(body.oldMatchId)
-    ? body.oldMatchId
-    : podTarget().matchId || "";
-
-  const { sent, via } = await execCfgConnect(consoleScript(body));
+  // Both in the queue, so a switch or reconnect behind this one sees the pod
+  // on the new match. cs2 is already on its way there once the connect is sent,
+  // so the pod is too, even if the flow below fails.
+  let oldMatchId = "";
+  const { sent, via } = await execCfgConnect(
+    () => {
+      oldMatchId = isNonBlankString(body.oldMatchId)
+        ? body.oldMatchId
+        : podTarget().matchId || "";
+      return consoleScript(body);
+    },
+    {
+      onSent: () => {
+        switchPodTarget({
+          matchId: body.matchId,
+          matchPassword: body.matchPassword,
+          connect: connectTarget(body),
+        });
+        resetSidesState();
+      },
+    },
+  );
   if (sent === "unwritable") {
     sendJson(res, 503, { error: "exec cfg could not be written" });
     return;
@@ -163,15 +180,6 @@ export async function switchMatchHandler(_req, res, body) {
     sendJson(res, 503, { error: "cs2 console unreachable" });
     return;
   }
-
-  // cs2 is already on its way to the new match, so the pod is too, even if the
-  // flow below fails.
-  switchPodTarget({
-    matchId: body.matchId,
-    matchPassword: body.matchPassword,
-    connect: connectTarget(body),
-  });
-  resetSidesState();
 
   stopDirector();
   directorState.bootstrapped = false;

@@ -321,3 +321,28 @@ test("a switch queued behind another picks the console or the bind from where th
   assert.deepEqual(typed(), ["disconnect", "exec 5stack_exec", "disconnect", "exec 5stack_exec"]);
   assert.deepEqual(ran().slice(-2), ['password "other"', "connect 10.0.0.8:27015"]);
 });
+
+const OTHER = { connect: { addr: "10.0.0.8:27015", password: "other" } };
+
+test("a reconnect queued behind a switch dials the match the switch moved to", async () => {
+  inGame();
+  assert.equal((await switchMatch({ ...OTHER, matchId: "match-c" })).status, 200);
+  onMenu();
+  const switched = switchMatch(CONNECT);
+  await sleep(200);
+  const reconnected = reconnect();
+  assert.equal((await switched).status, 200);
+  assert.equal((await reconnected).status, 200);
+  assert.deepEqual(ran().slice(-2), ['password "hunter2"', "connect 10.0.0.7:27015"]);
+});
+
+test("a switch queued behind another, with no old match named, reports the one the first moved to", async () => {
+  inGame();
+  assert.equal((await switchMatch({ ...OTHER, matchId: "match-c" })).status, 200);
+  onMenu();
+  const first = switchMatch(CONNECT);
+  await sleep(200);
+  const second = switchMatch({ ...OTHER, matchId: "match-d", oldMatchId: undefined });
+  assert.equal((await first).status, 200);
+  assert.equal((await second).body.oldMatchId, "match-b");
+});
