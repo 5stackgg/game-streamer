@@ -350,3 +350,20 @@ test("a switch queued behind another, with no old match named, reports the one t
   assert.equal((await first).status, 200);
   assert.equal((await second).body.oldMatchId, "match-b");
 });
+
+test("a team renamed while on T still flips at the halftime that brings it to CT", async () => {
+  freezetime("Team A", "Team B");
+  freezetime("Team A", "Team B2");
+  freezetime("Team B2", "Team A");
+  assert.equal(sideSwaps(), 1);
+});
+
+test("a late update from the match the pod left that shares the new match's CT name doesn't cost its halftime flip", async () => {
+  freezetime("Team 1", "G2");
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  freezetime("Team 1", "G2");
+  freezetime("Team 1", "Team 2");
+  assert.equal(sideSwaps(), 0);
+  freezetime("Team 2", "Team 1");
+  assert.equal(sideSwaps(), 1);
+});

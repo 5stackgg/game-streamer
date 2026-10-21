@@ -44,12 +44,11 @@ export async function maybeReverseSideOnFreezetime() {
     return;
   }
 
-  if (sidesState.lastCtTeamName === ctName) return;
-
   const prev = sidesState.lastCtTeamName;
   const prevT = sidesState.lastTTeamName;
+  sidesState.lastTTeamName = tName;
+  if (prev === ctName) return;
   sidesState.lastCtTeamName = ctName;
-  sidesState.lastTTeamName  = tName;
 
   // A swap puts the team that was T on CT. Names that are new altogether are
   // another match, such as the one a switch moved to after a late update from
