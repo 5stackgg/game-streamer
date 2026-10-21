@@ -275,3 +275,20 @@ test("every switch hands the flow the stream the pod booted on, which the captur
   assert.equal((await switchMatch({ ...CONNECT, matchId: "match-d", oldMatchId: undefined })).status, 200);
   assert.deepEqual(await lines(flows, 3), ["match-a", "match-a", "match-a"]);
 });
+
+function freezetime(ctName) {
+  const map = { name: "de_mirage", phase: "live", team_ct: { name: ctName } };
+  gsi({ map, round: { phase: "live" } });
+  gsi({ map, round: { phase: "freezetime" } });
+}
+
+const sideSwaps = () => apiCalls.filter(({ url }) => url.endsWith("/reverse-side")).length;
+
+test("a switch to a match on the same map takes its sides as they start, and still follows its halftime", async () => {
+  freezetime("Team A1");
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  freezetime("Team B1");
+  assert.equal(sideSwaps(), 0);
+  freezetime("Team B2");
+  assert.equal(sideSwaps(), 1);
+});
