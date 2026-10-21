@@ -1,5 +1,5 @@
 // node --test src/spectator/routes/switch-match.test.mjs
-import { before, beforeEach, test } from "node:test";
+import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -76,6 +76,10 @@ esac
   ({ resetSidesState } = await import("../reporters/sides.mjs"));
   const { playingState } = await import("../reporters/demo-playing.mjs");
   playingState.reported = true;
+});
+
+after(() => {
+  rmSync(root, { recursive: true, force: true });
 });
 
 beforeEach(() => {

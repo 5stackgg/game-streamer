@@ -1,8 +1,8 @@
 // node --test src/lib/batch-nades.test.mjs
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -39,9 +39,17 @@ exit 0
 // batch-nades.sh runs after common.sh, which is where spec_curl comes from.
 const SPEC_CURL = readFileSync(join(LIB_DIR, "common.sh"), "utf8").match(/^spec_curl\(\) \{\n[\s\S]*?^\}$/m)[0];
 
+const dirs = [];
+after(() => {
+  for (const dir of dirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Runs `script` with batch-nades.sh sourced against a console log that holds `consoleLog`.
 function run(script, { consoleLog = "", self = "-1||||" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "batch-nades-"));
+  dirs.push(dir);
   writeFileSync(join(dir, "curl"), CURL_STUB);
   chmodSync(join(dir, "curl"), 0o755);
   writeFileSync(join(dir, "console.log"), consoleLog);

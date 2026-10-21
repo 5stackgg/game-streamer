@@ -1,5 +1,5 @@
 // node --test src/spectator/routes/nade-reconnect.test.mjs
-import { before, beforeEach, test } from "node:test";
+import { after, before, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,6 +41,10 @@ esac
     PATH: `${bin}:${process.env.PATH}`,
   });
   ({ dispatch } = await import("./index.mjs"));
+});
+
+after(() => {
+  rmSync(root, { recursive: true, force: true });
 });
 
 beforeEach(() => {
