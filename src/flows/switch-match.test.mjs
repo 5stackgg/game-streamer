@@ -137,3 +137,20 @@ test("thumbnails follow the switch: uploaded as the new match, never again as th
     stopDaemons(p);
   }
 });
+
+test("a second switch reports the stream the capture still publishes, not the match it left", () => {
+  const p = pod();
+  try {
+    switchTo(p, {
+      MATCH_ID: "match-c",
+      MATCH_PASSWORD: "password-c",
+      OLD_MATCH_ID: "match-b",
+      STREAM_ID: "match-a",
+    });
+
+    const state = JSON.parse(readFileSync(join(p.logDir, "status.state"), "utf8"));
+    assert.equal(state.stream_url, "srt://mediamtx.test:8890?streamid=publish:match-a");
+  } finally {
+    stopDaemons(p);
+  }
+});

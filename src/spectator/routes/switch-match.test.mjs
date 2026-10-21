@@ -16,6 +16,7 @@ const execCfg = join(cfgDir, "5stack_exec.cfg");
 const execCfgTmp = `${execCfg}.tmp`;
 const keystrokes = join(root, "keystrokes");
 const seeded = join(root, "seeded");
+const flows = join(root, "flows");
 const apiCalls = [];
 let switchMatchHandler;
 let directorState;
@@ -45,7 +46,7 @@ esac
 `,
   );
   chmodSync(join(bin, "xdotool"), 0o755);
-  writeFileSync(join(root, "src", "flows", "switch-match.sh"), "exit 0\n");
+  writeFileSync(join(root, "src", "flows", "switch-match.sh"), `printf '%s\\n' "\${STREAM_ID:-<unset>}" >>"${flows}"\n`);
   writeFileSync(
     join(root, "src", "lib", "hud-manager.sh"),
     `seed_hud_db() { printf '%s\\n' "$1" >>"${seeded}"; }\n`,
@@ -78,6 +79,7 @@ esac
 beforeEach(() => {
   rmSync(keystrokes, { force: true });
   rmSync(seeded, { force: true });
+  rmSync(flows, { force: true });
   apiCalls.length = 0;
   rmSync(execCfgTmp, { recursive: true, force: true });
   writeFileSync(execCfg, "");
@@ -203,13 +205,15 @@ async function whep(steamId) {
   return res;
 }
 
-async function seededMatches() {
-  for (let i = 0; i < 100 && !existsSync(seeded); i++) {
+async function lines(path, count) {
+  for (let i = 0; i < 100 && (!existsSync(path) || readFileSync(path, "utf8").split("\n").filter(Boolean).length < count); i++) {
     await sleep(50);
   }
   await sleep(100);
-  return existsSync(seeded) ? readFileSync(seeded, "utf8").split("\n").filter(Boolean) : [];
+  return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : [];
 }
+
+const seededMatches = () => lines(seeded, 1);
 
 test("a map change after a switch reseeds the HUD with the match the pod switched to", async () => {
   gsi({ map: { name: "de_mirage", phase: "live" } });
@@ -262,4 +266,12 @@ test("a switch that answers 503 leaves reconnects on the match the pod was alrea
   rmSync(keystrokes, { force: true });
   assert.equal((await reconnect()).status, 200);
   assert.deepEqual(ran(), ['password "hunter2"', "connect 10.0.0.7:27015"]);
+});
+
+test("every switch hands the flow the stream the pod booted on, which the capture keeps publishing", async () => {
+  inGame();
+  assert.equal((await switchMatch(CONNECT)).status, 200);
+  assert.equal((await switchMatch({ ...CONNECT, matchId: "match-c", oldMatchId: "match-b" })).status, 200);
+  assert.equal((await switchMatch({ ...CONNECT, matchId: "match-d", oldMatchId: undefined })).status, 200);
+  assert.deepEqual(await lines(flows, 3), ["match-a", "match-a", "match-a"]);
 });

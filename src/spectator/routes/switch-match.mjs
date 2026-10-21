@@ -100,6 +100,7 @@ function spawnSwitchFlow(body, oldMatchId) {
     MATCH_ID: body.matchId,
     MATCH_PASSWORD: body.matchPassword,
     OLD_MATCH_ID: oldMatchId || "",
+    STREAM_ID: process.env.MATCH_ID || "",
     MODE: body.mode,
   };
 
