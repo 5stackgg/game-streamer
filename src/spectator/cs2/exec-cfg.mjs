@@ -3,6 +3,7 @@ import process from "node:process";
 
 import { EXEC_CFG_KEY } from "../constants.mjs";
 import { EXEC_CFG_PATH } from "../env.mjs";
+import { gsiState } from "../state/gsi.mjs";
 import { sendConsoleCommand, sendKey } from "./input.mjs";
 
 // Serialized so two in-flight calls can't race the cfg rename
@@ -30,10 +31,42 @@ export async function execCfgCommand(cmd) {
   });
 }
 
-// For a cmd that must never be typed where the stream can see it: no console
-// fallback, and `deliver` runs only once the cfg holds the cmd, inside the chain
-// so no other input lands in the middle of it.
-export async function execCfgUntyped(cmd, deliver) {
+// For `connect`/`playcast`, whose address and password must never be typed
+// where the stream can see them. In a game either one leaves the current game by
+// itself.
+export async function execCfgConnect(cmd) {
+  const viaBind = inGame();
+  const sent = await execCfgUntyped(cmd, viaBind ? execCfgFromBind : disconnectThenExec);
+  return { sent, via: viaBind ? "bind" : "console" };
+}
+
+// GSI heartbeats every second, so a map name older than this is a client that
+// left the game without saying so.
+const GSI_IN_GAME_MAX_AGE_MS = 5_000;
+
+function inGame() {
+  return (
+    gsiState.mapName !== null &&
+    gsiState.localActivity !== "menu" &&
+    Date.now() - gsiState.lastReceivedMs < GSI_IN_GAME_MAX_AGE_MS
+  );
+}
+
+// Binds don't fire on the main menu or behind its Disconnected dialog, so from
+// there the console is the only way in, and it is on the stream: only the
+// disconnect and the exec are typed. A disconnect in the same batch as the
+// connect drops cs2 to the menu before the connect runs, hence the gap.
+async function disconnectThenExec() {
+  if (!(await sendConsoleCommand("disconnect"))) {
+    return false;
+  }
+  await new Promise((r) => setTimeout(r, 1000));
+  return execCfgFromConsole();
+}
+
+// No console fallback, and `deliver` runs only once the cfg holds the cmd,
+// inside the chain so no other input lands in the middle of it.
+async function execCfgUntyped(cmd, deliver) {
   return serialized(async () => {
     if (!writeExecCfg(cmd)) {
       return "unwritable";
@@ -44,13 +77,13 @@ export async function execCfgUntyped(cmd, deliver) {
 
 // Via sendKey so the flush key gets the same focus recovery as every other
 // input path — a raw xdotool key silently no-ops when focus has drifted.
-export function execCfgFromBind() {
+function execCfgFromBind() {
   return sendKey(EXEC_CFG_KEY);
 }
 
 // For where the BACKSPACE bind can't fire (the main menu and its Disconnected
 // dialog).
-export function execCfgFromConsole() {
+function execCfgFromConsole() {
   return sendConsoleCommand("exec 5stack_exec");
 }
 
