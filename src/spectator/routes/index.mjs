@@ -42,6 +42,7 @@ import {
   xrayHandler,
 } from "./demo.mjs";
 import { nadeSelfHandler } from "./nade-self.mjs";
+import { nadeReconnectHandler } from "./nade-reconnect.mjs";
 import { renderClipHandler } from "./render-clip.mjs";
 import { switchMatchHandler } from "./switch-match.mjs";
 import { reconnectHandler } from "./reconnect.mjs";
@@ -103,6 +104,8 @@ const ROUTES = new Map([
   ["POST /spec/skip-shaders", skipShadersHandler],
   ["POST /spec/xray",         specXrayHandler],
   ["POST /spec/scoreboard",   specScoreboardHandler],
+
+  ["POST /nade/reconnect", nadeReconnectHandler],
 
   ["POST /demo/toggle",      toggleHandler],
   ["POST /demo/pause",       pauseHandler],
