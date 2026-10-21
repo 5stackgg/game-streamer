@@ -1,6 +1,5 @@
-import process from "node:process";
-
 import { gsiState } from "../state/gsi.mjs";
+import { podTarget } from "../state/pod-target.mjs";
 import { STATUS_API_BASE } from "../env.mjs";
 import { readBody, sendBodyError, sendJson } from "../util/http.mjs";
 
@@ -16,9 +15,7 @@ const STEAM_ID_PATTERN = /^\d{17}$/;
 const SDP_BODY_LIMIT = 64 * 1024;
 
 function matchAuth() {
-  const matchId = process.env.MATCH_ID ?? "";
-  const password =
-    process.env.MATCH_PASSWORD ?? process.env.CONNECT_TV_PASSWORD ?? "";
+  const { matchId, matchPassword: password } = podTarget();
 
   if (!matchId || !password || !STATUS_API_BASE) {
     return null;

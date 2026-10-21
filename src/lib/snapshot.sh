@@ -160,6 +160,19 @@ start_snapshot_loop() {
   log "snapshot: started (interval=${SNAPSHOT_BOOT_INTERVAL_SECONDS}s pre-GSI/${SNAPSHOT_INTERVAL_SECONDS}s playing ${SNAPSHOT_WIDTH}x${SNAPSHOT_HEIGHT} q=${SNAPSHOT_QUALITY})"
 }
 
+# For a pod switched to another match, so thumbnails post as it. GSI keeps
+# flowing across a switch and nothing writes the marker again, so it stays.
+restart_snapshot_loop() {
+  stop_snapshot_loop
+  if [ -z "$(_snapshot_targets)" ]; then
+    log "snapshot: disabled (no snapshot target for this pod)"
+    return 0
+  fi
+  _snapshot_loop &
+  echo $! >"$SNAPSHOT_PID_FILE"
+  log "snapshot: restarted for ${MATCH_ID:-<unset>}"
+}
+
 stop_snapshot_loop() {
   local pid
   if [ -f "$SNAPSHOT_PID_FILE" ]; then

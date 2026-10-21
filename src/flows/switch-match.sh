@@ -8,6 +8,8 @@
 #   MATCH_PASSWORD   raw match password for status-reporter auth
 #   MODE             "live" | "tv"
 #   OLD_MATCH_ID     previous match id (may be empty on first switch)
+#   STREAM_ID        the match the pod booted for: the capture publishes under
+#                    its id for the pod's whole life, however often it switches
 #   CONNECT_ADDR / CONNECT_PASSWORD   (for live mode)  OR
 #   PLAYCAST_URL                      (for tv+playcast mode)
 #
@@ -26,14 +28,17 @@ SCRIPT_TAG=switch-match
 . "$LIB_DIR/hud-manager.sh"
 # shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/snapshot.sh"
 
 : "${MATCH_ID:=}"
 : "${MATCH_PASSWORD:=}"
 : "${OLD_MATCH_ID:=}"
+: "${STREAM_ID:=}"
 : "${MODE:=live}"
 
-if [ -z "$MATCH_ID" ] || [ -z "$MATCH_PASSWORD" ]; then
-  die "MATCH_ID and MATCH_PASSWORD are required"
+if [ -z "$MATCH_ID" ] || [ -z "$MATCH_PASSWORD" ] || [ -z "$STREAM_ID" ]; then
+  die "MATCH_ID, MATCH_PASSWORD and STREAM_ID are required"
 fi
 
 log "pivoting pod: ${OLD_MATCH_ID:-<none>} -> $MATCH_ID (mode=$MODE)"
@@ -50,7 +55,7 @@ rm -f "${LOG_DIR}/status.boot.epoch" "${LOG_DIR}/status.last" \
       "${LOG_DIR}/status.state" "${LOG_DIR}/status.ack" 2>/dev/null || true
 export MATCH_ID MATCH_PASSWORD
 start_status_reporter
-STREAM_ID="${OLD_MATCH_ID:-$MATCH_ID}"
+restart_snapshot_loop
 report_status status=live "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${STREAM_ID}"
 
 log "switch-match flow done"

@@ -33,11 +33,15 @@ export async function execCfgCommand(cmd) {
 
 // For `connect`/`playcast`, whose address and password must never be typed
 // where the stream can see them. In a game either one leaves the current game by
-// itself.
+// itself. The path is picked once its turn in the queue comes: a connect queued
+// behind another finds the client wherever that one left it.
 export async function execCfgConnect(cmd) {
-  const viaBind = inGame();
-  const sent = await execCfgUntyped(cmd, viaBind ? execCfgFromBind : disconnectThenExec);
-  return { sent, via: viaBind ? "bind" : "console" };
+  let via = null;
+  const sent = await execCfgUntyped(cmd, () => {
+    via = inGame() ? "bind" : "console";
+    return via === "bind" ? execCfgFromBind() : disconnectThenExec();
+  });
+  return { sent, via };
 }
 
 // GSI heartbeats every second, so a map name older than this is a client that

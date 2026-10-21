@@ -5,6 +5,7 @@ import path from "node:path";
 
 import { AUTODIRECTOR_DEFAULT, HUD_GSI_FORWARD_URL, LOG_DIR, SRC_DIR } from "../env.mjs";
 import { applyGsiUpdate, gsiState } from "../state/gsi.mjs";
+import { podTarget } from "../state/pod-target.mjs";
 import { bumpActivity, reconcileTickFromGsi } from "../state/demo.mjs";
 import { directorState, directorTick, startDirector } from "../director/index.mjs";
 import { reportDemoPlayingOnce } from "../reporters/demo-playing.mjs";
@@ -13,7 +14,7 @@ import { sendJson } from "../util/http.mjs";
 
 let lastSeededMap = null;
 function maybeReseedHudOnMapChange(currentMapName) {
-  const matchId = process.env.MATCH_ID;
+  const { matchId } = podTarget();
   if (!matchId || !currentMapName) return;
   if (lastSeededMap === null) {
     lastSeededMap = currentMapName;
@@ -28,7 +29,7 @@ function maybeReseedHudOnMapChange(currentMapName) {
   const child = spawn(
     "bash",
     ["-c", `. "${SRC_DIR}/lib/hud-manager.sh" && seed_hud_db "$MATCH_ID"`],
-    { env: process.env, stdio: ["ignore", "inherit", "inherit"], detached: true },
+    { env: { ...process.env, MATCH_ID: matchId }, stdio: ["ignore", "inherit", "inherit"], detached: true },
   );
   child.unref();
 }
