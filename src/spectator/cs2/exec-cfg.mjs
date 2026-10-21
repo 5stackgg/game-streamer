@@ -33,13 +33,30 @@ export async function execCfgCommand(cmd) {
 
 // For `connect`/`playcast`, whose address and password must never be typed
 // where the stream can see them. In a game either one leaves the current game by
-// itself. The path is picked once its turn in the queue comes: a connect queued
-// behind another finds the client wherever that one left it.
-export async function execCfgConnect(cmd) {
+// itself. Everything is decided once its turn in the queue comes, since a connect
+// queued behind another finds the pod and the client wherever that one left
+// them: `command` may be a function, returning null or undefined to send
+// nothing, and `onSent` runs before the next caller's turn. Unlike
+// execCfgCommand there is no console fallback: a cfg that can't be written
+// sends nothing.
+export async function execCfgConnect(command, { onSent } = {}) {
   let via = null;
-  const sent = await execCfgUntyped(cmd, () => {
+  const sent = await serialized(async () => {
+    const cmd = typeof command === "function" ? command() : command;
+    if (cmd == null) {
+      return "skipped";
+    }
+    if (!writeExecCfg(cmd)) {
+      return "unwritable";
+    }
     via = inGame() ? "bind" : "console";
-    return via === "bind" ? execCfgFromBind() : disconnectThenExec();
+    if (!(await (via === "bind" ? execCfgFromBind() : disconnectThenExec()))) {
+      return "unreachable";
+    }
+    if (onSent) {
+      onSent();
+    }
+    return "sent";
   });
   return { sent, via };
 }
@@ -66,17 +83,6 @@ async function disconnectThenExec() {
   }
   await new Promise((r) => setTimeout(r, 1000));
   return execCfgFromConsole();
-}
-
-// No console fallback, and `deliver` runs only once the cfg holds the cmd,
-// inside the chain so no other input lands in the middle of it.
-async function execCfgUntyped(cmd, deliver) {
-  return serialized(async () => {
-    if (!writeExecCfg(cmd)) {
-      return "unwritable";
-    }
-    return (await deliver()) ? "sent" : "unreachable";
-  });
 }
 
 // Via sendKey so the flush key gets the same focus recovery as every other

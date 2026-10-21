@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import process from "node:process";
@@ -94,7 +94,7 @@ async function until(check, what) {
 }
 
 // The daemons the flow leaves behind outlive it, as they do on a pod.
-function stopDaemons({ logDir }) {
+function teardown({ root, logDir }) {
   for (const file of ["snapshot.pid", "status.daemon.pid"]) {
     const path = join(logDir, file);
     if (existsSync(path)) {
@@ -105,6 +105,7 @@ function stopDaemons({ logDir }) {
       }
     }
   }
+  rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 
 function switchTo(pod, env) {
@@ -134,7 +135,7 @@ test("thumbnails follow the switch: uploaded as the new match, never again as th
     assert.equal(snapshots(p, "match-a").length, asA);
     assert.deepEqual([...new Set(snapshots(p, "match-b").map(([, auth]) => auth))], ["match-b:password-b"]);
   } finally {
-    stopDaemons(p);
+    teardown(p);
   }
 });
 
@@ -151,6 +152,6 @@ test("a second switch reports the stream the capture still publishes, not the ma
     const state = JSON.parse(readFileSync(join(p.logDir, "status.state"), "utf8"));
     assert.equal(state.stream_url, "srt://mediamtx.test:8890?streamid=publish:match-a");
   } finally {
-    stopDaemons(p);
+    teardown(p);
   }
 });

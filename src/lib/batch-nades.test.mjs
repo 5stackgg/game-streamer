@@ -1,8 +1,8 @@
 // node --test src/lib/batch-nades.test.mjs
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -39,9 +39,17 @@ exit 0
 // batch-nades.sh runs after common.sh, which is where spec_curl comes from.
 const SPEC_CURL = readFileSync(join(LIB_DIR, "common.sh"), "utf8").match(/^spec_curl\(\) \{\n[\s\S]*?^\}$/m)[0];
 
+const dirs = [];
+after(() => {
+  for (const dir of dirs) {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
 // Runs `script` with batch-nades.sh sourced against a console log that holds `consoleLog`.
 function run(script, { consoleLog = "", self = "-1||||" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "batch-nades-"));
+  dirs.push(dir);
   writeFileSync(join(dir, "curl"), CURL_STUB);
   chmodSync(join(dir, "curl"), 0o755);
   writeFileSync(join(dir, "console.log"), consoleLog);
@@ -133,4 +141,19 @@ test("a spec-server that never answers still counts the reconnect, in case it la
   `);
   assert.deepEqual(sent, [RECONNECT, RECONNECT]);
   assert.equal(stdout.trim(), "2");
+});
+
+// The account's saved config can turn the console off after the autoexec, and
+// both reconnects take the console path from the menu. These two are what the
+// gate runs through the bind before the first lineup's nade_view.cfg.
+test("the gate's team press and console probe turn the console back on", () => {
+  const { sent } = run(`
+    sleep() { :; }
+    nade_join_team
+    nade_gate_probe
+  `, { self: "1000|76561198000000001||0|playing" });
+  assert.deepEqual(sent, [
+    ["/demo/exec", { cmd: "con_enable 1; jointeam 3" }],
+    ["/demo/exec", { cmd: "con_enable 1; status" }],
+  ]);
 });
