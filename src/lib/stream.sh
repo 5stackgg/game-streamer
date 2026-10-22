@@ -129,7 +129,8 @@ start_capture() {
 
   # Resolve the audio source up front (both capture paths use it). Pin to our
   # named null sink's .monitor — pactl's default can drift to hud-manager's Pulse
-  # client / silence.
+  # client / silence. Both legs use re-timestamp + audiorate: the monitor runs
+  # ~240ppm fast, so sample-count stamps drift ahead of video.
   local pulse_source=""
   if [ "$audio" = 1 ]; then
     pulse_source="${pulse_sink}.monitor"
@@ -206,7 +207,7 @@ start_capture() {
       pipeline="$outchain ! queue ! mux. \
 $cs2_src \
 $hud_src \
-pulsesrc device=$pulse_source buffer-time=400000 provide-clock=false ! audio/x-raw,rate=48000,channels=2 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
+pulsesrc device=$pulse_source buffer-time=400000 provide-clock=false slave-method=re-timestamp ! audio/x-raw,rate=48000,channels=2 ! audiorate tolerance=20000000 ! audioconvert ! audioresample ! opusenc bitrate=128000 ! opusparse ! queue leaky=downstream max-size-time=500000000 max-size-buffers=0 max-size-bytes=0 ! mux. \
 mpegtsmux name=mux alignment=7 ! srtsink uri=$url latency=$srt_latency auto-reconnect=false"
     else
       pipeline="$outchain ! mpegtsmux alignment=7 ! srtsink uri=$url latency=$srt_latency auto-reconnect=false \
@@ -279,8 +280,9 @@ $hud_src"
           ! $enc \
           ! $parse \
           ! queue ! mux. \
-        pulsesrc device="$pulse_source" buffer-time=400000 provide-clock=false \
+        pulsesrc device="$pulse_source" buffer-time=400000 provide-clock=false slave-method=re-timestamp \
           ! audio/x-raw,rate=48000,channels=2 \
+          ! audiorate tolerance=20000000 \
           ! audioconvert \
           ! audioresample \
           ! opusenc bitrate=128000 \
